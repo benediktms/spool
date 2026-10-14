@@ -1,0 +1,790 @@
+{
+  "$defs": {
+    "BlockClass": {
+      "enum": [
+        "text",
+        "attachment",
+        "tool_arguments",
+        "tool_result",
+        "raw_record"
+      ],
+      "type": "string"
+    },
+    "ContextCount": {
+      "properties": {
+        "requested": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "resolved": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "requested",
+        "resolved"
+      ],
+      "type": "object"
+    },
+    "CoverageOut": {
+      "properties": {
+        "reasons": {
+          "description": "Stable reason codes when `partial`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "status": {
+          "$ref": "#/$defs/CoverageStatus"
+        }
+      },
+      "required": [
+        "status",
+        "reasons"
+      ],
+      "type": "object"
+    },
+    "CoverageStatus": {
+      "enum": [
+        "complete",
+        "partial"
+      ],
+      "type": "string"
+    },
+    "Encoding": {
+      "enum": [
+        "utf8",
+        "base64"
+      ],
+      "type": "string"
+    },
+    "FidelityOut": {
+      "enum": [
+        "verbatim",
+        "normalized_json",
+        "metadata"
+      ],
+      "type": "string"
+    },
+    "Fragment": {
+      "description": "One content fragment of a block. `[start_byte, end_byte)` is a half-open range over the full\ndecoded block bytes (not escaped or base64 positions).",
+      "properties": {
+        "block_ref": {
+          "type": "string"
+        },
+        "data": {
+          "type": "string"
+        },
+        "encoding": {
+          "$ref": "#/$defs/Encoding"
+        },
+        "end_byte": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "fidelity": {
+          "$ref": "#/$defs/FidelityOut"
+        },
+        "is_last": {
+          "description": "The fragment ends at `total_bytes` (not: the whole block is on this page).",
+          "type": "boolean"
+        },
+        "kind": {
+          "$ref": "#/$defs/BlockClass"
+        },
+        "start_byte": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "total_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "block_ref",
+        "kind",
+        "encoding",
+        "fidelity",
+        "data",
+        "start_byte",
+        "end_byte",
+        "total_bytes",
+        "is_last"
+      ],
+      "type": "object"
+    },
+    "Item": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/MessageItem",
+          "properties": {
+            "kind": {
+              "const": "message",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/ToolCallItem",
+          "properties": {
+            "kind": {
+              "const": "tool_call",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/ToolResultItem",
+          "properties": {
+            "kind": {
+              "const": "tool_result",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "$ref": "#/$defs/RawRecordItem",
+          "properties": {
+            "kind": {
+              "const": "raw_record",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Locator": {
+      "properties": {
+        "len": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "offset": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "offset",
+        "len"
+      ],
+      "type": "object"
+    },
+    "MessageItem": {
+      "properties": {
+        "blocks": {
+          "items": {
+            "$ref": "#/$defs/Fragment"
+          },
+          "type": "array"
+        },
+        "item_end": {
+          "description": "This page reaches the end of the item's final block.",
+          "type": "boolean"
+        },
+        "item_ref": {
+          "type": "string"
+        },
+        "message_ref": {
+          "type": "string"
+        },
+        "phase": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provenance": {
+          "$ref": "#/$defs/Provenance"
+        },
+        "role": {
+          "$ref": "#/$defs/RoleOut"
+        },
+        "timestamp": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "turn_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "message_ref",
+        "role",
+        "phase",
+        "item_ref",
+        "timestamp",
+        "turn_ref",
+        "blocks",
+        "item_end",
+        "provenance"
+      ],
+      "type": "object"
+    },
+    "Navigation": {
+      "description": "References that open NEW reads outside the selected window; not cursor substitutes.",
+      "properties": {
+        "after_message_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "before_message_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "before_message_ref",
+        "after_message_ref"
+      ],
+      "type": "object"
+    },
+    "Origin": {
+      "enum": [
+        "verified_source",
+        "indexed_snapshot"
+      ],
+      "type": "string"
+    },
+    "PageInfo": {
+      "properties": {
+        "next_cursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "selection_exhausted": {
+          "type": "boolean"
+        },
+        "stop_reason": {
+          "$ref": "#/$defs/StopReason"
+        }
+      },
+      "required": [
+        "next_cursor",
+        "selection_exhausted",
+        "stop_reason"
+      ],
+      "type": "object"
+    },
+    "Provenance": {
+      "properties": {
+        "locator": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Locator"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Validated hint of the record's raw source-byte locator."
+        },
+        "native_record_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "origin": {
+          "$ref": "#/$defs/Origin"
+        },
+        "record_digest": {
+          "description": "Expected digest of the original record (blake3, first 32 hex chars).",
+          "type": "string"
+        },
+        "record_ref": {
+          "description": "Opaque reference to the original record in this snapshot.",
+          "type": "string"
+        },
+        "source_ref": {
+          "description": "Opaque reference to the source file identity (never a path).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "origin",
+        "source_ref",
+        "record_ref",
+        "record_digest",
+        "native_record_id",
+        "locator"
+      ],
+      "type": "object"
+    },
+    "RawRecordItem": {
+      "properties": {
+        "blocks": {
+          "items": {
+            "$ref": "#/$defs/Fragment"
+          },
+          "type": "array"
+        },
+        "item_end": {
+          "description": "This page reaches the end of the item's final block.",
+          "type": "boolean"
+        },
+        "item_ref": {
+          "type": "string"
+        },
+        "provenance": {
+          "$ref": "#/$defs/Provenance"
+        },
+        "record_kind": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "turn_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "record_kind",
+        "item_ref",
+        "timestamp",
+        "turn_ref",
+        "blocks",
+        "item_end",
+        "provenance"
+      ],
+      "type": "object"
+    },
+    "ResultState": {
+      "oneOf": [
+        {
+          "enum": [
+            "result_available"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "no_result_in_snapshot",
+          "description": "No linked result exists in this snapshot (not a claim the call is running or failed).",
+          "type": "string"
+        }
+      ]
+    },
+    "RoleOut": {
+      "enum": [
+        "user",
+        "assistant"
+      ],
+      "type": "string"
+    },
+    "SelKind": {
+      "enum": [
+        "session",
+        "match",
+        "message",
+        "range",
+        "item"
+      ],
+      "type": "string"
+    },
+    "SelectionOut": {
+      "properties": {
+        "after": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContextCount"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "anchor_message_refs": {
+          "description": "Messages the search match / message reference anchors to (range: both endpoints).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "before": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContextCount"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Match/message selections only."
+        },
+        "branch_ref": {
+          "description": "Resolved persisted path. Null when the selection has no messages.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "from_message_ref": {
+          "description": "First inclusive conversational message of the selected window.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "item_ref": {
+          "description": "Item selections only.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "$ref": "#/$defs/SelKind"
+        },
+        "through_message_ref": {
+          "description": "Last inclusive conversational message of the selected window.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "branch_ref",
+        "from_message_ref",
+        "through_message_ref",
+        "anchor_message_refs"
+      ],
+      "type": "object"
+    },
+    "SessionInfo": {
+      "properties": {
+        "native_id": {
+          "type": "string"
+        },
+        "native_title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "source_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id",
+        "source_id",
+        "native_id",
+        "native_title"
+      ],
+      "type": "object"
+    },
+    "SnapshotInfo": {
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/SnapshotKind"
+        },
+        "lease_expires_at": {
+          "description": "Expiry of the lease that retains this read's manifest and all handles it issues.",
+          "type": "string"
+        },
+        "observed_at": {
+          "description": "RFC 3339 UTC.",
+          "type": "string"
+        },
+        "snapshot_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "snapshot_id",
+        "kind",
+        "observed_at",
+        "lease_expires_at"
+      ],
+      "type": "object"
+    },
+    "SnapshotKind": {
+      "enum": [
+        "indexed",
+        "source_read"
+      ],
+      "type": "string"
+    },
+    "SourcePolicy": {
+      "enum": [
+        "prefer_source",
+        "require_source",
+        "indexed_only"
+      ],
+      "type": "string"
+    },
+    "StopReason": {
+      "enum": [
+        "selection_end",
+        "byte_limit",
+        "item_limit"
+      ],
+      "type": "string"
+    },
+    "ToolCallItem": {
+      "properties": {
+        "blocks": {
+          "items": {
+            "$ref": "#/$defs/Fragment"
+          },
+          "type": "array"
+        },
+        "item_end": {
+          "description": "This page reaches the end of the item's final block.",
+          "type": "boolean"
+        },
+        "item_ref": {
+          "type": "string"
+        },
+        "native_call_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "outside_message_window": {
+          "description": "Included by turn closure but outside the selected message window.",
+          "type": "boolean"
+        },
+        "provenance": {
+          "$ref": "#/$defs/Provenance"
+        },
+        "result_refs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "result_state": {
+          "$ref": "#/$defs/ResultState"
+        },
+        "timestamp": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tool_name": {
+          "type": "string"
+        },
+        "tool_ref": {
+          "type": "string"
+        },
+        "turn_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "tool_ref",
+        "native_call_id",
+        "tool_name",
+        "result_refs",
+        "result_state",
+        "outside_message_window",
+        "item_ref",
+        "timestamp",
+        "turn_ref",
+        "blocks",
+        "item_end",
+        "provenance"
+      ],
+      "type": "object"
+    },
+    "ToolResultItem": {
+      "properties": {
+        "blocks": {
+          "items": {
+            "$ref": "#/$defs/Fragment"
+          },
+          "type": "array"
+        },
+        "is_error": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "item_end": {
+          "description": "This page reaches the end of the item's final block.",
+          "type": "boolean"
+        },
+        "item_ref": {
+          "type": "string"
+        },
+        "native_call_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "outside_message_window": {
+          "type": "boolean"
+        },
+        "provenance": {
+          "$ref": "#/$defs/Provenance"
+        },
+        "timestamp": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tool_ref": {
+          "description": "Null for orphan results (no proven link to a call on the selected path).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "turn_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "tool_ref",
+        "native_call_id",
+        "is_error",
+        "outside_message_window",
+        "item_ref",
+        "timestamp",
+        "turn_ref",
+        "blocks",
+        "item_end",
+        "provenance"
+      ],
+      "type": "object"
+    },
+    "View": {
+      "enum": [
+        "conversation",
+        "with_tools",
+        "raw_records"
+      ],
+      "type": "string"
+    },
+    "Warning": {
+      "description": "Typed, bounded, content-free notice.",
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "coverage": {
+      "$ref": "#/$defs/CoverageOut"
+    },
+    "items": {
+      "items": {
+        "$ref": "#/$defs/Item"
+      },
+      "type": "array"
+    },
+    "navigation": {
+      "$ref": "#/$defs/Navigation"
+    },
+    "page": {
+      "$ref": "#/$defs/PageInfo"
+    },
+    "selection": {
+      "$ref": "#/$defs/SelectionOut"
+    },
+    "session": {
+      "$ref": "#/$defs/SessionInfo"
+    },
+    "snapshot": {
+      "$ref": "#/$defs/SnapshotInfo"
+    },
+    "source_policy": {
+      "$ref": "#/$defs/SourcePolicy"
+    },
+    "view": {
+      "$ref": "#/$defs/View"
+    },
+    "warnings": {
+      "items": {
+        "$ref": "#/$defs/Warning"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "session",
+    "snapshot",
+    "view",
+    "source_policy",
+    "selection",
+    "items",
+    "page",
+    "navigation",
+    "coverage",
+    "warnings"
+  ],
+  "title": "ReadSessionOutput",
+  "type": "object"
+}

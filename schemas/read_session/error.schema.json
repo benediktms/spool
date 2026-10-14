@@ -1,0 +1,111 @@
+{
+  "$defs": {
+    "BranchOption": {
+      "properties": {
+        "branch_ref": {
+          "type": "string"
+        },
+        "is_active_leaf": {
+          "description": "The adapter durably recorded this leaf as the active one (never chosen implicitly).",
+          "type": "boolean"
+        },
+        "leaf_message_ref": {
+          "type": "string"
+        },
+        "leaf_timestamp": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "branch_ref",
+        "leaf_message_ref",
+        "leaf_timestamp",
+        "is_active_leaf"
+      ],
+      "type": "object"
+    },
+    "ErrorBody": {
+      "properties": {
+        "branch_options": {
+          "description": "`BRANCH_REQUIRED` only: at most 50 options and within `max_bytes`.",
+          "items": {
+            "$ref": "#/$defs/BranchOption"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "branch_options_truncated": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "code": {
+          "$ref": "#/$defs/ErrorCode"
+        },
+        "limit": {
+          "description": "`RESOURCE_LIMIT` only: which budget was hit.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "recovery": {
+          "description": "For example `re_search`, `new_read`, `select_branch`, `change_request`, `retry_later`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "retryable",
+        "message"
+      ],
+      "type": "object"
+    },
+    "ErrorCode": {
+      "enum": [
+        "INVALID_ARGUMENT",
+        "SESSION_NOT_FOUND",
+        "SESSION_NOT_INDEXED",
+        "FORBIDDEN",
+        "BRANCH_REQUIRED",
+        "INVALID_RANGE",
+        "VIEW_NOT_SUPPORTED",
+        "SOURCE_POLICY_CONFLICT",
+        "SOURCE_UNAVAILABLE",
+        "SOURCE_CHANGED",
+        "STALE_REFERENCE",
+        "CURSOR_EXPIRED",
+        "UNSUPPORTED_FORMAT",
+        "RESOURCE_LIMIT",
+        "STORAGE_ERROR"
+      ],
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "error": {
+      "$ref": "#/$defs/ErrorBody"
+    }
+  },
+  "required": [
+    "error"
+  ],
+  "title": "ReadSessionError",
+  "type": "object"
+}

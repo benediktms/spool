@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Illustration of what `spool service install` writes to ~/Library/LaunchAgents/com.spool.daemon.plist.
+  Do not install this file by hand: the command renders the real absolute paths and the SpoolManaged
+  marker that lets it recognise (and never overwrite anything but) its own definition.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.spool.daemon</string>
+  <key>SpoolManaged</key><true/>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/ABSOLUTE/PATH/TO/spool</string>
+    <string>daemon</string>
+    <string>run</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key><false/>
+  </dict>
+  <key>ThrottleInterval</key><integer>30</integer>
+  <key>ExitTimeOut</key><integer>20</integer>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>/Users/YOU/Library/Logs/Spool/daemon.stdout.log</string>
+  <key>StandardErrorPath</key><string>/Users/YOU/Library/Logs/Spool/daemon.stderr.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key><string>/Users/YOU</string>
+  </dict>
+</dict>
+</plist>

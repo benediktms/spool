@@ -1,0 +1,170 @@
+{
+  "description": "Tool activity owned by the turn the selected message touches, marked outside the message window.",
+  "request": {
+    "session_id": "ss_example",
+    "view": "with_tools",
+    "selection": {
+      "kind": "message",
+      "message_ref": "v1.g.1.eyJleGFtcGxlIjoicmVmIn0.ZXhhbXBsZS1tYWM",
+      "before": 0,
+      "after": 0
+    }
+  },
+  "response": {
+    "session": {
+      "session_id": "ss_example",
+      "source_id": "omp",
+      "native_id": "omp-synth",
+      "native_title": "Local review bot"
+    },
+    "snapshot": {
+      "snapshot_id": "snap_example",
+      "kind": "indexed",
+      "observed_at": "2026-10-12T12:25:00Z",
+      "lease_expires_at": "2026-10-12T12:55:00Z"
+    },
+    "view": "with_tools",
+    "source_policy": "require_source",
+    "selection": {
+      "kind": "message",
+      "branch_ref": "v1.b.1.eyJleGFtcGxlIjoicmVmIn0.ZXhhbXBsZS1tYWM",
+      "from_message_ref": "v1.g.1.eyJleGFtcGxlIjoicmVmIn0.ZXhhbXBsZS1tYWM",
+      "through_message_ref": "v1.g.1.eyJleGFtcGxlIjoicmVmIn0.ZXhhbXBsZS1tYWM",
+      "anchor_message_refs": [
+        "v1.g.1.eyJleGFtcGxlIjoicmVmIn0.ZXhhbXBsZS1tYWM"
+      ],
+      "before": {
+        "requested": 0,
+        "resolved": 0
+      },
+      "after": {
+        "requested": 0,
+        "resolved": 0
+      }
+    },
+    "items": [
+      {
+        "kind": "tool_call",
+        "tool_ref": "v1.i.1.eyJleGFtcGxlIjoicmVmIn0.ZXhhbXBsZS1tYWM",
+        "native_call_id": "call-1",
+        "tool_name": "read",
+        "result_refs": [
+          "v1.i.1.eyJleGFtcGxlIjoicmVmIn0.ZXhhbXBsZS1tYWM"
+        ],
+        "result_state": "result_available",
+        "outside_message_window": true,
+        "item_ref": "v1.i.1.eyJleGFtcGxlIjoicmVmIn0.ZXhhbXBsZS1tYWM",
+        "timestamp": null,
+        "turn_ref": "m000",
+        "blocks": [
+          {
+            "block_ref": "blk_args0000000001",
+            "kind": "tool_arguments",
+            "encoding": "utf8",
+            "fidelity": "normalized_json",
+            "data": "{\"path\":\"README.md\"}",
+            "start_byte": 0,
+            "end_byte": 20,
+            "total_bytes": 20,
+            "is_last": true
+          }
+        ],
+        "item_end": true,
+        "provenance": {
+          "origin": "verified_source",
+          "source_ref": "src_0f3a9c1d5b7e2a64",
+          "record_ref": "rec_5e1d0a77c9b34f12",
+          "record_digest": "9f2c41a0b7d8e3615c4a0f9e12d7b3a8",
+          "native_record_id": "m001",
+          "locator": {
+            "offset": 120,
+            "len": 96
+          }
+        }
+      },
+      {
+        "kind": "tool_result",
+        "tool_ref": "v1.i.1.eyJleGFtcGxlIjoicmVmIn0.ZXhhbXBsZS1tYWM",
+        "native_call_id": "call-1",
+        "is_error": false,
+        "outside_message_window": true,
+        "item_ref": "v1.i.1.eyJleGFtcGxlIjoicmVmIn0.ZXhhbXBsZS1tYWM",
+        "timestamp": null,
+        "turn_ref": "m000",
+        "blocks": [
+          {
+            "block_ref": "blk_res00000000001",
+            "kind": "tool_result",
+            "encoding": "utf8",
+            "fidelity": "verbatim",
+            "data": "file contents",
+            "start_byte": 0,
+            "end_byte": 13,
+            "total_bytes": 13,
+            "is_last": true
+          }
+        ],
+        "item_end": true,
+        "provenance": {
+          "origin": "verified_source",
+          "source_ref": "src_0f3a9c1d5b7e2a64",
+          "record_ref": "rec_5e1d0a77c9b34f12",
+          "record_digest": "9f2c41a0b7d8e3615c4a0f9e12d7b3a8",
+          "native_record_id": "m001",
+          "locator": {
+            "offset": 120,
+            "len": 96
+          }
+        }
+      },
+      {
+        "kind": "message",
+        "message_ref": "v1.g.1.eyJleGFtcGxlIjoibWVzc2FnZSJ9.ZXhhbXBsZS1tYWM1",
+        "role": "assistant",
+        "phase": null,
+        "item_ref": "v1.i.1.eyJleGFtcGxlIjoiaXRlbSJ9.ZXhhbXBsZS1tYWM1",
+        "timestamp": "2026-10-10T15:08:00Z",
+        "turn_ref": null,
+        "blocks": [
+          {
+            "block_ref": "blk_0000000000000001",
+            "kind": "text",
+            "encoding": "utf8",
+            "fidelity": "verbatim",
+            "data": "Done.",
+            "start_byte": 0,
+            "end_byte": 5,
+            "total_bytes": 5,
+            "is_last": true
+          }
+        ],
+        "item_end": true,
+        "provenance": {
+          "origin": "verified_source",
+          "source_ref": "src_0f3a9c1d5b7e2a64",
+          "record_ref": "rec_5e1d0a77c9b34f12",
+          "record_digest": "9f2c41a0b7d8e3615c4a0f9e12d7b3a8",
+          "native_record_id": "m001",
+          "locator": {
+            "offset": 120,
+            "len": 96
+          }
+        }
+      }
+    ],
+    "page": {
+      "next_cursor": null,
+      "selection_exhausted": true,
+      "stop_reason": "selection_end"
+    },
+    "navigation": {
+      "before_message_ref": null,
+      "after_message_ref": null
+    },
+    "coverage": {
+      "status": "complete",
+      "reasons": []
+    },
+    "warnings": []
+  }
+}

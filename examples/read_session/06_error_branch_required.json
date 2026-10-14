@@ -1,0 +1,29 @@
+{
+  "description": "A path choice is needed; options are bounded to 50 and to max_bytes.",
+  "request": {
+    "session_id": "ss_example"
+  },
+  "error": {
+    "error": {
+      "code": "BRANCH_REQUIRED",
+      "retryable": false,
+      "recovery": "select_branch",
+      "message": "this selection spans several persisted branches; choose one with branch_ref",
+      "branch_options": [
+        {
+          "branch_ref": "v1.b.1.eyJleGFtcGxlIjoicmVmIn0.ZXhhbXBsZS1tYWM",
+          "leaf_message_ref": "v1.g.1.eyJleGFtcGxlIjoicmVmIn0.ZXhhbXBsZS1tYWM",
+          "leaf_timestamp": "2026-10-10T15:09:00Z",
+          "is_active_leaf": false
+        },
+        {
+          "branch_ref": "v1.b.1.eyJleGFtcGxlIjoicmVmIn0.ZXhhbXBsZS1tYWM",
+          "leaf_message_ref": "v1.g.1.eyJleGFtcGxlIjoicmVmIn0.ZXhhbXBsZS1tYWM",
+          "leaf_timestamp": null,
+          "is_active_leaf": true
+        }
+      ],
+      "branch_options_truncated": false
+    }
+  }
+}

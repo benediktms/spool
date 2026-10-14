@@ -1,0 +1,49 @@
+[package]
+name = "spool"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+description = "Local search engine for agent-session conversation history"
+license = "MIT"
+
+[lib]
+name = "spool"
+path = "src/lib.rs"
+
+[[bin]]
+name = "spool"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+apalis = { version = "1.0.0", default-features = false, features = ["tracing", "retry", "limit", "timeout", "catch-panic"] }
+apalis-core = "1.0.0"
+apalis-sqlite = "1.0.0"
+base64 = "0.22"
+blake3 = "1"
+clap = { version = "4", features = ["derive"] }
+futures = "0.3"
+memchr = "2"
+parking_lot = "0.12"
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+rmcp = { version = "3.5.1", features = ["server", "client", "macros", "schemars", "transport-io", "transport-child-process"] }
+rustix = { version = "1", features = ["fs", "std", "process"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.9.0", default-features = false, features = ["sqlite", "runtime-tokio", "migrate", "macros"] }
+thiserror = "2"
+toml = "1"
+toml_edit = "0.25"
+tiktoken-rs = "=0.12.1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "io-std", "sync", "time", "signal", "process", "fs"] }
+tracing = "0.1"
+zstd = "0.13"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+jsonschema = { version = "0.58.6", default-features = false }
+tempfile = "3"
+
+[[bench]]
+name = "search_bench"
+harness = false

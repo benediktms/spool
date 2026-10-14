@@ -1,0 +1,116 @@
+# Spool example configuration. `spool init` writes a file like this to
+#   macOS: ~/Library/Application Support/Spool/config.toml   Linux: ~/.local/state/spool/config.toml
+# (or $SPOOL_HOME/config.toml). Every value shown is the built-in default; delete what you do
+# not change. Unknown keys are rejected. Relative paths resolve against this file's directory,
+# `~/` expands to your home directory, nothing is passed through a shell.
+
+config_version = 1
+
+[ipc]
+socket_path = "state/spool.sock"      # must stay short enough for a Unix socket path (~100 bytes)
+request_concurrency = 16
+max_request_bytes = 1048576
+
+[mcp]
+allow_raw_records = false             # true enables read_session view = "raw_records"
+
+[runtime]
+async_worker_threads = 2
+
+[discovery]
+bootstrap_days = 7
+interval_seconds = 60
+debounce_seconds = 5
+watermark_overlap_seconds = 300
+
+[ingestion]
+session_concurrency = 1               # must be 1 in v1
+max_queued_sessions = 10000
+max_record_bytes = 16777216
+max_source_file_bytes = 2147483648
+max_transient_attempts = 5
+
+[chunking]
+target_new_tokens = 800
+max_rendered_tokens = 1200
+overlap_tokens = 200
+version = 1
+
+[embedding]
+enabled = true
+# Hosted processing is OFF until you turn it on. With true, rendered conversation chunks and
+# semantic/hybrid search queries are sent to the provider below; text can contain secrets you
+# pasted, and the tool-block filter is not a secret scanner. A credential file is also required;
+# without either, Spool stays lexical-only.
+hosted_processing_approved = false
+provider = "openai"
+model = "text-embedding-3-small"
+dimensions = 768
+profile_generation = 1
+credential_file = "secrets/provider.key"   # mode 0600; holds only the API key
+endpoint = "https://api.openai.com/v1/embeddings"
+batch_max_inputs = 32
+batch_max_tokens = 24000
+ingestion_request_concurrency = 1
+query_request_concurrency = 2
+request_timeout_seconds = 30
+daily_ingestion_token_budget = 1000000
+daily_query_token_budget = 50000
+budget_timezone = "UTC"                   # day boundary of the token budgets: "UTC" or a fixed offset such as "+05:30"
+
+[search]
+default_mode = "hybrid"
+default_limit = 10
+max_limit = 50
+max_matches_per_session = 3
+candidate_limit = 200
+max_candidate_limit = 2000
+rrf_constant = 60
+semantic_scan_concurrency = 2
+vector_batch_bytes = 8388608
+query_embedding_fallback_ms = 2000
+semantic_query_deadline_ms = 5000
+query_cache_entries = 256
+query_cache_ttl_seconds = 600
+max_search_response_bytes = 65536
+
+[reader]
+lease_ttl_seconds = 1800
+max_active_leases = 256
+max_retained_lease_bytes = 268435456
+max_source_read_bytes = 67108864
+max_read_millis = 10000
+
+[storage]
+warning_bytes = 1073741824
+pause_ingestion_bytes = 2147483648
+busy_timeout_ms = 5000
+
+[logging]
+level = "info"
+include_content = false               # reserved; ignored. Spool never logs conversation or query text.
+max_file_bytes = 10485760             # rotate spool.log at this size
+retained_files = 5                    # rotated files kept (spool.log.1 .. spool.log.5)
+
+# Built-in default for omp is enabled = true, but `spool init` writes every source as enabled = false
+# unless you choose it (--enable-source ID or the interactive prompt).
+[[sources]]
+id = "omp"
+kind = "omp"
+enabled = true
+roots = ["~/.omp/agent/sessions"]
+include_subagents = false
+
+[[sources]]
+id = "codex"
+kind = "codex"
+enabled = false
+roots = ["~/.codex/sessions"]
+include_subagents = false
+
+[[sources]]
+id = "claude"
+kind = "claude"
+enabled = false
+roots = ["~/.claude/projects"]
+include_subagents = false

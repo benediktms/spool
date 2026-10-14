@@ -1,0 +1,16 @@
+{
+  "format": "Codex plain JSONL rollout records (session_meta, response_item, event_msg)",
+  "upstream": {
+    "repository": "openai/codex",
+    "commit": "cab328f2754e6ec53f6a61b1c58b51f15d7a4538",
+    "sources": ["codex-rs/rollout/src/lib.rs", "codex-rs/history/src/rollout_payload.rs", "codex-rs/protocol/src/models.rs"]
+  },
+  "fixtures": {
+    "canonical.jsonl": {
+      "normalization": "Prefer response_item messages; retain user/assistant text and phase; exclude agent_message, reasoning, tool arguments and control records. Compressed rollout is unsupported."
+    },
+    "tool_turns.jsonl": {
+      "normalization": "Preserve commentary/final phase. Link function_call_output to function_call only by call_id within the same explicit internal_chat_message_metadata_passthrough.turn_id. Without turn identity, leave ownership unlinked. Canonical message/event duplicates emit one MessageEntry; repeated payload IDs have unique physical keys. Malformed complete records are warned and retained unknown; incomplete final bytes are not observed."
+    }
+  }
+}

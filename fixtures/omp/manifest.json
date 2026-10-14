@@ -1,0 +1,16 @@
+{
+  "format": "OhMyPi v3 session JSONL; optional title-slot v1",
+  "upstream": {
+    "repository": "can1357/oh-my-pi",
+    "commit": "c8913466dd7bf92040de911f8e00e30b8f4e48a2",
+    "sources": ["docs/session.md", "packages/ai/src/types.ts"]
+  },
+  "fixtures": {
+    "v3.jsonl": {
+      "normalization": "Skip the physical title slot and session header as conversational messages; retain exact user/assistant text blocks; classify message.role=toolResult as tool result, not user text; exclude thinking and branch summaries."
+    },
+    "tool_turns.jsonl": {
+      "normalization": "Assistant textSignature phase is message metadata; keep user/assistant text blocks only. Tool calls/results are excluded from conversation text. Link toolResult by toolCallId only to a matching call on the parentId ancestry path; turn_id is the nearest user-message ancestor-or-self. Repeated call IDs in another branch/turn are not global matches. Malformed complete JSONL is warned and retained as an unknown record; the incomplete final line is not observed."
+    }
+  }
+}

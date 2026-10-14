@@ -1,0 +1,254 @@
+{
+  "$defs": {
+    "SelectionInput": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "From the selected persisted branch's beginning to its frozen endpoint.",
+          "properties": {
+            "branch_ref": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "const": "session",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The complete messages a search match covers, plus context messages.",
+          "properties": {
+            "after": {
+              "format": "uint32",
+              "maximum": 20,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "before": {
+              "format": "uint32",
+              "maximum": 20,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "branch_ref": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "const": "match",
+              "type": "string"
+            },
+            "match_ref": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "match_ref"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "One conversational message plus context messages.",
+          "properties": {
+            "after": {
+              "format": "uint32",
+              "maximum": 20,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "before": {
+              "format": "uint32",
+              "maximum": 20,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "branch_ref": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "const": "message",
+              "type": "string"
+            },
+            "message_ref": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "message_ref"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Inclusive range of messages on one ancestry path.",
+          "properties": {
+            "branch_ref": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "from_message_ref": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "range",
+              "type": "string"
+            },
+            "through_message_ref": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "from_message_ref",
+            "through_message_ref"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "One previously returned message, tool invocation, tool result or original record.\n`branch_ref` is optional and disambiguates which branch a tool call's linked results are\nlisted from (`BRANCH_REQUIRED` when results exist on several branches below the call).",
+          "properties": {
+            "branch_ref": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "item_ref": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "item",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "item_ref"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "SourcePolicy": {
+      "enum": [
+        "prefer_source",
+        "require_source",
+        "indexed_only"
+      ],
+      "type": "string"
+    },
+    "View": {
+      "enum": [
+        "conversation",
+        "with_tools",
+        "raw_records"
+      ],
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Either an initial read (`session_id` required, optional selection/view/source_policy/limits)\nor a cursor-only continuation (`cursor` required; only `max_bytes` and `max_items` may accompany\nit). Unknown fields and mixed forms are rejected with `INVALID_ARGUMENT`.",
+  "properties": {
+    "cursor": {
+      "description": "Opaque continuation. When present, only `max_bytes` and `max_items` may accompany it.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "max_bytes": {
+      "description": "Final serialized tool-result cap in bytes (default 32768, 4096..=262144).",
+      "format": "uint32",
+      "maximum": 262144,
+      "minimum": 4096,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "max_items": {
+      "description": "Distinct logical items per page (default 50, 1..=200).",
+      "format": "uint32",
+      "maximum": 200,
+      "minimum": 1,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "selection": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SelectionInput"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "What to read. Default `{\"kind\":\"session\"}`."
+    },
+    "session_id": {
+      "description": "Spool's internal session ID (not a file path or native ID). Required for an initial read.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "source_policy": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SourcePolicy"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Default `prefer_source` for `conversation`, `require_source` for other views."
+    },
+    "view": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/View"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Representation. Default `conversation`."
+    }
+  },
+  "title": "ReadSessionInput",
+  "type": "object"
+}

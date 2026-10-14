@@ -1,0 +1,14 @@
+{
+  "description": "A selected record was rewritten after the read began; references never silently rebase.",
+  "request": {
+    "cursor": "v1.c.1.eyJleGFtcGxlIjoiY3Vyc29yIn0.ZXhhbXBsZS1tYWM"
+  },
+  "error": {
+    "error": {
+      "code": "SOURCE_CHANGED",
+      "retryable": false,
+      "recovery": "new_read",
+      "message": "original content no longer matches the pinned observation"
+    }
+  }
+}

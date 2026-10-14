@@ -1,0 +1,6 @@
+{"timestamp":"2026-10-12T00:00:00Z","type":"session_meta","payload":{"id":"codex-fixture-1","thread_id":"codex-fixture-1","cwd":"/tmp/project","history_mode":"paginated"}}
+{"timestamp":"2026-10-12T00:00:01Z","ordinal":1,"type":"response_item","payload":{"type":"message","id":"msg-user-1","role":"user","content":[{"type":"input_text","text":"hello codex"}]}}
+{"timestamp":"2026-10-12T00:00:02Z","ordinal":2,"type":"response_item","payload":{"type":"function_call","call_id":"call-1","name":"read","arguments":"MUST_NOT_INDEX_TOOL_SENTINEL"}}
+{"timestamp":"2026-10-12T00:00:03Z","ordinal":3,"type":"response_item","payload":{"type":"message","id":"msg-asst-1","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"done"}]}}
+{"timestamp":"2026-10-12T00:00:04Z","ordinal":4,"type":"response_item","payload":{"type":"reasoning","summary":["MUST_NOT_INDEX_REASONING_SENTINEL"]}}
+{"timestamp":"2026-10-12T00:00:05Z","ordinal":5,"type":"response_item","payload":{"type":"agent_message","id":"agent-1","author":"assistant","recipient":"agent","content":[{"type":"input_text","text":"MUST_NOT_INDEX_AGENT_MESSAGE_SENTINEL"}]}}

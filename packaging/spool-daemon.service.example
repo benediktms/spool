@@ -1,0 +1,14 @@
+# Managed by spool; regenerate with `spool service install`.
+# Illustration of what `spool service install` writes to ~/.config/systemd/user/spool-daemon.service.
+[Unit]
+Description=Spool local agent-session search daemon
+
+[Service]
+Type=simple
+ExecStart="/ABSOLUTE/PATH/TO/spool" daemon run
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,16 @@
+{
+  "description": "max_bytes cannot hold the next item's envelope plus one fragment.",
+  "request": {
+    "session_id": "ss_example",
+    "max_bytes": 4096
+  },
+  "error": {
+    "error": {
+      "code": "RESOURCE_LIMIT",
+      "retryable": false,
+      "recovery": "increase_max_bytes",
+      "message": "max_bytes=4096 cannot hold the next item's envelope plus one fragment; raise max_bytes",
+      "limit": "max_bytes"
+    }
+  }
+}

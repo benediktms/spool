@@ -1,0 +1,25 @@
+# Adapter support matrix
+
+Support is limited to the fixture-backed line schemas below; these are not declarations of complete harness compatibility. Builds must advertise only covered formats. Fixtures are synthetic and contain no user transcript data.
+
+Discovery admits only regular files with the `.jsonl` extension, including nested subagent transcripts. Tool-output logs, other session artifacts, and compressed rollouts are not scanned. Explicit-path readers can still open artifacts. Previously cataloged artifacts follow normal missing reconciliation: one complete scan tombstones them, and a second retires their snapshots.
+
+Subagents remain cataloged when their source has `include_subagents = false`, but do not count as pending work in status, search coverage, discovery capacity, or operation settlement. Source totals still include them; enabling `include_subagents` makes pending subagents schedulable without a state transition.
+
+| Adapter | Fixture/schema supported | Explicitly unsupported or partial |
+|---|---|---|
+| OhMyPi | Current v3 session header and JSONL `message`/control entries; optional physical `title` slot; tree `id`/`parentId`; structured text blocks. Synthetic fixture `fixtures/omp/v3.jsonl`. | Unknown future critical header versions; external image blobs are metadata/payload excluded, not conversation text. Text blob references are not supported by inspected persistence schema. Session lineage is retained raw but not linked without verification. |
+| Codex | Plain JSONL rollout envelope with canonical `session_meta`/`response_item`; all pinned `ResponseItem` tags are classified, with only user/assistant `message` text indexed, compaction records classified as excluded summary/control records, and tool/reasoning/control payloads excluded. Synthetic `fixtures/codex/canonical.jsonl` includes `agent_message`. Named legacy `UserMessage`/`AgentMessage` event text remains supported. | Compressed `.zst` rollouts are detected but not decompressed; unrecognized envelope/item variants yield partial coverage. `ItemCompleted` events are not treated as canonical messages; canonical `response_item` wins. |
+| Claude Code | Covered JSONL `user`/`assistant` saved-message envelope; UUID identifies physical records, while `message.id` groups accumulated assistant records when present. Later text-bearing records supersede only earlier conversation text/blocks by key; physical record metadata and associated tool calls/results/locators remain. Repeated native call IDs upsert only within that accumulated message group; IDs may repeat across turns/branches and are not globally unique. Summary, progress/hook, metadata, sidechain, and subagent markers are retained as control/summary metadata, not indexed text. Synthetic `fixtures/claude/saved-messages.jsonl` covers accumulated updates, repeated IDs across groups, parallel linked tools, and markers. |
+
+Native tool-call IDs can repeat across turns and branches; they are not global identities. Core owns call/result ownership and MUST scope matches to selected ancestry. Adapter native IDs alone do not establish ownership.
+
+## Upstream baselines consulted
+
+SHA values resolved from GitHub API on 2026-10-12; source URLs must use these commits rather than floating `main`:
+
+- OhMyPi `can1357/oh-my-pi`: `c8913466dd7bf92040de911f8e00e30b8f4e48a2`. Documentation `docs/session.md`, `docs/session-tree-plan.md`; code `packages/coding-agent/src/session/{session-entries.ts,session-loader.ts,session-title-slot.ts,session-persistence.ts,blob-store.ts}`. Current documented session version is 3, current title slot schema version 1 and 256 bytes.
+- Codex `openai/codex`: `cab328f2754e6ec53f6a61b1c58b51f15d7a4538`. Rollout sources `codex-rs/rollout/src/{lib.rs,policy.rs,compression.rs}`, protocol `codex-rs/protocol/src/items.rs`, history canonical wire schema `codex-rs/history/src/rollout_payload.rs`. Rollout item variants are evolving tagged records; history mode and canonical-vs-event policy affect interpretation. Plain JSONL only is currently implemented here.
+- Anthropic `anthropics/claude-cookbooks`: `9c1e493ddd2b82df399d2a61b9c806c539e18be6`, cookbook `claude_agent_sdk/05_Building_a_session_browser.ipynb` (document page `https://platform.claude.com/cookbook/claude-agent-sdk-05-building-a-session-browser`). It documents session/message identity fields; local structural validation queried only UUID/parent/`message.id`/block-type metadata. A bounded real-file smoke passed through a discard-only message sink and reported no transcript text. This is not a complete CLI transcript-version contract; only the explicit grouping rule above is supported.
+
+The local `/Users/benedikt.schnatterbeck/code/ohmyneopi` checkout is an OhMyPi Neovim integration, not the OhMyPi application source. No private transcript text is included in fixtures/docs or emitted by the smoke test; local parsing was bounded to 64 KiB and used a discard-only message sink. Upstream branch head pins above are evidence snapshots, not a promise that future format variants remain compatible.

@@ -1,0 +1,83 @@
+{
+  "description": "Privileged raw view: byte-exact record, base64 because the bytes are not valid UTF-8; the fragment ends before the block does.",
+  "request": {
+    "session_id": "ss_example",
+    "view": "raw_records",
+    "selection": {
+      "kind": "item",
+      "item_ref": "v1.i.1.eyJleGFtcGxlIjoicmVmIn0.ZXhhbXBsZS1tYWM"
+    }
+  },
+  "response": {
+    "session": {
+      "session_id": "ss_example",
+      "source_id": "omp",
+      "native_id": "omp-synth",
+      "native_title": "Local review bot"
+    },
+    "snapshot": {
+      "snapshot_id": "snap_example",
+      "kind": "indexed",
+      "observed_at": "2026-10-12T12:25:00Z",
+      "lease_expires_at": "2026-10-12T12:55:00Z"
+    },
+    "view": "raw_records",
+    "source_policy": "require_source",
+    "selection": {
+      "kind": "item",
+      "branch_ref": null,
+      "from_message_ref": null,
+      "through_message_ref": null,
+      "anchor_message_refs": [],
+      "item_ref": "v1.i.1.eyJleGFtcGxlIjoicmVmIn0.ZXhhbXBsZS1tYWM"
+    },
+    "items": [
+      {
+        "kind": "raw_record",
+        "record_kind": "message",
+        "item_ref": "v1.i.1.eyJleGFtcGxlIjoicmVmIn0.ZXhhbXBsZS1tYWM",
+        "timestamp": null,
+        "turn_ref": null,
+        "blocks": [
+          {
+            "block_ref": "blk_raw0000000001",
+            "kind": "raw_record",
+            "encoding": "base64",
+            "fidelity": "verbatim",
+            "data": "/wBhAAo=",
+            "start_byte": 0,
+            "end_byte": 5,
+            "total_bytes": 9,
+            "is_last": false
+          }
+        ],
+        "item_end": false,
+        "provenance": {
+          "origin": "verified_source",
+          "source_ref": "src_0f3a9c1d5b7e2a64",
+          "record_ref": "rec_5e1d0a77c9b34f12",
+          "record_digest": "9f2c41a0b7d8e3615c4a0f9e12d7b3a8",
+          "native_record_id": "m001",
+          "locator": {
+            "offset": 120,
+            "len": 96
+          }
+        }
+      }
+    ],
+    "page": {
+      "next_cursor": "v1.c.1.eyJleGFtcGxlIjoiY3Vyc29yIn0.ZXhhbXBsZS1tYWM",
+      "selection_exhausted": false,
+      "stop_reason": "byte_limit"
+    },
+    "navigation": {
+      "before_message_ref": null,
+      "after_message_ref": null
+    },
+    "coverage": {
+      "status": "complete",
+      "reasons": []
+    },
+    "warnings": []
+  }
+}

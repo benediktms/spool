@@ -1,0 +1,63 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: fmt, clippy, tests (offline, deterministic)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      # Unit, conformance, integration, migration, schema-snapshot and offline retrieval tests.
+      # No test needs the network except a loopback fake provider on 127.0.0.1; no hosted call happens.
+      - run: cargo test --locked --all-targets
+      - name: Schema snapshots are current
+        run: |
+          UPDATE_SCHEMAS=1 cargo test --locked --test reader_schemas
+          git diff --exit-code schemas/
+      - name: License inventory is current
+        run: |
+          ./scripts/license-inventory.sh
+          git diff --exit-code docs/licenses.md
+
+  launchd-lifecycle:
+    name: isolated launchd lifecycle (opt-in label com.spool.test.*)
+    runs-on: macos-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: SPOOL_TEST_LAUNCHD=1 cargo test --locked --test service
+
+  linux-unit:
+    name: linux build and unit tests (no systemd lifecycle)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked --all-targets
+
+  live-provider-contract:
+    name: live provider contract test (manual, one fixed harmless request)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run the explicitly enabled live probe
+        env:
+          SPOOL_LIVE_PROVIDER_KEY: ${{ secrets.SPOOL_LIVE_PROVIDER_KEY }}
+        run: cargo test --locked --test live_provider -- --ignored

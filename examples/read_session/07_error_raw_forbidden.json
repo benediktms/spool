@@ -1,0 +1,15 @@
+{
+  "description": "Raw view needs local enablement (mcp.allow_raw_records).",
+  "request": {
+    "session_id": "ss_example",
+    "view": "raw_records"
+  },
+  "error": {
+    "error": {
+      "code": "FORBIDDEN",
+      "retryable": false,
+      "recovery": "change_request",
+      "message": "the raw_records view is not enabled in local configuration (mcp.allow_raw_records)"
+    }
+  }
+}
