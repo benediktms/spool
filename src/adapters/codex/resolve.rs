@@ -1,17 +1,12 @@
 use super::Line;
-use crate::adapters::{AdapterError, ReadSeek, read_verified};
-use crate::domain::{BlockKind, Digest, Fidelity, ResolvedBlock, ResolvedRecord, SourceLocator};
+use crate::adapters::AdapterError;
+use crate::adapters::jsonl::{json_block, verbatim_block};
+use crate::domain::{BlockKind, ResolvedBlock};
 use serde_json::Value;
 
-pub(super) fn resolve_locator(
-    s: &mut dyn ReadSeek,
-    l: &SourceLocator,
-    e: &Digest,
-    max: u64,
-) -> Result<ResolvedRecord, AdapterError> {
-    let (raw, d) = read_verified(s, l, e, max)?;
-
-    let line = raw.strip_suffix(b"\n").unwrap_or(&raw);
+pub(super) fn resolve_line(
+    line: &[u8],
+) -> Result<(Option<String>, Vec<ResolvedBlock>), AdapterError> {
     let native_id = serde_json::from_slice::<Line>(line)
         .ok()
         .and_then(|record| record.payload)
@@ -21,41 +16,26 @@ pub(super) fn resolve_locator(
         Err(_) => Vec::new(),
     };
 
-    Ok(ResolvedRecord {
-        raw,
-        digest: d,
-        native_id,
-        blocks,
-    })
+    Ok((native_id, blocks))
 }
 
 fn project_blocks(json: &Value) -> Result<Vec<ResolvedBlock>, AdapterError> {
     let item_type = json.pointer("/payload/type").and_then(Value::as_str);
     let block = match (json.get("type").and_then(Value::as_str), item_type) {
         (Some("response_item"), Some("message")) => return Ok(message_blocks(json)),
-        (Some("response_item"), Some("function_call")) => tool_block(
-            json.pointer("/payload/arguments"),
-            BlockKind::ToolCall,
-            "invalid Codex tool arguments",
-        )?,
-        (Some("response_item"), Some("function_call_output")) => tool_block(
-            json.pointer("/payload/output").filter(|v| !v.is_null()),
-            BlockKind::ToolResult,
-            "invalid Codex tool result",
-        )?,
+        (Some("response_item"), Some("function_call")) => json
+            .pointer("/payload/arguments")
+            .map(|v| json_block(0, BlockKind::ToolCall, v, "invalid Codex tool arguments"))
+            .transpose()?,
+        (Some("response_item"), Some("function_call_output")) => json
+            .pointer("/payload/output")
+            .filter(|v| !v.is_null())
+            .map(|v| json_block(0, BlockKind::ToolResult, v, "invalid Codex tool result"))
+            .transpose()?,
         (Some("event_msg"), Some("UserMessage" | "AgentMessage")) => event_text_block(json),
         _ => None,
     };
     Ok(block.into_iter().collect())
-}
-
-fn text_block(index: u32, text: &str) -> ResolvedBlock {
-    ResolvedBlock {
-        index,
-        kind: BlockKind::Text,
-        fidelity: Fidelity::Verbatim,
-        bytes: text.as_bytes().to_vec(),
-    }
 }
 
 fn message_blocks(json: &Value) -> Vec<ResolvedBlock> {
@@ -76,33 +56,9 @@ fn message_blocks(json: &Value) -> Vec<ResolvedBlock> {
         })
         .filter_map(|(i, item)| {
             let text = item.get("text").and_then(Value::as_str)?;
-            Some(text_block(i as u32, text))
+            Some(verbatim_block(i as u32, BlockKind::Text, text))
         })
         .collect()
-}
-
-fn tool_block(
-    value: Option<&Value>,
-    kind: BlockKind,
-    error: &str,
-) -> Result<Option<ResolvedBlock>, AdapterError> {
-    let Some(value) = value else {
-        return Ok(None);
-    };
-
-    let (bytes, fidelity) = if let Some(text) = value.as_str() {
-        (text.as_bytes().to_vec(), Fidelity::Verbatim)
-    } else {
-        let bytes =
-            serde_json::to_vec(value).map_err(|_| AdapterError::Unsupported(error.into()))?;
-        (bytes, Fidelity::NormalizedJson)
-    };
-    Ok(Some(ResolvedBlock {
-        index: 0,
-        kind,
-        fidelity,
-        bytes,
-    }))
 }
 
 fn event_text_block(json: &Value) -> Option<ResolvedBlock> {
@@ -110,5 +66,5 @@ fn event_text_block(json: &Value) -> Option<ResolvedBlock> {
         .pointer("/payload/message")
         .or_else(|| json.pointer("/payload/text"))
         .and_then(Value::as_str)?;
-    Some(text_block(0, text))
+    Some(verbatim_block(0, BlockKind::Text, text))
 }
