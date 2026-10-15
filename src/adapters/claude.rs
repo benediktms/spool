@@ -1,16 +1,16 @@
-use super::{AdapterError, HarnessAdapter, ParseOptions, ProbeResult, ReadSeek, RecordSink};
-use crate::domain::{Digest, HarnessKind, ParsedSessionManifest, ResolvedRecord, SourceLocator};
+use super::jsonl::{JsonlHarness, first_line};
+use super::{AdapterError, ProbeResult};
+use crate::domain::{HarnessKind, ResolvedBlock};
 use serde::Deserialize;
 use serde::de::IgnoredAny;
-use std::{collections::HashMap, io::Read};
+use std::collections::HashMap;
 
 mod parse;
 mod resolve;
 
 pub struct ClaudeAdapter;
-const VERSION: &str = "claude-jsonl-session-browser-2026-10.1";
 #[derive(Deserialize, Default)]
-struct Line {
+pub(crate) struct Line {
     #[serde(rename = "type")]
     ty: Option<String>,
     uuid: Option<String>,
@@ -58,16 +58,14 @@ struct Block {
     _rest: HashMap<String, IgnoredAny>,
 }
 
-impl HarnessAdapter for ClaudeAdapter {
-    fn kind(&self) -> HarnessKind {
-        HarnessKind::Claude
-    }
-    fn parser_version(&self) -> &'static str {
-        VERSION
-    }
-    fn probe(&self, bytes: &[u8]) -> ProbeResult {
-        let first = bytes.split(|b| *b == b'\n').next().unwrap_or_default();
-        match serde_json::from_slice::<Line>(first) {
+impl JsonlHarness for ClaudeAdapter {
+    const KIND: HarnessKind = HarnessKind::Claude;
+    const PARSER_VERSION: &'static str = "claude-jsonl-session-browser-2026-10.1";
+    const MALFORMED_DETAIL: &'static str = "invalid complete JSONL record";
+    type Parser = parse::ParseState;
+
+    fn probe_header(&self, bytes: &[u8]) -> ProbeResult {
+        match serde_json::from_slice::<Line>(first_line(bytes)) {
             Ok(x)
                 if matches!(
                     x.ty.as_deref(),
@@ -81,21 +79,11 @@ impl HarnessAdapter for ClaudeAdapter {
             _ => ProbeResult::NoMatch,
         }
     }
-    fn parse_snapshot(
+
+    fn resolve_line(
         &self,
-        source: &mut dyn Read,
-        o: &ParseOptions,
-        sink: &mut dyn RecordSink,
-    ) -> Result<ParsedSessionManifest, AdapterError> {
-        parse::parse_snapshot(source, o, sink)
-    }
-    fn resolve_locator(
-        &self,
-        source: &mut dyn ReadSeek,
-        locator: &SourceLocator,
-        expected: &Digest,
-        max: u64,
-    ) -> Result<ResolvedRecord, AdapterError> {
-        resolve::resolve_locator(source, locator, expected, max)
+        line: &[u8],
+    ) -> Result<(Option<String>, Vec<ResolvedBlock>), AdapterError> {
+        resolve::resolve_line(line)
     }
 }
