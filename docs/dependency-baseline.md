@@ -54,6 +54,10 @@ differing release candidates; `apalis-sqlite 1.0.0` / `apalis 1.0.0` are publish
   worker name whose `last_seen` is not older than `heartbeat_interval` fails with
   `WORKER_ALREADY_EXISTS` (the transaction rolls back). The supervisor must therefore retry
   registration; the test does exactly that.
+* Readiness: `WorkerStream` emits `Event::Start` before the backend is polled, so it does not
+  confirm registration. After `Persisted::poll_ready` receives a successful `register`, it emits
+  `Event::HeartBeat` before fetching work; this also happens when the queue is idle. The supervisor
+  clears `register_refused` only at that heartbeat.
 * Retry semantics: Spool wraps the index handler with Apalis' `retry` layer (`scheduler::IngestRetry`,
   5 attempts, 5 s base, 15 min cap, jitter, `Retry-After` floor); the backend itself applies no delay on a
   failed handler. `tests/jobs.rs` observes the layer's timing.

@@ -1,7 +1,10 @@
 //! Milestone 0: a durable Apalis SQLite job survives a SIGKILLed worker and is recovered.
 //! The worker runs in a child process (this test binary re-executed) so a real kill is possible.
 
+mod jobs_common;
+
 use apalis::prelude::*;
+use jobs_common::wait_until;
 use serde::{Deserialize, Serialize};
 use spool::jobs::backend::{self, Liveness};
 use spool::storage;
@@ -158,12 +161,19 @@ async fn kill_and_recover(second_name: &str) {
     .await
     .unwrap();
 
-    // Incarnation 1 claims the job and hangs; kill -9.
     let mut c1 = spawn_child(dir, true, "spool-ingest");
     assert!(
         wait_for(&dir.join("claimed"), Duration::from_secs(60)),
         "worker never claimed job"
     );
+    wait_until(60, "job to become Running", || async {
+        let status: String = sqlx::query_scalar("SELECT status FROM Jobs")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        status == "Running"
+    })
+    .await;
     c1.kill().unwrap(); // SIGKILL on unix
     c1.wait().unwrap();
     let killed_at = Instant::now();

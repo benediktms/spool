@@ -101,6 +101,23 @@ fn update(s: &Status, f: impl FnOnce(&mut WorkerStatus)) {
     f(&mut s.lock().unwrap_or_else(|e| e.into_inner()));
 }
 
+/// Apalis emits `Start` before backend registration. `HeartBeat` follows a successful
+/// registration (even for an idle worker), so it is the readiness signal.
+fn record_worker_event(status: &Status, clock: &SharedClock, event: &Event) {
+    if !matches!(event, Event::HeartBeat) {
+        return;
+    }
+    update(status, |s| {
+        if s.state != WorkerState::Running {
+            s.state = WorkerState::Running;
+            s.last_started_ms = Some(clock.now_ms());
+        }
+        if s.last_error.as_deref() == Some("register_refused") {
+            s.last_error = None;
+        }
+    });
+}
+
 async fn stop_signal(mut rx: watch::Receiver<bool>) -> Result<(), WorkerError> {
     let _ = rx.wait_for(|v| *v).await;
     Ok(())
@@ -127,14 +144,7 @@ fn make_ingest() -> Make {
                 .retry(IngestRetry::new(
                     ctx.cfg.ingestion.max_transient_attempts as usize,
                 ))
-                .on_event(move |_, ev| {
-                    if matches!(ev, Event::Start) {
-                        update(&status, |s| {
-                            s.state = WorkerState::Running;
-                            s.last_started_ms = Some(clock.now_ms());
-                        });
-                    }
-                })
+                .on_event(move |_, ev| record_worker_event(&status, &clock, ev))
                 .build(handler)
                 .run_until(stop_signal(stop))
                 .await
@@ -157,14 +167,7 @@ fn make_control() -> Make {
             let clock = ctx.clock.clone();
             WorkerBuilder::new(CONTROL_WORKER)
                 .backend(storage)
-                .on_event(move |_, ev| {
-                    if matches!(ev, Event::Start) {
-                        update(&status, |s| {
-                            s.state = WorkerState::Running;
-                            s.last_started_ms = Some(clock.now_ms());
-                        });
-                    }
-                })
+                .on_event(move |_, ev| record_worker_event(&status, &clock, ev))
                 .build(handler)
                 .run_until(stop_signal(stop))
                 .await
@@ -931,5 +934,44 @@ impl JobSystem {
             task_id,
             created: false,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::clock::ManualClock;
+
+    #[test]
+    fn registration_refusal_clears_only_after_confirmed_readiness() {
+        let status = new_status("worker");
+        update(&status, |s| {
+            s.state = WorkerState::Restarting;
+            s.last_error = Some("register_refused".into());
+        });
+        let manual_clock = ManualClock::new(123);
+        let clock: SharedClock = Arc::new(manual_clock.clone());
+
+        record_worker_event(&status, &clock, &Event::Start);
+        let premature = status.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        assert_eq!(premature.state, WorkerState::Restarting);
+        assert_eq!(premature.last_error.as_deref(), Some("register_refused"));
+        assert_eq!(premature.last_started_ms, None);
+
+        record_worker_event(&status, &clock, &Event::HeartBeat);
+        let ready = status.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        assert_eq!(ready.state, WorkerState::Running);
+        assert_eq!(ready.last_error, None);
+        assert_eq!(ready.last_started_ms, Some(123));
+
+        manual_clock.advance_ms(1);
+        record_worker_event(&status, &clock, &Event::HeartBeat);
+        assert_eq!(
+            status
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .last_started_ms,
+            Some(123)
+        );
     }
 }
