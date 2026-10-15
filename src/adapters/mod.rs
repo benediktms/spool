@@ -2,7 +2,7 @@
 //! by the adapter worker and implement `SessionAdapter`.
 
 use crate::domain::*;
-use std::io::{Read, Seek};
+use std::io::{Read, Seek, SeekFrom};
 use std::sync::atomic::AtomicBool;
 
 pub mod claude;
@@ -105,4 +105,26 @@ pub fn adapter_for(kind: HarnessKind) -> Box<dyn SessionAdapter> {
         HarnessKind::Codex => Box::new(codex::CodexAdapter),
         HarnessKind::Claude => Box::new(claude::ClaudeAdapter),
     }
+}
+
+/// Reads the located source slice and verifies it against the expected digest.
+fn read_verified(
+    source: &mut dyn ReadSeek,
+    locator: &SourceLocator,
+    expected: &Digest,
+    max: u64,
+) -> Result<(Vec<u8>, Digest), AdapterError> {
+    if locator.len > max {
+        return Err(AdapterError::LimitExceeded);
+    }
+
+    source.seek(SeekFrom::Start(locator.offset))?;
+    let mut raw = vec![0; locator.len as usize];
+    source.read_exact(&mut raw)?;
+
+    let d = digest(&raw);
+    if &d != expected {
+        return Err(AdapterError::LocatorMismatch("digest changed".into()));
+    }
+    Ok((raw, d))
 }

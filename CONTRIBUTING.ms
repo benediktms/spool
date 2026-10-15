@@ -21,6 +21,7 @@ Prefer the smallest complete change. Reuse existing types, helpers, SQL batching
 ## Modules and boundaries
 
 - Organize modules by responsibility, not line count or one type per file. Keep related small types beside their consumers; avoid generic `utils` modules and speculative crate splits.
+- When a function grows beyond 50 lines, consider splitting it into smaller functions with cohesive responsibilities. This is a review signal, not a hard limit; do not split a cohesive function merely to satisfy the line count.
 - Use `pub(crate)` for crate-internal access and `pub` for deliberate APIs. Do not widen production visibility merely to reach an item from a test.
 - Validate external encodings, sizes, and required fields at the adapter boundary. Enforce shared invariants in the common implementation so sibling callers cannot bypass them.
 - Keep protocol conversion at the boundary. Where callers classify typed errors, use exhaustive matching so new variants require a decision.
@@ -54,6 +55,9 @@ Prefer the smallest complete change. Reuse existing types, helpers, SQL batching
 - Avoid `unsafe`. When it is necessary, minimize the block and put a `SAFETY` comment immediately above it explaining the conditions that make the operation sound.
 
 ## Clippy and formatting
+
+- Separate distinct steps inside functions with a blank line: validation, preparation, execution, and response or error handling. Keep closely related statements together. Do not put a blank line between every statement.
+- `rustfmt` owns all other formatting. Run `cargo fmt --all`; do not hand-format.
 
 All enabled Clippy warnings must be corrected, including tests and benchmarks. Do not add `allow(clippy::...)`, `expect(clippy::...)`, command-line lint suppression, or relaxed lint thresholds to make a check pass.
 
