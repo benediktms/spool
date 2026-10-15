@@ -9,6 +9,9 @@ pub mod claude;
 pub mod codex;
 pub mod omp;
 
+mod jsonl;
+mod lineage;
+
 pub trait ReadSeek: Read + Seek {}
 impl<T: Read + Seek> ReadSeek for T {}
 

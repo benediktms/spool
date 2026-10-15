@@ -1,16 +1,12 @@
 use super::{Content, Entry, TextEntry};
-use crate::adapters::{AdapterError, ReadSeek, read_verified};
-use crate::domain::{BlockKind, Digest, Fidelity, ResolvedBlock, ResolvedRecord, SourceLocator};
+use crate::adapters::AdapterError;
+use crate::adapters::jsonl::{json_block, tool_result_block, verbatim_block};
+use crate::domain::{BlockKind, ResolvedBlock};
 use serde_json::Value;
 
-pub(super) fn resolve_locator(
-    s: &mut dyn ReadSeek,
-    l: &SourceLocator,
-    e: &Digest,
-    max: u64,
-) -> Result<ResolvedRecord, AdapterError> {
-    let (raw, d) = read_verified(s, l, e, max)?;
-    let line = raw.strip_suffix(b"\n").unwrap_or(&raw);
+pub(super) fn resolve_line(
+    line: &[u8],
+) -> Result<(Option<String>, Vec<ResolvedBlock>), AdapterError> {
     let ent = serde_json::from_slice::<Entry>(line).ok();
     let json = serde_json::from_slice::<Value>(line).ok();
 
@@ -19,12 +15,7 @@ pub(super) fn resolve_locator(
         _ => Vec::new(),
     };
 
-    Ok(ResolvedRecord {
-        native_id: ent.and_then(|entry| entry.id),
-        raw,
-        digest: d,
-        blocks,
-    })
+    Ok((ent.and_then(|entry| entry.id), blocks))
 }
 
 fn project_blocks(
@@ -54,23 +45,7 @@ fn tool_result_blocks(json: &Value) -> Result<Vec<ResolvedBlock>, AdapterError> 
         return Ok(Vec::new());
     };
 
-    let single_text = value
-        .as_array()
-        .and_then(|items| (items.len() == 1).then(|| &items[0]))
-        .and_then(|item| item.get("text"))
-        .and_then(Value::as_str);
-    let block = if let Some(text) = value.as_str().or(single_text) {
-        verbatim(0, BlockKind::ToolResult, text)
-    } else {
-        ResolvedBlock {
-            index: 0,
-            kind: BlockKind::ToolResult,
-            fidelity: Fidelity::NormalizedJson,
-            bytes: serde_json::to_vec(value)
-                .map_err(|_| AdapterError::Unsupported("invalid tool result".into()))?,
-        }
-    };
-    Ok(vec![block])
+    Ok(vec![tool_result_block(0, value, "invalid tool result")?])
 }
 
 /// Re-decodes only the text content; tool-call arguments come from the full JSON value.
@@ -82,16 +57,27 @@ fn authored_blocks(line: &[u8], json: &Value) -> Result<Vec<ResolvedBlock>, Adap
 
     let mut blocks = Vec::new();
     match content {
-        Some(Content::Text(text)) => blocks.push(verbatim(0, BlockKind::Text, &text)),
+        Some(Content::Text(text)) => blocks.push(verbatim_block(0, BlockKind::Text, &text)),
         Some(Content::Blocks(content_blocks)) => {
             for (i, block) in content_blocks.iter().enumerate() {
                 match block.ty.as_deref() {
                     Some("text") => {
                         if let Some(text) = &block.text {
-                            blocks.push(verbatim(i as u32, BlockKind::Text, text));
+                            blocks.push(verbatim_block(i as u32, BlockKind::Text, text));
                         }
                     }
-                    Some("toolCall") => blocks.extend(tool_call_block(json, i)?),
+                    Some("toolCall") => {
+                        if let Some(arguments) =
+                            json.pointer(&format!("/message/content/{i}/arguments"))
+                        {
+                            blocks.push(json_block(
+                                i as u32,
+                                BlockKind::ToolCall,
+                                arguments,
+                                "invalid tool arguments",
+                            )?);
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -99,31 +85,4 @@ fn authored_blocks(line: &[u8], json: &Value) -> Result<Vec<ResolvedBlock>, Adap
         None => {}
     }
     Ok(blocks)
-}
-
-fn tool_call_block(json: &Value, i: usize) -> Result<Option<ResolvedBlock>, AdapterError> {
-    let Some(arguments) = json.pointer(&format!("/message/content/{i}/arguments")) else {
-        return Ok(None);
-    };
-
-    if let Some(text) = arguments.as_str() {
-        return Ok(Some(verbatim(i as u32, BlockKind::ToolCall, text)));
-    }
-    let bytes = serde_json::to_vec(arguments)
-        .map_err(|_| AdapterError::Unsupported("invalid tool arguments".into()))?;
-    Ok(Some(ResolvedBlock {
-        index: i as u32,
-        kind: BlockKind::ToolCall,
-        fidelity: Fidelity::NormalizedJson,
-        bytes,
-    }))
-}
-
-fn verbatim(index: u32, kind: BlockKind, text: &str) -> ResolvedBlock {
-    ResolvedBlock {
-        index,
-        kind,
-        fidelity: Fidelity::Verbatim,
-        bytes: text.as_bytes().to_vec(),
-    }
 }

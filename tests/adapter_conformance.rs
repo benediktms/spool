@@ -270,6 +270,18 @@ macro_rules! conformance_suite {
             }
 
             #[test]
+            fn oversized_unterminated_tail_ends_the_prefix() {
+                let bytes = vec![b'x'; 256];
+                let mut source = Cursor::new(bytes.as_slice());
+                let mut sink = Sink::default();
+                let manifest = $adapter
+                    .parse_snapshot(&mut source, &options(bytes.len() as u64, 128), &mut sink)
+                    .unwrap();
+                assert_eq!(manifest.prefix_end, 0);
+                assert!(sink.records.is_empty());
+            }
+
+            #[test]
             fn subagent_source_and_raw_parent_are_classified_without_verification() {
                 let (manifest, _) = parse(&$adapter, $subagent_bytes);
                 assert_eq!(manifest.session_kind, SessionKind::Subagent);

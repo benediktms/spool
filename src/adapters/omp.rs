@@ -1,17 +1,17 @@
-use super::{AdapterError, HarnessAdapter, ParseOptions, ProbeResult, ReadSeek, RecordSink};
-use crate::domain::{Digest, HarnessKind, ParsedSessionManifest, ResolvedRecord, SourceLocator};
+use super::jsonl::{JsonlHarness, first_line};
+use super::{AdapterError, ProbeResult};
+use crate::domain::{HarnessKind, ResolvedBlock};
 use serde::Deserialize;
 use serde::de::IgnoredAny;
 use serde_json::Value;
-use std::{collections::HashMap, io::Read};
+use std::collections::HashMap;
 
 mod parse;
 mod resolve;
 
 pub struct OmpAdapter;
-const VERSION: &str = "omp-v3-title-slot-v1";
 #[derive(Deserialize, Default)]
-struct Entry {
+pub(crate) struct Entry {
     #[serde(rename = "type")]
     ty: Option<String>,
     id: Option<String>,
@@ -67,16 +67,14 @@ struct Block {
     #[serde(flatten)]
     _rest: HashMap<String, IgnoredAny>,
 }
-impl HarnessAdapter for OmpAdapter {
-    fn kind(&self) -> HarnessKind {
-        HarnessKind::Omp
-    }
-    fn parser_version(&self) -> &'static str {
-        VERSION
-    }
-    fn probe(&self, b: &[u8]) -> ProbeResult {
-        let first = b.split(|x| *x == b'\n').next().unwrap_or_default();
-        let parsed = serde_json::from_slice::<Entry>(first);
+impl JsonlHarness for OmpAdapter {
+    const KIND: HarnessKind = HarnessKind::Omp;
+    const PARSER_VERSION: &'static str = "omp-v3-title-slot-v1";
+    const MALFORMED_DETAIL: &'static str = "record is malformed or unsupported";
+    type Parser = parse::ParseState;
+
+    fn probe_header(&self, b: &[u8]) -> ProbeResult {
+        let parsed = serde_json::from_slice::<Entry>(first_line(b));
         if let Ok(e) = parsed {
             if e.ty.as_deref() == Some("title") {
                 return ProbeResult::Match {
@@ -97,21 +95,11 @@ impl HarnessAdapter for OmpAdapter {
             ProbeResult::NoMatch
         }
     }
-    fn parse_snapshot(
+
+    fn resolve_line(
         &self,
-        source: &mut dyn Read,
-        o: &ParseOptions,
-        sink: &mut dyn RecordSink,
-    ) -> Result<ParsedSessionManifest, AdapterError> {
-        parse::parse_snapshot(source, o, sink)
-    }
-    fn resolve_locator(
-        &self,
-        s: &mut dyn ReadSeek,
-        l: &SourceLocator,
-        e: &Digest,
-        max: u64,
-    ) -> Result<ResolvedRecord, AdapterError> {
-        resolve::resolve_locator(s, l, e, max)
+        line: &[u8],
+    ) -> Result<(Option<String>, Vec<ResolvedBlock>), AdapterError> {
+        resolve::resolve_line(line)
     }
 }
