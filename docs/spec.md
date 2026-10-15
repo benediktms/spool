@@ -202,7 +202,7 @@ An adapter supplies source discovery rules, header detection, read-only parsing,
 The conceptual interface is:
 
 ```rust
-trait SessionAdapter: Send + Sync {
+trait HarnessAdapter: Send + Sync {
     fn kind(&self) -> HarnessKind;
     fn parser_version(&self) -> &str;
     fn probe(&self, header: &[u8]) -> ProbeResult;

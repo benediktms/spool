@@ -1,5 +1,5 @@
 use spool::{
-    adapters::{ParseOptions, RecordSink, SessionAdapter, SinkError},
+    adapters::{HarnessAdapter, ParseOptions, RecordSink, SinkError},
     domain::*,
 };
 use std::{io::Cursor, sync::atomic::AtomicBool};
@@ -56,7 +56,7 @@ pub fn options(len: u64, max_record_bytes: u64) -> ParseOptions {
 }
 
 pub fn assert_moved_locators(
-    adapter: &dyn SessionAdapter,
+    adapter: &dyn HarnessAdapter,
     bytes: &[u8],
     records: &[RecordMeta],
     max_record_bytes: u64,
@@ -82,7 +82,7 @@ pub fn assert_moved_locators(
         assert_eq!(resolved.digest, record.digest);
     }
 }
-pub fn parse(adapter: &dyn SessionAdapter, bytes: &[u8]) -> (ParsedSessionManifest, Sink) {
+pub fn parse(adapter: &dyn HarnessAdapter, bytes: &[u8]) -> (ParsedSessionManifest, Sink) {
     let mut source = Cursor::new(bytes);
     let mut sink = Sink::default();
     let manifest = adapter

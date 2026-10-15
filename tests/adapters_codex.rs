@@ -2,7 +2,7 @@
 mod adapter_common;
 use adapter_common::{Sink, assert_moved_locators, options, parse};
 use spool::{
-    adapters::{ProbeResult, SessionAdapter, codex::CodexAdapter},
+    adapters::{HarnessAdapter, ProbeResult, codex::CodexAdapter},
     domain::*,
     graph::SessionGraph,
 };

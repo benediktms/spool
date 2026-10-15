@@ -1,6 +1,6 @@
 use spool::{
     adapters::{
-        ParseOptions, RecordSink, SessionAdapter, SinkError, claude::ClaudeAdapter,
+        HarnessAdapter, ParseOptions, RecordSink, SinkError, claude::ClaudeAdapter,
         codex::CodexAdapter, omp::OmpAdapter,
     },
     domain::*,
@@ -73,7 +73,7 @@ fn options(len: u64) -> ParseOptions {
         blob_roots: vec![],
     }
 }
-fn run(a: &dyn SessionAdapter, bytes: &[u8]) -> (ParsedSessionManifest, Sink) {
+fn run(a: &dyn HarnessAdapter, bytes: &[u8]) -> (ParsedSessionManifest, Sink) {
     let mut source = Cursor::new(bytes);
     let mut sink = Sink::default();
     let manifest = a

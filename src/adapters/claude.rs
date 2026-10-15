@@ -1,4 +1,4 @@
-use super::{AdapterError, ParseOptions, ProbeResult, ReadSeek, RecordSink, SessionAdapter};
+use super::{AdapterError, HarnessAdapter, ParseOptions, ProbeResult, ReadSeek, RecordSink};
 use crate::domain::{Digest, HarnessKind, ParsedSessionManifest, ResolvedRecord, SourceLocator};
 use serde::Deserialize;
 use serde::de::IgnoredAny;
@@ -58,11 +58,11 @@ struct Block {
     _rest: HashMap<String, IgnoredAny>,
 }
 
-impl SessionAdapter for ClaudeAdapter {
+impl HarnessAdapter for ClaudeAdapter {
     fn kind(&self) -> HarnessKind {
         HarnessKind::Claude
     }
-    fn parser_version(&self) -> &str {
+    fn parser_version(&self) -> &'static str {
         VERSION
     }
     fn probe(&self, bytes: &[u8]) -> ProbeResult {

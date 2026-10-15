@@ -1,5 +1,5 @@
 //! Adapter contract. `spool-core` owns this file; `omp.rs`, `codex.rs`, `claude.rs` are owned
-//! by the adapter worker and implement `SessionAdapter`.
+//! by the adapter worker and implement `HarnessAdapter`.
 
 use crate::domain::*;
 use std::io::{Read, Seek, SeekFrom};
@@ -73,10 +73,10 @@ impl From<SinkError> for AdapterError {
     }
 }
 
-pub trait SessionAdapter: Send + Sync {
+pub trait HarnessAdapter: Send + Sync {
     fn kind(&self) -> HarnessKind;
     /// Part of the pipeline fingerprint.
-    fn parser_version(&self) -> &str;
+    fn parser_version(&self) -> &'static str;
     /// `header` = first (up to 64 KiB) bytes of the file.
     fn probe(&self, header: &[u8]) -> ProbeResult;
     /// Stream records into `sink`. MUST NOT hold the whole transcript or deserialize excluded
@@ -99,11 +99,11 @@ pub trait SessionAdapter: Send + Sync {
     ) -> Result<ResolvedRecord, AdapterError>;
 }
 
-pub fn adapter_for(kind: HarnessKind) -> Box<dyn SessionAdapter> {
+pub fn adapter_for(kind: HarnessKind) -> &'static dyn HarnessAdapter {
     match kind {
-        HarnessKind::Omp => Box::new(omp::OmpAdapter),
-        HarnessKind::Codex => Box::new(codex::CodexAdapter),
-        HarnessKind::Claude => Box::new(claude::ClaudeAdapter),
+        HarnessKind::Omp => &omp::OmpAdapter,
+        HarnessKind::Codex => &codex::CodexAdapter,
+        HarnessKind::Claude => &claude::ClaudeAdapter,
     }
 }
 

@@ -4,7 +4,7 @@
 //! "unavailable"; only the caller's policy decides whether unavailable may fall back.
 
 use super::selection::{Snap, app_err};
-use crate::adapters::{AdapterError, SessionAdapter};
+use crate::adapters::{AdapterError, HarnessAdapter};
 use crate::domain::{Digest, ResolvedRecord, SourceLocator};
 use crate::ipc::AppError;
 use crate::source::SourceError;
@@ -69,7 +69,7 @@ pub struct SourceCtx {
     path: Option<PathBuf>,
     file_dev: Option<i64>,
     file_ino: Option<i64>,
-    adapter: Arc<dyn SessionAdapter>,
+    adapter: &'static dyn HarnessAdapter,
     max_record_bytes: u64,
     max_read_bytes: u64,
     deadline: Instant,
@@ -85,7 +85,7 @@ impl SourceCtx {
         source_id: String,
         path: Option<PathBuf>,
         snap: &Snap,
-        adapter: Arc<dyn SessionAdapter>,
+        adapter: &'static dyn HarnessAdapter,
         limits: SourceLimits,
     ) -> Self {
         Self {
@@ -205,7 +205,7 @@ impl SourceCtx {
             )));
         }
         let file = self.ensure_open().await?;
-        let (adapter, max) = (self.adapter.clone(), self.max_record_bytes);
+        let (adapter, max) = (self.adapter, self.max_record_bytes);
         enum Out {
             Ok(Box<ResolvedRecord>),
             Gone,

@@ -1,7 +1,7 @@
 mod parse;
 mod resolve;
 
-use super::{AdapterError, ParseOptions, ProbeResult, ReadSeek, RecordSink, SessionAdapter};
+use super::{AdapterError, HarnessAdapter, ParseOptions, ProbeResult, ReadSeek, RecordSink};
 use crate::domain::{Digest, HarnessKind, ParsedSessionManifest, ResolvedRecord, SourceLocator};
 use serde::Deserialize;
 use serde::de::IgnoredAny;
@@ -59,11 +59,11 @@ struct Content {
     #[serde(flatten)]
     _rest: HashMap<String, IgnoredAny>,
 }
-impl SessionAdapter for CodexAdapter {
+impl HarnessAdapter for CodexAdapter {
     fn kind(&self) -> HarnessKind {
         HarnessKind::Codex
     }
-    fn parser_version(&self) -> &str {
+    fn parser_version(&self) -> &'static str {
         VERSION
     }
     fn probe(&self, b: &[u8]) -> ProbeResult {

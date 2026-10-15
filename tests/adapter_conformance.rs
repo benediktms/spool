@@ -3,7 +3,7 @@ mod adapter_common;
 use adapter_common::{Sink, assert_moved_locators, options, parse};
 use spool::{
     adapters::{
-        ProbeResult, SessionAdapter, claude::ClaudeAdapter, codex::CodexAdapter, omp::OmpAdapter,
+        HarnessAdapter, ProbeResult, claude::ClaudeAdapter, codex::CodexAdapter, omp::OmpAdapter,
     },
     domain::*,
     graph::SessionGraph,

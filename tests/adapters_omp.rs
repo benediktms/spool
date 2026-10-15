@@ -2,7 +2,7 @@
 mod adapter_common;
 use adapter_common::{Sink, assert_moved_locators, options, parse};
 use spool::{
-    adapters::{SessionAdapter, omp::OmpAdapter},
+    adapters::{HarnessAdapter, omp::OmpAdapter},
     domain::*,
 };
 use std::io::Cursor;

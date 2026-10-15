@@ -10,7 +10,7 @@ use super::reader::{PageEnv, RefMaker, assemble, record_digest_hex};
 use super::refs::{Anchor, BranchRef, ItemKind, ItemRef, MatchRef, MessageRef, short_digest};
 use super::selection::*;
 use super::types::*;
-use crate::adapters::{SessionAdapter, adapter_for};
+use crate::adapters::adapter_for;
 use crate::config::Config;
 use crate::ipc::AppError;
 use crate::mcp::budget::tool_result_bytes;
@@ -720,7 +720,7 @@ impl ReadService {
                 "change_request",
             )
         })?;
-        let adapter: Arc<dyn SessionAdapter> = Arc::from(adapter_for(kind));
+        let adapter = adapter_for(kind);
         Ok(SourceCtx::new(
             self.sources.clone(),
             row.source_id.clone(),

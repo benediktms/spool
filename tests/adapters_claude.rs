@@ -2,7 +2,7 @@
 mod adapter_common;
 use adapter_common::{assert_moved_locators, parse};
 use spool::{
-    adapters::{SessionAdapter, claude::ClaudeAdapter},
+    adapters::{HarnessAdapter, claude::ClaudeAdapter},
     domain::*,
     graph::SessionGraph,
 };
