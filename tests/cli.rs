@@ -907,7 +907,7 @@ fn fake_daemon(home: &Path) -> (Seen, tokio::sync::watch::Sender<bool>) {
                     "truncated":false})),
                     "tool:read_session" => Ok(json!({"echo": args})),
                     "status" => Ok(
-                        json!({"state":"lexical_only","daemon_version":"9.9.9","queue":{"queued":2},"workers":{"ingest":"healthy"}}),
+                        json!({"status":"ready","daemon_version":"9.9.9","queue":{"queued":2},"workers":{"ingest":"healthy"}}),
                     ),
                     "handles_rotate_key" => Ok(json!({"epoch":2})),
                     _ => Err(AppError::new("OPERATION_NOT_FOUND", "no such operation")),
@@ -1185,6 +1185,23 @@ fn doctor_reports_missing_init_then_passes_and_catches_loose_modes() {
         "{t}"
     );
     assert!(t.contains("state"), "{t}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn doctor_reports_the_daemon_status_field() {
+    let (_t, home) = temp_home();
+    assert!(run(&home, &["init"]).status.success());
+    let (_seen, _stop) = fake_daemon(&home);
+    let o = run_async(home, vec!["doctor".into(), "--json".into()]).await;
+    let v: Value = serde_json::from_str(&out(&o)).unwrap();
+    let daemon = v["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "daemon")
+        .unwrap();
+    assert_eq!(daemon["status"], "ok");
+    assert_eq!(daemon["detail"], "running 9.9.9, state ready");
 }
 
 #[test]

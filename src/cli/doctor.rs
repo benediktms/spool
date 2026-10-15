@@ -343,7 +343,7 @@ async fn daemon_check(a: &mut Acc, paths: &Paths, cfg: Option<&Config>) {
         Ok(Err(e)) if e.exit == super::remote::EXIT_UNAVAILABLE => a.warn("daemon", e.message),
         Ok(Err(e)) => a.fail("daemon", e.message),
         Ok(Ok(v)) => {
-            let state = v.get("state").and_then(Value::as_str).unwrap_or("unknown");
+            let state = v.get("status").and_then(Value::as_str).unwrap_or("unknown");
             let version = v
                 .get("daemon_version")
                 .and_then(Value::as_str)
