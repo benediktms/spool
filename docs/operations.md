@@ -110,7 +110,22 @@ Restore: `spool service stop`, replace `state/index.sqlite` with the backup (rem
 * Schema migrations apply at daemon start. An incompatible schema or failed migration is a startup
   error; Spool does not delete and rebuild data to hide it.
 * At `storage.warning_bytes` status warns; at `storage.pause_ingestion_bytes` ingestion pauses and
-  search keeps working. Nothing is deleted automatically.
+  search keeps working. Both thresholds compare the allocated size of `index.sqlite` plus
+  `index.sqlite-wal`. Status fields `index_db_free_bytes` and `jobs_db_free_bytes` report reusable
+  free-page bytes; those pages still count toward the thresholds.
+* SQLite trims the WAL only after a complete checkpoint followed by a subsequent write. It may then
+  shrink to 64 MiB, or to the size of the first transaction if that transaction is larger. Open read
+  transactions can block checkpointing, and 64 MiB is not a cap.
+* To reclaim database free pages manually, take Spool fully offline:
+  1. Run `spool service stop`.
+  2. Close every client that may have the database open, including `sqlite3`, DBeaver and backup
+     clients. Run `lsof "$SPOOL_HOME/state/index.sqlite"*`; it must show no process using the
+     database or its WAL/SHM files before continuing.
+  3. Run `sqlite3 "$SPOOL_HOME/state/index.sqlite" "VACUUM"`.
+  4. Run `spool service start`.
+
+  VACUUM rewrites the database, can require up to twice the current database size in free disk space,
+  and can take minutes. Spool never runs VACUUM automatically.
 * Changing extraction settings changes the pipeline fingerprint; use `spool index rebuild` to apply.
 * Changing `embedding.model`, `embedding.dimensions` or `embedding.profile_generation` creates a new embedding
   profile. The daemon builds it in the background (it is the target of ingestion) while search keeps using the

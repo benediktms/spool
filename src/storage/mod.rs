@@ -8,7 +8,12 @@ use std::time::Duration;
 pub mod catalog;
 pub mod index;
 
-/// Open a pool with WAL, foreign keys, FULL synchronous and a bounded busy timeout on every
+/// WAL bytes SQLite keeps on disk after a WAL reset (`PRAGMA journal_size_limit`): about 16x the
+/// default auto-checkpoint WAL (1000 pages of 4 KiB), so normal checkpoint cycles never truncate
+/// and grow again. Not a cap: a large transaction or a reader that pins the WAL still grows it.
+pub const WAL_SIZE_LIMIT_BYTES: u64 = 64 << 20;
+
+/// Open a pool with WAL, a WAL size limit, foreign keys, FULL synchronous and a bounded busy timeout on every
 /// connection. `create` is only for the daemon/maintenance owner.
 pub async fn connect(
     path: &Path,
@@ -30,7 +35,8 @@ pub async fn connect_with(
         .journal_mode(SqliteJournalMode::Wal)
         .synchronous(SqliteSynchronous::Full)
         .foreign_keys(true)
-        .busy_timeout(busy_timeout);
+        .busy_timeout(busy_timeout)
+        .pragma("journal_size_limit", WAL_SIZE_LIMIT_BYTES.to_string());
     if query_only {
         opts = opts.pragma("query_only", "ON");
     }

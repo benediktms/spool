@@ -77,6 +77,18 @@ fn limit_of(v: Option<i64>) -> Result<i64, AppError> {
     }
 }
 
+/// Bytes in free pages of the main database file. SQLite reuses them for new data. Only an explicit
+/// VACUUM returns them to the filesystem, so they stay inside the storage budget.
+async fn free_bytes(pool: &sqlx::SqlitePool) -> Option<u64> {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT f.freelist_count * p.page_size FROM pragma_freelist_count() f, pragma_page_size() p",
+    )
+    .fetch_one(pool)
+    .await
+    .ok()
+    .map(|b| b as u64)
+}
+
 impl ControlService {
     pub async fn index_status(&self, args: Value) -> Result<Value, AppError> {
         let input: IndexStatusInput =
@@ -224,6 +236,8 @@ impl ControlService {
 
         let (idb, iwal) = file_sizes(&idx.reader).await.unwrap_or((0, 0));
         let (jdb, jwal) = file_sizes(&d.jobs.submitter().pool).await.unwrap_or((0, 0));
+        let ifree = free_bytes(&idx.reader).await;
+        let jfree = free_bytes(&d.jobs.submitter().pool).await;
         let paused = catalog::app_meta_get(idx, "ingest.paused")
             .await
             .ok()
@@ -301,7 +315,8 @@ impl ControlService {
             last_discovery: Value::Object(last),
             parse_warnings: json!({ "total": warn_total, "by_code": warns.iter().map(|(c, n)| json!({"code": c, "count": n})).collect::<Vec<_>>() }),
             storage: json!({
-                "index_db_bytes": idb, "index_wal_bytes": iwal, "jobs_db_bytes": jdb, "jobs_wal_bytes": jwal,
+                "index_db_bytes": idb, "index_db_free_bytes": ifree, "index_wal_bytes": iwal,
+                "jobs_db_bytes": jdb, "jobs_db_free_bytes": jfree, "jobs_wal_bytes": jwal,
                 "warning_bytes": d.cfg.storage.warning_bytes, "pause_ingestion_bytes": d.cfg.storage.pause_ingestion_bytes,
                 "ingestion_paused": paused == "storage",
                 "approximate": true,

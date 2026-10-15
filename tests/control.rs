@@ -162,6 +162,7 @@ async fn skipped_subagents_are_not_pending_work() {
     let sub = r.env.session_by_native("sub").await.unwrap();
     assert_eq!(sub.index_state, "pending");
     assert_eq!(sub.session_kind, "subagent");
+    r.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -211,6 +212,62 @@ async fn status_reports_coverage_queue_workers_provider_and_storage_without_secr
     assert!(s["storage"]["index_db_bytes"].as_u64().unwrap() > 0);
     assert!(s["last_discovery"]["omp"]["scanned"].as_u64().unwrap() >= 1);
     assert!(s["parse_warnings"]["total"].is_number());
+    r.sys.shutdown(Duration::from_secs(15)).await;
+    let free = |pool: &sqlx::SqlitePool| {
+        let pool = pool.clone();
+        async move {
+            let n: i64 = sqlx::query_scalar("PRAGMA freelist_count")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            let p: i64 = sqlx::query_scalar("PRAGMA page_size")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            n * p
+        }
+    };
+    let page: i64 = sqlx::query_scalar("PRAGMA page_size")
+        .fetch_one(&r.env.index.reader)
+        .await
+        .unwrap();
+    let w = &r.env.index.writer;
+    sqlx::query("CREATE TABLE scratch(b BLOB)")
+        .execute(w)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO scratch VALUES (zeroblob(?))")
+        .bind(page)
+        .execute(w)
+        .await
+        .unwrap();
+    sqlx::query("DROP TABLE scratch").execute(w).await.unwrap();
+
+    let s = r.status().await;
+    let index_free = free(&r.env.index.reader).await;
+    assert!(
+        index_free > 0,
+        "dropping the table puts its pages on the freelist"
+    );
+    assert_eq!(s["storage"]["index_db_free_bytes"], index_free);
+    assert_eq!(s["storage"]["jobs_db_free_bytes"], free(&r.env.jobs_pool).await);
+
+    let allocated = ["index.sqlite", "index.sqlite-wal"]
+        .iter()
+        .map(|f| std::fs::metadata(r.env.root.join(f)).unwrap().len())
+        .sum::<u64>();
+    assert_eq!(
+        s["storage"]["index_db_bytes"].as_u64().unwrap()
+            + s["storage"]["index_wal_bytes"].as_u64().unwrap(),
+        allocated,
+        "status reports allocated bytes, not allocated minus free"
+    );
+    let mut cfg = (*r.env.cfg).clone();
+    cfg.storage.pause_ingestion_bytes = allocated;
+    assert!(
+        spool::jobs::scheduler::storage_paused(&r.env.index, &cfg).await,
+        "the pause compares allocated bytes, so free pages do not lower it"
+    );
     r.shutdown().await;
 }
 

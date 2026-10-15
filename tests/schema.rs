@@ -1,3 +1,4 @@
+use spool::storage::WAL_SIZE_LIMIT_BYTES;
 use spool::storage::index::{Index, retire_snapshot};
 
 async fn seed(ix: &Index) {
@@ -61,4 +62,88 @@ async fn migration_applies_fts_triggers_and_guards_hold() {
             .await
             .is_err()
     );
+}
+
+fn wal(dir: &std::path::Path) -> u64 {
+    std::fs::metadata(dir.join("index.sqlite-wal")).unwrap().len()
+}
+
+async fn ckpt(ix: &Index) -> (i64, i64) {
+    let (_busy, log, done): (i64, i64, i64) = sqlx::query_as("PRAGMA wal_checkpoint(PASSIVE)")
+        .fetch_one(&ix.writer)
+        .await
+        .unwrap();
+    (log, done)
+}
+
+async fn small_write(ix: &Index) {
+    sqlx::query("INSERT INTO scratch VALUES (x'00')")
+        .execute(&ix.writer)
+        .await
+        .unwrap();
+}
+
+/// One transaction of limit + 8 MiB, so the WAL file must grow past the limit.
+async fn big_write(ix: &Index) {
+    sqlx::query(
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?) \
+         INSERT INTO scratch SELECT zeroblob(1048576) FROM n",
+    )
+    .bind((WAL_SIZE_LIMIT_BYTES >> 20) as i64 + 8)
+    .execute(&ix.writer)
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn wal_resets_to_size_limit_unless_a_reader_pins_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let ix = Index::open_for_test(dir).await.unwrap();
+    for pool in [&ix.writer, &ix.reader] {
+        let n: i64 = sqlx::query_scalar("PRAGMA journal_size_limit")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        assert_eq!(n as u64, WAL_SIZE_LIMIT_BYTES);
+    }
+    sqlx::query("CREATE TABLE scratch(b BLOB)")
+        .execute(&ix.writer)
+        .await
+        .unwrap();
+
+    big_write(&ix).await;
+    let _: i64 = sqlx::query_scalar("SELECT count(*) FROM scratch")
+        .fetch_one(&ix.reader)
+        .await
+        .unwrap();
+    assert!(wal(dir) > WAL_SIZE_LIMIT_BYTES);
+    let (log, done) = ckpt(&ix).await;
+    assert_eq!(log, done, "PASSIVE copies every frame when no reader is pinned");
+    small_write(&ix).await;
+    assert!(
+        wal(dir) <= WAL_SIZE_LIMIT_BYTES,
+        "first commit after reset trims the WAL"
+    );
+
+    small_write(&ix).await;
+    let mut pin = ix.reader.begin().await.unwrap();
+    let _: i64 = sqlx::query_scalar("SELECT count(*) FROM scratch")
+        .fetch_one(&mut *pin)
+        .await
+        .unwrap();
+    big_write(&ix).await;
+    let (log, done) = ckpt(&ix).await;
+    assert!(done < log, "PASSIVE stops at the pinned reader");
+    small_write(&ix).await;
+    assert!(
+        wal(dir) > WAL_SIZE_LIMIT_BYTES,
+        "a pinned WAL is not reset or trimmed"
+    );
+
+    pin.rollback().await.unwrap();
+    let (log, done) = ckpt(&ix).await;
+    assert_eq!(log, done);
+    small_write(&ix).await;
+    assert!(wal(dir) <= WAL_SIZE_LIMIT_BYTES);
 }

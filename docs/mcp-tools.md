@@ -148,7 +148,8 @@ The CLI prints the raw structured result as pretty JSON.
 Read-only status: daemon version, dependency/protocol baseline identifier, source coverage,
 bootstrap scope, active embedding profile (`embedding.active_profile_id`, the one queries use; `profile_id` is the
 configured target and `vectors` reports coverage of that target), vector coverage, queue counts, worker health, last
-discovery, parse warnings, provider health, token budget, approximate database/WAL sizes, and an
+discovery, parse warnings, provider health, token budget, approximate database/WAL sizes and reusable free-page
+bytes, and an
 overall state: `ready`, `lexical_only`, `ingesting`, `provider_blocked`, `ingestion_degraded`,
 `unsupported_format` or `storage_error`. "Daemon healthy" does not mean every file has been
 embedded. It never returns API keys, the signing key, transcript text or full queries.
