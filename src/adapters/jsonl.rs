@@ -11,7 +11,7 @@ use crate::domain::{
 use crate::ids;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, SeekFrom};
 use std::sync::atomic::Ordering;
 
 pub(crate) trait JsonlHarness: Send + Sync {
@@ -353,7 +353,7 @@ impl<H: JsonlHarness> HarnessAdapter for H {
         expected: &Digest,
         max_record_bytes: u64,
     ) -> Result<ResolvedRecord, AdapterError> {
-        let (raw, digest) = super::read_verified(source, locator, expected, max_record_bytes)?;
+        let (raw, digest) = read_verified(source, locator, expected, max_record_bytes)?;
         let (native_id, blocks) = self.resolve_line(raw.strip_suffix(b"\n").unwrap_or(&raw))?;
         Ok(ResolvedRecord {
             raw,
@@ -362,4 +362,28 @@ impl<H: JsonlHarness> HarnessAdapter for H {
             blocks,
         })
     }
+}
+
+impl<H: JsonlHarness> super::sealed::Sealed for H {}
+
+/// Reads the located source slice and verifies it against the expected digest.
+fn read_verified(
+    source: &mut dyn ReadSeek,
+    locator: &SourceLocator,
+    expected: &Digest,
+    max: u64,
+) -> Result<(Vec<u8>, Digest), AdapterError> {
+    if locator.len > max {
+        return Err(AdapterError::LimitExceeded);
+    }
+
+    source.seek(SeekFrom::Start(locator.offset))?;
+    let mut raw = vec![0; locator.len as usize];
+    source.read_exact(&mut raw)?;
+
+    let d = digest(&raw);
+    if &d != expected {
+        return Err(AdapterError::LocatorMismatch("digest changed".into()));
+    }
+    Ok((raw, d))
 }

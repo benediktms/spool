@@ -38,9 +38,10 @@ MCP client --stdio--> `spool mcp` ----\
 * **Storage**: `index.sqlite` (sessions, snapshots, chunks, FTS5, vectors as little-endian f32
   BLOBs, leases, budgets) and `jobs.sqlite` (Apalis). SQLite is bundled via SQLx; FTS5 is verified
   at startup and by `doctor`. Schema: `migrations/index/0001_init.sql`.
-* **Ingestion**: adapters stream records, the pipeline stages a snapshot, chunks deterministically,
-  and publishes in one short transaction; embeddings are optional and fill in afterwards, so text is
-  searchable before (or without) vectors.
+* **Ingestion**: adapters stream records through one shared JSONL pipeline (`src/adapters/jsonl.rs`;
+  each harness supplies only format-specific hooks), the pipeline stages a snapshot, chunks
+  deterministically, and publishes in one short transaction; embeddings are optional and fill in
+  afterwards, so text is searchable before (or without) vectors.
 * **Reads** pin a manifest under a lease and re-read the original source file with digest
   verification; Spool does not keep full transcript copies for reads.
 

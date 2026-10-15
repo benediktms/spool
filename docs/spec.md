@@ -204,7 +204,7 @@ The conceptual interface is:
 ```rust
 trait HarnessAdapter: Send + Sync {
     fn kind(&self) -> HarnessKind;
-    fn parser_version(&self) -> &str;
+    fn parser_version(&self) -> &'static str;
     fn probe(&self, header: &[u8]) -> ProbeResult;
     fn parse_snapshot(
         &self,
@@ -221,6 +221,8 @@ trait HarnessAdapter: Send + Sync {
 ```
 
 These signatures are architectural sketches; production types should reflect ownership, cancellation, streaming, and error needs. Parsing MUST stream records into a bounded sink rather than return the entire raw transcript in memory.
+
+`HarnessAdapter` is sealed. Every harness implements a crate-internal set of JSONL hooks (header probe, per-line parser, record resolution) and receives the trait from one shared pipeline that owns the read loop, cancellation, byte limits, locators and digests, malformed-line warnings, manifest assembly, and digest-verified resolution, so these invariants cannot be bypassed per harness. A final line without a terminating newline is not yet a record, even when it exceeds `max_record_bytes`: the parsed prefix ends before it. Only a complete line longer than `max_record_bytes` fails with `LimitExceeded`.
 
 ### 5.2 Inclusion policy
 
