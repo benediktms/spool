@@ -332,10 +332,10 @@ impl ControlService {
     async fn cached_coverage(&self) -> Option<crate::embeddings::VectorCoverage> {
         {
             let c = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some((at, v)) = &c.coverage {
-                if at.elapsed() < CACHE_TTL {
-                    return v.clone();
-                }
+            if let Some((at, v)) = &c.coverage
+                && at.elapsed() < CACHE_TTL
+            {
+                return v.clone();
             }
         }
         let v = self.deps.engine.embeddings().vector_coverage().await.ok();
@@ -350,10 +350,10 @@ impl ControlService {
     async fn cached_covered_sessions(&self, profile: &str) -> i64 {
         {
             let c = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some((at, n)) = c.covered {
-                if at.elapsed() < CACHE_TTL {
-                    return n;
-                }
+            if let Some((at, n)) = c.covered
+                && at.elapsed() < CACHE_TTL
+            {
+                return n;
             }
         }
         let n: i64 = sqlx::query_scalar(

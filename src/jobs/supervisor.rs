@@ -308,16 +308,12 @@ impl JobSystem {
             clock.clone(),
         ));
         let ctx = Arc::new(JobCtx::new(
-            index,
             sub,
-            cfg,
             sources,
             engine,
-            embeddings,
             discovery,
             leases,
             reconciler.clone(),
-            clock,
         ));
         let (stop, stop_rx) = watch::channel(false);
         let me = Arc::new(Self {
@@ -551,14 +547,12 @@ impl JobSystem {
                 idempotency_key,
             )
             .await?;
-        if !created {
-            if let Some(task_id) = op.task_id.clone() {
-                return Ok(Submission {
-                    operation_id: op.id,
-                    task_id,
-                    created: false,
-                });
-            }
+        if !created && let Some(task_id) = op.task_id.clone() {
+            return Ok(Submission {
+                operation_id: op.id,
+                task_id,
+                created: false,
+            });
         }
         match ctx.sub.has_room().await {
             Ok(true) => {}
@@ -646,14 +640,12 @@ impl JobSystem {
         };
         let params = json!({ "selection": selection, "sources": source_ids });
         let (op, created) = self.begin_op(kind, &params, idempotency_key).await?;
-        if !created {
-            if let Some(task_id) = op.task_id.clone() {
-                return Ok(Submission {
-                    operation_id: op.id,
-                    task_id,
-                    created: false,
-                });
-            }
+        if !created && let Some(task_id) = op.task_id.clone() {
+            return Ok(Submission {
+                operation_id: op.id,
+                task_id,
+                created: false,
+            });
         }
         let job = ControlJob::Discover(DiscoverSessions {
             payload_version: PAYLOAD_VERSION,
@@ -678,14 +670,12 @@ impl JobSystem {
         let (op, created) = self
             .begin_op(kind, &json!({ "scope": scope }), idempotency_key)
             .await?;
-        if !created {
-            if let Some(task_id) = op.task_id.clone() {
-                return Ok(Submission {
-                    operation_id: op.id,
-                    task_id,
-                    created: false,
-                });
-            }
+        if !created && let Some(task_id) = op.task_id.clone() {
+            return Ok(Submission {
+                operation_id: op.id,
+                task_id,
+                created: false,
+            });
         }
         let job = ControlJob::Maintain(MaintainIndex {
             payload_version: PAYLOAD_VERSION,
@@ -728,14 +718,12 @@ impl JobSystem {
                 idempotency_key,
             )
             .await?;
-        if !created {
-            if let Some(task_id) = op.task_id.clone() {
-                return Ok(Submission {
-                    operation_id: op.id,
-                    task_id,
-                    created: false,
-                });
-            }
+        if !created && let Some(task_id) = op.task_id.clone() {
+            return Ok(Submission {
+                operation_id: op.id,
+                task_id,
+                created: false,
+            });
         }
         let job = ControlJob::Rebuild(RebuildIndex {
             payload_version: PAYLOAD_VERSION,

@@ -323,10 +323,10 @@ impl SessionAdapter for ClaudeAdapter {
                                         .iter()
                                         .filter_map(|result| result.turn_id.as_deref())
                                         .collect();
-                                    if let Some(turn_id) = result_turns.iter().next() {
-                                        if result_turns.len() == 1 {
-                                            meta.turn_id = Some((*turn_id).to_owned());
-                                        }
+                                    if result_turns.len() == 1
+                                        && let Some(turn_id) = result_turns.iter().next()
+                                    {
+                                        meta.turn_id = Some((*turn_id).to_owned());
                                     }
                                 }
                                 if has_text
@@ -407,10 +407,10 @@ impl SessionAdapter for ClaudeAdapter {
                             counts.messages += 1;
                         }
                         counts.blocks_retained += msg.blocks.len() as u64;
-                        if meta.parent_key.is_none() {
-                            if let Some(inherited) = latest_message_parent.get(&id) {
-                                meta.parent_key = inherited.clone();
-                            }
+                        if meta.parent_key.is_none()
+                            && let Some(inherited) = latest_message_parent.get(&id)
+                        {
+                            meta.parent_key = inherited.clone();
                         }
                         latest_message_parent.insert(id.clone(), meta.parent_key.clone());
                         // physical parents stay as written: superseded versions and the records between them remain on the record path
@@ -500,93 +500,92 @@ impl SessionAdapter for ClaudeAdapter {
         let json = serde_json::from_slice::<Value>(line).ok();
         let native_id = x.as_ref().and_then(|record| record.uuid.clone());
         let mut blocks = Vec::new();
-        if let (Some(x), Some(json)) = (x.as_ref(), json.as_ref()) {
-            if let Some(message) = x.message.as_ref() {
-                let role = message.role.as_deref().or(x.ty.as_deref());
-                match message.content.as_ref() {
-                    Some(Content::Text(text)) if matches!(role, Some("user" | "assistant")) => {
-                        blocks.push(ResolvedBlock {
-                            index: 0,
-                            kind: BlockKind::Text,
-                            fidelity: Fidelity::Verbatim,
-                            bytes: text.as_bytes().to_vec(),
-                        });
-                    }
-                    Some(Content::Blocks(content)) => {
-                        for (i, block) in content.iter().enumerate() {
-                            match block.ty.as_deref() {
-                                Some("text") if matches!(role, Some("user" | "assistant")) => {
-                                    if let Some(text) = &block.text {
-                                        blocks.push(ResolvedBlock {
-                                            index: i as u32,
-                                            kind: BlockKind::Text,
-                                            fidelity: Fidelity::Verbatim,
-                                            bytes: text.as_bytes().to_vec(),
-                                        });
-                                    }
+        if let (Some(x), Some(json)) = (x.as_ref(), json.as_ref())
+            && let Some(message) = x.message.as_ref()
+        {
+            let role = message.role.as_deref().or(x.ty.as_deref());
+            match message.content.as_ref() {
+                Some(Content::Text(text)) if matches!(role, Some("user" | "assistant")) => {
+                    blocks.push(ResolvedBlock {
+                        index: 0,
+                        kind: BlockKind::Text,
+                        fidelity: Fidelity::Verbatim,
+                        bytes: text.as_bytes().to_vec(),
+                    });
+                }
+                Some(Content::Blocks(content)) => {
+                    for (i, block) in content.iter().enumerate() {
+                        match block.ty.as_deref() {
+                            Some("text") if matches!(role, Some("user" | "assistant")) => {
+                                if let Some(text) = &block.text {
+                                    blocks.push(ResolvedBlock {
+                                        index: i as u32,
+                                        kind: BlockKind::Text,
+                                        fidelity: Fidelity::Verbatim,
+                                        bytes: text.as_bytes().to_vec(),
+                                    });
                                 }
-                                Some("tool_use") => {
-                                    if let Some(input) =
-                                        json.pointer(&format!("/message/content/{i}/input"))
-                                    {
-                                        let (bytes, fidelity) = if let Some(text) = input.as_str() {
-                                            (text.as_bytes().to_vec(), Fidelity::Verbatim)
-                                        } else {
-                                            (
-                                                serde_json::to_vec(input).map_err(|_| {
-                                                    AdapterError::Unsupported(
-                                                        "invalid Claude tool input".into(),
-                                                    )
-                                                })?,
-                                                Fidelity::NormalizedJson,
-                                            )
-                                        };
-                                        blocks.push(ResolvedBlock {
-                                            index: i as u32,
-                                            kind: BlockKind::ToolCall,
-                                            fidelity,
-                                            bytes,
-                                        });
-                                    }
-                                }
-                                Some("tool_result") => {
-                                    if let Some(result) =
-                                        json.pointer(&format!("/message/content/{i}/content"))
-                                    {
-                                        let (bytes, fidelity) = if let Some(text) = result.as_str()
-                                        {
-                                            (text.as_bytes().to_vec(), Fidelity::Verbatim)
-                                        } else if let Some(text) = result
-                                            .as_array()
-                                            .and_then(|items| (items.len() == 1).then(|| &items[0]))
-                                            .and_then(|item| item.get("text"))
-                                            .and_then(Value::as_str)
-                                        {
-                                            (text.as_bytes().to_vec(), Fidelity::Verbatim)
-                                        } else {
-                                            (
-                                                serde_json::to_vec(result).map_err(|_| {
-                                                    AdapterError::Unsupported(
-                                                        "invalid Claude tool result".into(),
-                                                    )
-                                                })?,
-                                                Fidelity::NormalizedJson,
-                                            )
-                                        };
-                                        blocks.push(ResolvedBlock {
-                                            index: i as u32,
-                                            kind: BlockKind::ToolResult,
-                                            fidelity,
-                                            bytes,
-                                        });
-                                    }
-                                }
-                                _ => {}
                             }
+                            Some("tool_use") => {
+                                if let Some(input) =
+                                    json.pointer(&format!("/message/content/{i}/input"))
+                                {
+                                    let (bytes, fidelity) = if let Some(text) = input.as_str() {
+                                        (text.as_bytes().to_vec(), Fidelity::Verbatim)
+                                    } else {
+                                        (
+                                            serde_json::to_vec(input).map_err(|_| {
+                                                AdapterError::Unsupported(
+                                                    "invalid Claude tool input".into(),
+                                                )
+                                            })?,
+                                            Fidelity::NormalizedJson,
+                                        )
+                                    };
+                                    blocks.push(ResolvedBlock {
+                                        index: i as u32,
+                                        kind: BlockKind::ToolCall,
+                                        fidelity,
+                                        bytes,
+                                    });
+                                }
+                            }
+                            Some("tool_result") => {
+                                if let Some(result) =
+                                    json.pointer(&format!("/message/content/{i}/content"))
+                                {
+                                    let (bytes, fidelity) = if let Some(text) = result.as_str() {
+                                        (text.as_bytes().to_vec(), Fidelity::Verbatim)
+                                    } else if let Some(text) = result
+                                        .as_array()
+                                        .and_then(|items| (items.len() == 1).then(|| &items[0]))
+                                        .and_then(|item| item.get("text"))
+                                        .and_then(Value::as_str)
+                                    {
+                                        (text.as_bytes().to_vec(), Fidelity::Verbatim)
+                                    } else {
+                                        (
+                                            serde_json::to_vec(result).map_err(|_| {
+                                                AdapterError::Unsupported(
+                                                    "invalid Claude tool result".into(),
+                                                )
+                                            })?,
+                                            Fidelity::NormalizedJson,
+                                        )
+                                    };
+                                    blocks.push(ResolvedBlock {
+                                        index: i as u32,
+                                        kind: BlockKind::ToolResult,
+                                        fidelity,
+                                        bytes,
+                                    });
+                                }
+                            }
+                            _ => {}
                         }
                     }
-                    _ => {}
                 }
+                _ => {}
             }
         }
         Ok(ResolvedRecord {

@@ -154,7 +154,7 @@ pub fn interleave<T>(active: Vec<T>, backfill: Vec<T>, counter: &mut u64) -> Vec
     let mut out = Vec::new();
     loop {
         *counter += 1;
-        let next = if *counter % 5 == 0 {
+        let next = if (*counter).is_multiple_of(5) {
             b.next().or_else(|| a.next())
         } else {
             a.next().or_else(|| b.next())
@@ -369,9 +369,11 @@ impl Reconciler {
     pub async fn pass(&self) -> Result<PassReport, AppError> {
         let _g = self.run.lock().await;
         let now = self.clock.now_ms();
-        let mut rep = PassReport::default();
-        rep.finished_operations = self.settle_operations(now).await?;
-        rep.repaired_tasks = self.repair_dead_tasks().await?;
+        let mut rep = PassReport {
+            finished_operations: self.settle_operations(now).await?,
+            repaired_tasks: self.repair_dead_tasks().await?,
+            ..Default::default()
+        };
         // A migration to a new embedding profile switches the moment the published corpus is covered.
         let _ = self.embeddings.activate_if_covered().await;
         let status = self.embeddings.status();

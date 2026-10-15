@@ -13,7 +13,7 @@ use rmcp::{
     },
     service::RequestContext,
 };
-use serde_json::{Map, Value};
+use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -136,7 +136,7 @@ impl ServerHandler for Bridge {
                 None,
             ));
         }
-        let args = Value::Object(request.arguments.unwrap_or_else(Map::new));
+        let args = Value::Object(request.arguments.unwrap_or_default());
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let req = crate::ipc::Request::Tool {
             id,

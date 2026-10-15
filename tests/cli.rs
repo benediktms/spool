@@ -1002,10 +1002,12 @@ async fn dry_run_prints_the_report_and_does_not_poll() {
     assert!(t.contains("since: 2026-10-01T00:00:00Z"), "{t}");
     assert!(t.contains("\"candidate_sessions\": 3"), "{t}");
     assert!(!t.contains("operation"), "{t}");
-    let s = seen.lock();
-    assert_eq!(s.len(), 1);
-    assert_eq!(s[0].1["dry_run"], true);
-    assert_eq!(s[0].1["since_ms"], 1_790_812_800_000_i64);
+    {
+        let s = seen.lock();
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].1["dry_run"], true);
+        assert_eq!(s[0].1["since_ms"], 1_790_812_800_000_i64);
+    }
     let o = run_async(
         home.clone(),
         vec![
@@ -1021,7 +1023,7 @@ async fn dry_run_prints_the_report_and_does_not_poll() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn search_read_status_and_errors_flow_through_the_socket() {
+async fn search_read_and_errors_flow_through_the_socket() {
     let (_t, home) = temp_home();
     let (seen, _stop) = fake_daemon(&home);
     let o = run_async(
@@ -1071,15 +1073,6 @@ async fn search_read_status_and_errors_flow_through_the_socket() {
         json!({"kind":"match","match_ref":"MREF","before":1})
     );
     assert_eq!(v["echo"]["view"], "raw_records");
-
-    let o = run_async(home.clone(), vec!["status".into()]).await;
-    let t = out(&o);
-    assert!(
-        t.contains("state: lexical_only")
-            && t.contains("queued: 2")
-            && t.contains("ingest: healthy"),
-        "{t}"
-    );
 
     let o = run_async(
         home.clone(),

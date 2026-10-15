@@ -177,14 +177,15 @@ impl OpenAiProvider {
             .get(RETRY_AFTER)
             .and_then(|v| v.to_str().ok())
             .and_then(parse_retry_after);
-        if let Some(len) = resp.content_length() {
-            if len as usize > self.max_body && status.is_success() {
-                return Err(EmbedError::new(
-                    EmbedErrorKind::BadResponse,
-                    "response exceeds size limit",
-                )
-                .ambiguous(true));
-            }
+        if let Some(len) = resp.content_length()
+            && len as usize > self.max_body
+            && status.is_success()
+        {
+            return Err(EmbedError::new(
+                EmbedErrorKind::BadResponse,
+                "response exceeds size limit",
+            )
+            .ambiguous(true));
         }
         if !status.is_success() {
             let raw = read_capped(resp, ERROR_BODY_CAP, true)

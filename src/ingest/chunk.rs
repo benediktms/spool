@@ -144,24 +144,51 @@ fn spans(context: &[Fragment<'_>], new: &[Fragment<'_>]) -> Vec<ChunkSpan> {
     context.iter().chain(new).map(Fragment::span).collect()
 }
 #[derive(Clone, Copy)]
+struct Env<'a> {
+    cfg: &'a ChunkConfig,
+    tok: &'a dyn TokenCounter,
+    cancel: &'a AtomicBool,
+}
+impl Env<'_> {
+    fn context_limit(&self) -> usize {
+        self.cfg
+            .overlap_tokens
+            .min(200)
+            .min(self.cfg.max_rendered_tokens)
+    }
+}
+struct RunBuf<'a> {
+    run_key: &'a str,
+    ordinal: u32,
+    recent_context: Vec<Fragment<'a>>,
+    current: Vec<Fragment<'a>>,
+    tokens: usize,
+    bytes: usize,
+    time: Option<TimestampMs>,
+}
+#[derive(Clone, Copy)]
 struct PrefixFit {
     bytes: usize,
     rendered_tokens: usize,
     new_tokens: usize,
 }
 fn largest_prefix<'a>(
-    text: &'a str,
+    env: &Env<'_>,
     mut full_base: Vec<Fragment<'a>>,
     mut new_base: Vec<Fragment<'a>>,
-    message: &'a ChunkMessage,
-    block: &'a TextBlock,
-    start: usize,
+    from: Fragment<'a>,
     current_tokens: usize,
-    hard_limit: usize,
-    target_limit: usize,
-    tok: &dyn TokenCounter,
-    cancel: &AtomicBool,
 ) -> Result<Option<PrefixFit>, ChunkError> {
+    let Env { cfg, tok, cancel } = *env;
+    let Fragment {
+        message,
+        block,
+        start,
+        ..
+    } = from;
+    let text: &'a str = &block.text;
+    let hard_limit = cfg.max_rendered_tokens;
+    let target_limit = cfg.target_new_tokens.max(1);
     check_cancel(cancel)?;
     let rest = &text[start..];
     if rest.is_empty() {
@@ -319,25 +346,21 @@ fn select_context<'a>(
     Ok(selected)
 }
 fn plan(
-    run_key: &str,
-    ordinal: u32,
+    env: &Env<'_>,
+    buf: &RunBuf<'_>,
     context: &[Fragment<'_>],
-    new: &[Fragment<'_>],
-    time: Option<TimestampMs>,
-    tok: &dyn TokenCounter,
-    cancel: &AtomicBool,
     is_tail: bool,
 ) -> Result<ChunkPlan, ChunkError> {
-    let rendered = render_with(context, new);
-    let rendered_tokens = count_tokens(tok, &rendered, cancel)?;
+    let rendered = render_with(context, &buf.current);
+    let rendered_tokens = count_tokens(env.tok, &rendered, env.cancel)?;
     Ok(ChunkPlan {
-        run_key: run_key.into(),
-        ordinal,
+        run_key: buf.run_key.into(),
+        ordinal: buf.ordinal,
         input_hash: digest(rendered.as_bytes()),
         rendered,
         rendered_tokens,
-        time_anchor: time,
-        spans: spans(context, new),
+        time_anchor: buf.time,
+        spans: spans(context, &buf.current),
         is_tail,
     })
 }
@@ -353,6 +376,7 @@ pub fn plan_chunks(
     cancel: &AtomicBool,
 ) -> Result<Vec<ChunkPlan>, ChunkError> {
     check_cancel(cancel)?;
+    let env = Env { cfg, tok, cancel };
     let mut by_key = HashMap::with_capacity(messages.len());
     for message in messages {
         check_cancel(cancel)?;
@@ -395,13 +419,15 @@ pub fn plan_chunks(
                 }
             }
         }
-        let context_limit = cfg.overlap_tokens.min(200).min(cfg.max_rendered_tokens);
-        let mut recent_context = select_context(&ancestors, context_limit, tok, cancel)?;
-        let mut current = Vec::new();
-        let mut current_tokens = 0usize;
-        let mut current_bytes = 0usize;
-        let mut current_time = None;
-        let mut ordinal = 0u32;
+        let mut buf = RunBuf {
+            run_key: &run.key,
+            ordinal: 0,
+            recent_context: select_context(&ancestors, env.context_limit(), tok, cancel)?,
+            current: Vec::new(),
+            tokens: 0,
+            bytes: 0,
+            time: None,
+        };
         for key in &run.messages {
             check_cancel(cancel)?;
             let Some(message) = by_key.get(key.as_str()) else {
@@ -412,64 +438,32 @@ pub fn plan_chunks(
                 let mut start = 0usize;
                 while start < block.text.len() {
                     check_cancel(cancel)?;
-                    if !current.is_empty()
-                        && (current_tokens >= cfg.target_new_tokens.max(1)
-                            || current_bytes >= MAX_CHUNK_NEW_BYTES
-                            || current.len() >= MAX_CHUNK_FRAGMENTS)
+                    if !buf.current.is_empty()
+                        && (buf.tokens >= cfg.target_new_tokens.max(1)
+                            || buf.bytes >= MAX_CHUNK_NEW_BYTES
+                            || buf.current.len() >= MAX_CHUNK_FRAGMENTS)
                     {
-                        flush_current(
-                            &run.key,
-                            &mut plans,
-                            &mut recent_context,
-                            &mut current,
-                            &mut current_tokens,
-                            &mut current_bytes,
-                            &mut current_time,
-                            &mut ordinal,
-                            context_limit,
-                            cfg,
-                            tok,
-                            cancel,
-                            false,
-                        )?;
+                        flush_current(&env, &mut plans, &mut buf, false)?;
                     }
-                    let mut context = if current.is_empty() {
-                        recent_context.clone()
+                    let mut context = if buf.current.is_empty() {
+                        buf.recent_context.clone()
                     } else {
-                        fit_context(&recent_context, &current, cfg, tok, cancel)?
+                        fit_context(&env, &buf.recent_context, &buf.current)?
                     };
                     let mut full_base = context.clone();
-                    full_base.extend(current.iter().copied());
-                    let prefix_fit = largest_prefix(
-                        &block.text,
-                        full_base,
-                        current.clone(),
+                    full_base.extend(buf.current.iter().copied());
+                    let rest = Fragment {
                         message,
                         block,
                         start,
-                        current_tokens,
-                        cfg.max_rendered_tokens,
-                        cfg.target_new_tokens.max(1),
-                        tok,
-                        cancel,
-                    )?;
+                        end: block.text.len(),
+                        is_context: false,
+                    };
+                    let prefix_fit =
+                        largest_prefix(&env, full_base, buf.current.clone(), rest, buf.tokens)?;
                     let mut take = prefix_fit.map_or(0, |fit| fit.bytes);
-                    if take == 0 && !current.is_empty() {
-                        flush_current(
-                            &run.key,
-                            &mut plans,
-                            &mut recent_context,
-                            &mut current,
-                            &mut current_tokens,
-                            &mut current_bytes,
-                            &mut current_time,
-                            &mut ordinal,
-                            context_limit,
-                            cfg,
-                            tok,
-                            cancel,
-                            false,
-                        )?;
+                    if take == 0 && !buf.current.is_empty() {
+                        flush_current(&env, &mut plans, &mut buf, false)?;
                         continue;
                     }
                     if take == 0 {
@@ -481,81 +475,49 @@ pub fn plan_chunks(
                             .unwrap_or(block.text.len() - start);
                     }
                     let fragment = Fragment {
-                        message,
-                        block,
-                        start,
                         end: start + take,
-                        is_context: false,
+                        ..rest
                     };
                     let rendered_tokens = if let Some(fit) = prefix_fit {
                         fit.rendered_tokens
                     } else {
                         let mut candidate = context.clone();
-                        candidate.extend(current.iter().copied());
+                        candidate.extend(buf.current.iter().copied());
                         candidate.push(fragment);
                         count_tokens(tok, &render(&candidate), cancel)?
                     };
                     if rendered_tokens > cfg.max_rendered_tokens {
-                        if !current.is_empty() {
-                            flush_current(
-                                &run.key,
-                                &mut plans,
-                                &mut recent_context,
-                                &mut current,
-                                &mut current_tokens,
-                                &mut current_bytes,
-                                &mut current_time,
-                                &mut ordinal,
-                                context_limit,
-                                cfg,
-                                tok,
-                                cancel,
-                                false,
-                            )?;
+                        if !buf.current.is_empty() {
+                            flush_current(&env, &mut plans, &mut buf, false)?;
                             continue;
                         }
                         return Err(ChunkError::TokenLimit);
                     }
-                    current.push(fragment);
-                    current_bytes += take;
-                    current_tokens = match prefix_fit {
+                    buf.current.push(fragment);
+                    buf.bytes += take;
+                    buf.tokens = match prefix_fit {
                         Some(fit) => fit.new_tokens,
-                        None => count_tokens(tok, &render(&current), cancel)?,
+                        None => count_tokens(tok, &render(&buf.current), cancel)?,
                     };
                     if message.timestamp.is_some() {
-                        current_time = message.timestamp;
+                        buf.time = message.timestamp;
                     }
                     start += take;
                 }
             }
         }
-        flush_current(
-            &run.key,
-            &mut plans,
-            &mut recent_context,
-            &mut current,
-            &mut current_tokens,
-            &mut current_bytes,
-            &mut current_time,
-            &mut ordinal,
-            context_limit,
-            cfg,
-            tok,
-            cancel,
-            true,
-        )?;
+        flush_current(&env, &mut plans, &mut buf, true)?;
     }
     check_cancel(cancel)?;
     Ok(plans)
 }
 
 fn fit_context<'a>(
+    env: &Env<'_>,
     recent: &[Fragment<'a>],
     new: &[Fragment<'a>],
-    cfg: &ChunkConfig,
-    tok: &dyn TokenCounter,
-    cancel: &AtomicBool,
 ) -> Result<Vec<Fragment<'a>>, ChunkError> {
+    let Env { cfg, tok, cancel } = *env;
     let budget = cfg
         .max_rendered_tokens
         .saturating_sub(count_tokens(tok, &render(new), cancel)?);
@@ -573,44 +535,27 @@ fn fit_context<'a>(
 }
 
 fn flush_current<'a>(
-    run_key: &str,
+    env: &Env<'_>,
     plans: &mut Vec<ChunkPlan>,
-    recent_context: &mut Vec<Fragment<'a>>,
-    current: &mut Vec<Fragment<'a>>,
-    current_tokens: &mut usize,
-    current_bytes: &mut usize,
-    current_time: &mut Option<TimestampMs>,
-    ordinal: &mut u32,
-    context_limit: usize,
-    cfg: &ChunkConfig,
-    tok: &dyn TokenCounter,
-    cancel: &AtomicBool,
+    buf: &mut RunBuf<'a>,
     is_tail: bool,
 ) -> Result<(), ChunkError> {
-    if current.is_empty() {
+    if buf.current.is_empty() {
         return Ok(());
     }
-    let context = fit_context(recent_context, current, cfg, tok, cancel)?;
-    plans.push(plan(
-        run_key,
-        *ordinal,
-        &context,
-        current,
-        *current_time,
-        tok,
-        cancel,
-        is_tail,
-    )?);
-    *ordinal += 1;
-    let candidates = recent_context
+    let context = fit_context(env, &buf.recent_context, &buf.current)?;
+    plans.push(plan(env, buf, &context, is_tail)?);
+    buf.ordinal += 1;
+    let candidates = buf
+        .recent_context
         .iter()
-        .chain(current.iter())
+        .chain(buf.current.iter())
         .copied()
         .collect::<Vec<_>>();
-    *recent_context = select_context(&candidates, context_limit, tok, cancel)?;
-    current.clear();
-    *current_tokens = 0;
-    *current_bytes = 0;
-    *current_time = None;
+    buf.recent_context = select_context(&candidates, env.context_limit(), env.tok, env.cancel)?;
+    buf.current.clear();
+    buf.tokens = 0;
+    buf.bytes = 0;
+    buf.time = None;
     Ok(())
 }

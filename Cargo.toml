@@ -47,3 +47,6 @@ tempfile = "3"
 [[bench]]
 name = "search_bench"
 harness = false
+
+[lints.clippy]
+all = "deny"

@@ -187,7 +187,8 @@ async fn kill_and_recover(second_name: &str) {
     let mut c2 = spawn_child(dir, false, second_name);
     let ok = wait_for(&dir.join("done"), Duration::from_secs(30));
     if !ok {
-        let rows: Vec<(String, String, i64, Option<String>, Option<String>)> =
+        type JobRow = (String, String, i64, Option<String>, Option<String>);
+        let rows: Vec<JobRow> =
             sqlx::query_as("SELECT id, status, attempts, lock_by, last_result FROM Jobs")
                 .fetch_all(&pool)
                 .await

@@ -7,7 +7,7 @@ use serde::Serialize;
 use sqlx::sqlite::SqliteArguments;
 use sqlx::{Row, SqliteConnection};
 use std::cmp::{Ordering, Reverse};
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashMap};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering as AtOrd};
 use std::time::Instant;
@@ -248,9 +248,11 @@ fn score_batch(
             continue;
         }
         let score: f32 = blob
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .zip(q)
-            .map(|(b, x)| f32::from_le_bytes([b[0], b[1], b[2], b[3]]) * x)
+            .map(|(b, x)| f32::from_le_bytes(*b) * x)
             .sum();
         if !score.is_finite() {
             continue;
@@ -275,19 +277,29 @@ pub struct ScanOutcome {
     pub complete: bool,
 }
 
+/// Limits of one semantic scan: top-`k` kept, vector bytes per batch, cooperative cancel and local deadline.
+pub struct ScanLimits {
+    pub k: usize,
+    pub batch_bytes: usize,
+    pub cancel: Arc<AtomicBool>,
+    pub deadline: Instant,
+}
+
 /// Exact scan of every eligible chunk with a vector for `profile_id` (dimension `q.len()`), in batches of at most
 /// `batch_bytes` of vector data; scoring runs in `spawn_blocking` (the caller holds the concurrency permit).
-#[allow(clippy::too_many_arguments)]
 pub async fn semantic_scan(
     conn: &mut SqliteConnection,
     f: &Filters,
     profile_id: &str,
     q: Arc<Vec<f32>>,
-    k: usize,
-    batch_bytes: usize,
-    cancel: Arc<AtomicBool>,
-    deadline: Instant,
+    limits: ScanLimits,
 ) -> Result<ScanOutcome, AppError> {
+    let ScanLimits {
+        k,
+        batch_bytes,
+        cancel,
+        deadline,
+    } = limits;
     let (w, filter_binds) = f.clause("c.time_anchor");
     let rows_per_batch = (batch_bytes / (q.len() * 4).max(1)).max(1);
     // Driven by the embeddings primary key (profile, input_hash): a sequential range scan of the vectors, with
@@ -421,31 +433,37 @@ pub struct SpanRow {
     pub msg_ts: Option<i64>,
 }
 
+/// Spans of each chunk in `rowids`, in `seq` order. Every requested chunk gets an entry (possibly empty).
 pub async fn load_spans(
     conn: &mut SqliteConnection,
-    c: &ChunkMeta,
-) -> Result<Vec<SpanRow>, AppError> {
-    let rows = sqlx::query(
-        "SELECT sp.record_key, sp.block_index, sp.start_byte, sp.end_byte, sp.is_context, m.ts \
-         FROM chunk_spans sp LEFT JOIN messages m ON m.snapshot_id = ? AND m.record_key = sp.record_key \
-         WHERE sp.chunk_rowid = ? ORDER BY sp.seq",
-    )
-    .bind(&c.snapshot_id)
-    .bind(c.rowid)
-    .fetch_all(&mut *conn)
-    .await
-    .map_err(storage_err)?;
-    Ok(rows
-        .iter()
-        .map(|r| SpanRow {
-            record_key: r.get(0),
-            block_index: r.get(1),
-            start: r.get(2),
-            end: r.get(3),
-            is_context: r.get::<i64, _>(4) != 0,
-            msg_ts: r.get(5),
-        })
-        .collect())
+    rowids: &[i64],
+) -> Result<HashMap<i64, Vec<SpanRow>>, AppError> {
+    let mut out: HashMap<i64, Vec<SpanRow>> = rowids.iter().map(|r| (*r, Vec::new())).collect();
+    for part in rowids.chunks(500) {
+        let sql = format!(
+            "SELECT sp.chunk_rowid, sp.record_key, sp.block_index, sp.start_byte, sp.end_byte, sp.is_context, m.ts \
+             FROM chunk_spans sp JOIN chunks c ON c.rowid = sp.chunk_rowid \
+             LEFT JOIN messages m ON m.snapshot_id = c.snapshot_id AND m.record_key = sp.record_key \
+             WHERE sp.chunk_rowid IN ({}) ORDER BY sp.chunk_rowid, sp.seq",
+            ph(part.len())
+        );
+        let binds: Vec<Bind> = part.iter().map(|r| Bind::Int(*r)).collect();
+        for r in build(sql, &binds)
+            .fetch_all(&mut *conn)
+            .await
+            .map_err(storage_err)?
+        {
+            out.entry(r.get(0)).or_default().push(SpanRow {
+                record_key: r.get(1),
+                block_index: r.get(2),
+                start: r.get(3),
+                end: r.get(4),
+                is_context: r.get::<i64, _>(5) != 0,
+                msg_ts: r.get(6),
+            });
+        }
+    }
+    Ok(out)
 }
 
 pub async fn chunk_body(conn: &mut SqliteConnection, rowid: i64) -> Result<String, AppError> {

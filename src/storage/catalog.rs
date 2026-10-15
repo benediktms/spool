@@ -4,6 +4,7 @@
 
 use crate::domain::SessionKind;
 use crate::ids;
+use crate::source::SourceFileInfo;
 use crate::sources::SourceEntry;
 use crate::storage::index::Index;
 use sqlx::{Row, SqliteConnection};
@@ -232,11 +233,7 @@ pub async fn upsert_session(
 pub async fn upsert_source_file(
     conn: &mut SqliteConnection,
     session_id: &str,
-    path: &str,
-    len: u64,
-    mtime_ms: i64,
-    dev: u64,
-    ino: u64,
+    file: &SourceFileInfo,
     now_ms: i64,
 ) -> Result<()> {
     sqlx::query(
@@ -245,11 +242,11 @@ pub async fn upsert_source_file(
          mtime_ms = excluded.mtime_ms, exists_status = 'present', last_checked_at = excluded.last_checked_at",
     )
     .bind(session_id)
-    .bind(path)
-    .bind(dev as i64)
-    .bind(ino as i64)
-    .bind(len as i64)
-    .bind(mtime_ms)
+    .bind(file.path.to_string_lossy().as_ref())
+    .bind(file.dev as i64)
+    .bind(file.ino as i64)
+    .bind(file.len as i64)
+    .bind(file.mtime_ms)
     .bind(now_ms)
     .execute(&mut *conn)
     .await?;

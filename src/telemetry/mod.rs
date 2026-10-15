@@ -16,10 +16,11 @@ pub const LOG_FILE: &str = "spool.log";
 /// `~/Library/Logs/Spool` on macOS, `<state>/logs` elsewhere. An explicit `SPOOL_HOME`
 /// (isolated runs, tests) keeps logs inside that home.
 pub fn log_dir(paths: &Paths) -> PathBuf {
-    if std::env::var_os("SPOOL_HOME").is_none() && cfg!(target_os = "macos") {
-        if let Some(h) = std::env::var_os("HOME") {
-            return PathBuf::from(h).join("Library/Logs/Spool");
-        }
+    if std::env::var_os("SPOOL_HOME").is_none()
+        && cfg!(target_os = "macos")
+        && let Some(h) = std::env::var_os("HOME")
+    {
+        return PathBuf::from(h).join("Library/Logs/Spool");
     }
     if std::env::var_os("SPOOL_HOME").is_some() {
         return paths.root.join("logs");

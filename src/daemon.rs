@@ -120,7 +120,7 @@ impl Daemon {
         // Spec 17.1 step 3: verify ownership/permissions. Files we created are tightened; foreign
         // ownership or a loose secret is a startup error.
         let cred = cfg.credential_path(&paths.root)?;
-        let issues = perms::check(&paths, &[cred.clone()]);
+        let issues = perms::check(&paths, std::slice::from_ref(&cred));
         let (ours, theirs): (Vec<_>, Vec<_>) = issues
             .into_iter()
             .partition(|i| i.actual.is_some() && i.path != paths.signing_key && i.path != cred);
@@ -248,7 +248,6 @@ impl Daemon {
             self.embeddings.clone(),
             self.leases.clone(),
             self.keys.clone(),
-            self.clock.clone(),
         ));
         let reader = Arc::new(ReadService::new(
             self.index.clone(),
@@ -257,7 +256,6 @@ impl Daemon {
             self.keys.clone(),
             self.sources.clone(),
             self.engine.source_read_stager(),
-            self.clock.clone(),
         ));
         let control: Arc<OnceLock<Arc<ControlService>>> = Arc::new(OnceLock::new());
         let listener = self.bind()?;

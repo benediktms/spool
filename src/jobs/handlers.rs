@@ -63,30 +63,26 @@ pub struct JobCtx {
 }
 
 impl JobCtx {
-    #[allow(clippy::too_many_arguments)]
+    /// `index`, `cfg` and `clock` are the submitter's; `embeddings` is the engine's.
     pub fn new(
-        index: Index,
         sub: Submitter,
-        cfg: Arc<Config>,
         sources: Arc<SourceRegistry>,
         engine: Arc<IngestEngine>,
-        embeddings: Arc<EmbeddingService>,
         discovery: Arc<DiscoveryService>,
         leases: LeaseManager,
         reconciler: Arc<Reconciler>,
-        clock: SharedClock,
     ) -> Self {
         Self {
-            index,
+            index: sub.index.clone(),
+            cfg: sub.cfg.clone(),
+            clock: sub.clock.clone(),
+            embeddings: engine.embeddings().clone(),
             sub,
-            cfg,
             sources,
             engine,
-            embeddings,
             discovery,
             leases,
             reconciler,
-            clock,
             shutdown: AtomicBool::new(false),
             inflight: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
@@ -252,10 +248,10 @@ async fn run_index(ctx: &Arc<JobCtx>, job: &IndexSession, attempt: usize) -> Res
     if ctx.is_shutting_down() {
         return Err(shutdown_err());
     }
-    if let Some(op) = &job.operation_id {
-        if ops::cancel_requested(idx, op).await {
-            return Ok(());
-        }
+    if let Some(op) = &job.operation_id
+        && ops::cancel_requested(idx, op).await
+    {
+        return Ok(());
     }
     if storage_paused(idx, &ctx.cfg).await {
         let _ = catalog::app_meta_set(idx, "ingest.paused", "storage").await;

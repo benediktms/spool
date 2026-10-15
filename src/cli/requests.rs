@@ -38,10 +38,10 @@ pub fn search_request(a: &SearchArgs, now_ms: i64, tz: Tz) -> Built<Value> {
             m.insert(key.into(), super::timeparse::format_rfc3339(ms, UTC).into());
         }
     }
-    if let (Some(a_), Some(b_)) = (m.get("after"), m.get("before")) {
-        if a_.as_str() >= b_.as_str() {
-            return Err("--since must be earlier than --until".into());
-        }
+    if let (Some(a_), Some(b_)) = (m.get("after"), m.get("before"))
+        && a_.as_str() >= b_.as_str()
+    {
+        return Err("--since must be earlier than --until".into());
     }
     put(&mut m, "limit", a.limit);
     Ok(Value::Object(m))

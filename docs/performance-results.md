@@ -76,3 +76,34 @@ chunks/sessions/snapshots, and the semantic scan probed the vector table once pe
 ## Retrieval quality
 
 See `docs/retrieval-eval.md` (50-query synthetic evaluation; fake embedding model; no real-corpus claim).
+
+## Bounded SQL batching refactor (2026-10-15)
+
+Search now loads candidate spans in batches of at most 500 rowids rather than issuing a query per
+candidate. Publication inserts chunks and their ordered spans in bounded multi-row statements inside
+the same guarded transaction; chunk-to-span mapping uses logical IDs, not `RETURNING` row order.
+
+Measured with `scripts/perf_daemon.py --idle-seconds 1 --populated-idle-seconds 1 --sessions 300
+--messages 200`, first against the installed pre-refactor binary, then against the refactored release
+binary. Both runs indexed all 300 sessions into 24,600 chunks, returned search hits, and answered a
+search after restart. Hosted processing was disabled and all sources were synthetic sandbox files.
+
+| Metric | Before | After batching |
+|---|---:|---:|
+| Ingestion elapsed | 88.4 s | 74.8 s |
+| Search during ingestion p95 | 198.2 ms | 70.6 ms |
+| Search after ingestion p95 | 30.3 ms | 35.1 ms |
+| During/after p95 ratio | 6.55x | 2.01x |
+| Restart to search with hits | 0.112 s | 0.101 s |
+
+These are single sequential samples, not benchmark medians. Other development work ran on the host;
+the baseline tail latency was unusually high compared with the earlier measurements above. The
+results demonstrate functioning ingestion, search and restart, but do not isolate a causal speedup or
+establish compliance with the 2x latency-ratio target. The shortened idle samples do not replace the
+ten-minute idle CPU measurement.
+
+After the Clippy-driven context and ownership cleanup, 313 tests across 13 affected integration
+targets passed. Formatting and `cargo clippy --locked --all-targets --all-features -- -D warnings`
+also passed without warnings. A final release-binary smoke indexed 20 synthetic sessions into 340
+chunks and returned search hits before and after restart. Its during/after p95 ratio was 3.14x
+(24.0/7.6 ms), further evidence that the ratio target is not consistently met.

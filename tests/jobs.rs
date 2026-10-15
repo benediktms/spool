@@ -6,9 +6,9 @@ mod jobs_common;
 use jobs_common::*;
 use serde_json::json;
 use spool::embeddings::fake::Fault;
+use spool::jobs::WorkerState;
 use spool::jobs::payload::*;
 use spool::jobs::scheduler::{RETRY_CAP, Reconciler, interleave, jitter_from, retry_delay};
-use spool::jobs::{JobSystem, WorkerState};
 use spool::storage::catalog;
 use std::sync::Arc;
 use std::time::Duration;
@@ -706,9 +706,8 @@ async fn transient_failures_retry_through_apalis_scheduling_then_rest_without_fa
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
     assert_eq!(env.provider.calls(), calls);
-    assert_eq!(
+    assert!(
         chunks(&env).await >= 1,
-        true,
         "text was published and stays searchable despite the provider failure"
     );
     sys.shutdown(Duration::from_secs(15)).await;
@@ -1323,6 +1322,3 @@ async fn maintenance_sweeps_leases_purges_unreferenced_vectors_and_prunes_comple
     );
     sys.shutdown(Duration::from_secs(15)).await;
 }
-
-#[allow(dead_code)]
-fn _unused(_: Option<Arc<JobSystem>>) {}

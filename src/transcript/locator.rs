@@ -55,6 +55,14 @@ pub fn resource_limit(limit: &str, message: &str, recovery: &str) -> AppError {
     e
 }
 
+/// Per-call read budgets applied to one [`SourceCtx`].
+#[derive(Clone, Copy)]
+pub struct SourceLimits {
+    pub max_record_bytes: u64,
+    pub max_read_bytes: u64,
+    pub max_read_millis: u64,
+}
+
 pub struct SourceCtx {
     sources: Arc<SourceRegistry>,
     source_id: String,
@@ -72,16 +80,13 @@ pub struct SourceCtx {
 }
 
 impl SourceCtx {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         sources: Arc<SourceRegistry>,
         source_id: String,
         path: Option<PathBuf>,
         snap: &Snap,
         adapter: Arc<dyn SessionAdapter>,
-        max_record_bytes: u64,
-        max_read_bytes: u64,
-        max_read_millis: u64,
+        limits: SourceLimits,
     ) -> Self {
         Self {
             sources,
@@ -90,9 +95,9 @@ impl SourceCtx {
             file_dev: snap.file_dev,
             file_ino: snap.file_ino,
             adapter,
-            max_record_bytes,
-            max_read_bytes,
-            deadline: Instant::now() + std::time::Duration::from_millis(max_read_millis),
+            max_record_bytes: limits.max_record_bytes,
+            max_read_bytes: limits.max_read_bytes,
+            deadline: Instant::now() + std::time::Duration::from_millis(limits.max_read_millis),
             file: None,
             info: None,
             bytes_read: 0,
@@ -186,10 +191,10 @@ impl SourceCtx {
         loc: SourceLocator,
         digest: Digest,
     ) -> Result<Arc<ResolvedRecord>, ResolveFail> {
-        if let Some((k, r)) = &self.last {
-            if k == key {
-                return Ok(r.clone());
-            }
+        if let Some((k, r)) = &self.last
+            && k == key
+        {
+            return Ok(r.clone());
         }
         self.check_time().map_err(ResolveFail::Fatal)?;
         if self.bytes_read.saturating_add(loc.len) > self.max_read_bytes {
@@ -251,10 +256,10 @@ impl SourceCtx {
             if crate::ingest::stage::revision4(info) == snap.revision {
                 return Observation::Current;
             }
-            if let (Some(sd), Some(si)) = (snap.file_dev, snap.file_ino) {
-                if info.dev as i64 != sd || info.ino as i64 != si {
-                    return Observation::Stale;
-                }
+            if let (Some(sd), Some(si)) = (snap.file_dev, snap.file_ino)
+                && (info.dev as i64 != sd || info.ino as i64 != si)
+            {
+                return Observation::Stale;
             }
         }
         let prefix_end = snap.prefix_end.max(0) as u64;

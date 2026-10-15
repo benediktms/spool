@@ -5,8 +5,8 @@ use super::chunk::{ChunkConfig, ChunkMessage, ChunkPlan, TokenCounter, plan_chun
 use super::embed::{EmbedStats, embed_missing};
 use super::publish::{PublishOutcome, publish};
 use super::stage::{
-    self, AfterParse, CPU, SnapshotKind, StageError, Staged, build_graph, load_session,
-    open_recorded, revision4, stage_with_hook,
+    self, AfterParse, CPU, SnapshotKind, StageContext, StageError, Staged, build_graph,
+    load_session, open_recorded, revision4, stage_with_hook,
 };
 use crate::adapters::{ParseOptions, RecordSink, SinkError, adapter_for};
 use crate::clock::SharedClock;
@@ -22,7 +22,6 @@ use parking_lot::Mutex;
 use sqlx::Row;
 use std::collections::{HashMap, HashSet};
 use std::io::{BufReader, Read};
-use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -247,6 +246,16 @@ impl IngestEngine {
         }
     }
 
+    fn stage_context<'a>(&'a self, fingerprint: &'a str) -> StageContext<'a> {
+        StageContext {
+            index: &self.index,
+            sources: &self.sources,
+            cfg: &self.cfg,
+            clock: &self.clock,
+            fingerprint,
+        }
+    }
+
     /// Adapter parser versions + extraction policy + chunker version/config + tokenizer identity (spec 9.4).
     pub fn pipeline_fingerprint(&self) -> String {
         let mut h = blake3::Hasher::new();
@@ -422,14 +431,10 @@ impl IngestEngine {
         // 3. Stage a snapshot of the observed prefix.
         let hook = self.fail.after_parse.lock().clone();
         let staged = match stage_with_hook(
-            &self.index,
-            &self.sources,
-            &self.cfg,
+            &self.stage_context(&fp),
             sid,
             SnapshotKind::Indexed,
             cancel.clone(),
-            &self.clock,
-            &fp,
             hook,
         )
         .await
@@ -481,7 +486,6 @@ impl IngestEngine {
         // 5. Vectors for whatever the cache lacks. Text is already searchable.
         let stats = self.embed(sid, &cancel).await?;
         FailPoints::fire(&self.fail.after_embed_commit)?;
-        let _ = &req.observed_source_revision;
         Ok(IndexOutcome::Published {
             snapshot_id,
             generation: new_generation,
@@ -755,14 +759,10 @@ impl SourceReadStager for Stager {
             let e = &self.0;
             let fp = e.pipeline_fingerprint();
             match stage::stage_snapshot(
-                &e.index,
-                &e.sources,
-                &e.cfg,
+                &e.stage_context(&fp),
                 session_id,
                 SnapshotKind::SourceRead,
                 Arc::new(AtomicBool::new(false)),
-                &e.clock,
-                &fp,
             )
             .await
             {
@@ -842,6 +842,3 @@ impl RecordSink for Collect {
         &self.cancel
     }
 }
-
-#[allow(dead_code)]
-fn _path_type_check(_: &Path) {}

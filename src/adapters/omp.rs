@@ -511,96 +511,95 @@ impl SessionAdapter for OmpAdapter {
         let text_entry = serde_json::from_slice::<TextEntry>(line).ok();
         let native_id = ent.as_ref().and_then(|entry| entry.id.clone());
         let mut blocks = Vec::new();
-        if let (Some(ent), Some(json)) = (ent.as_ref(), json.as_ref()) {
-            if let Some(message) = ent.message.as_ref() {
-                let role = message.role.as_deref();
-                if role == Some("toolResult") || ent.ty.as_deref() == Some("toolResult") {
-                    if let Some(value) = json
-                        .pointer("/message/content")
-                        .filter(|value| !value.is_null())
+        if let (Some(ent), Some(json)) = (ent.as_ref(), json.as_ref())
+            && let Some(message) = ent.message.as_ref()
+        {
+            let role = message.role.as_deref();
+            if role == Some("toolResult") || ent.ty.as_deref() == Some("toolResult") {
+                if let Some(value) = json
+                    .pointer("/message/content")
+                    .filter(|value| !value.is_null())
+                {
+                    let (bytes, fidelity) = if let Some(text) = value.as_str() {
+                        (text.as_bytes().to_vec(), Fidelity::Verbatim)
+                    } else if let Some(text) = value
+                        .as_array()
+                        .and_then(|items| (items.len() == 1).then(|| &items[0]))
+                        .and_then(|item| item.get("text"))
+                        .and_then(Value::as_str)
                     {
-                        let (bytes, fidelity) = if let Some(text) = value.as_str() {
-                            (text.as_bytes().to_vec(), Fidelity::Verbatim)
-                        } else if let Some(text) = value
-                            .as_array()
-                            .and_then(|items| (items.len() == 1).then(|| &items[0]))
-                            .and_then(|item| item.get("text"))
-                            .and_then(Value::as_str)
-                        {
-                            (text.as_bytes().to_vec(), Fidelity::Verbatim)
-                        } else {
-                            (
-                                serde_json::to_vec(value).map_err(|_| {
-                                    AdapterError::Unsupported("invalid tool result".into())
-                                })?,
-                                Fidelity::NormalizedJson,
-                            )
-                        };
-                        blocks.push(ResolvedBlock {
-                            index: 0,
-                            kind: BlockKind::ToolResult,
-                            fidelity,
-                            bytes,
-                        });
-                    }
-                } else if matches!(role, Some("user" | "assistant")) {
-                    match text_entry
-                        .as_ref()
-                        .and_then(|t| t.message.as_ref())
-                        .and_then(|m| m.content.as_ref())
-                    {
-                        Some(Content::Text(text)) => blocks.push(ResolvedBlock {
-                            index: 0,
-                            kind: BlockKind::Text,
-                            fidelity: Fidelity::Verbatim,
-                            bytes: text.as_bytes().to_vec(),
-                        }),
-                        Some(Content::Blocks(content_blocks)) => {
-                            for (i, block) in content_blocks.iter().enumerate() {
-                                match block.ty.as_deref() {
-                                    Some("text") => {
-                                        if let Some(text) = &block.text {
-                                            blocks.push(ResolvedBlock {
-                                                index: i as u32,
-                                                kind: BlockKind::Text,
-                                                fidelity: Fidelity::Verbatim,
-                                                bytes: text.as_bytes().to_vec(),
-                                            });
-                                        }
+                        (text.as_bytes().to_vec(), Fidelity::Verbatim)
+                    } else {
+                        (
+                            serde_json::to_vec(value).map_err(|_| {
+                                AdapterError::Unsupported("invalid tool result".into())
+                            })?,
+                            Fidelity::NormalizedJson,
+                        )
+                    };
+                    blocks.push(ResolvedBlock {
+                        index: 0,
+                        kind: BlockKind::ToolResult,
+                        fidelity,
+                        bytes,
+                    });
+                }
+            } else if matches!(role, Some("user" | "assistant")) {
+                match text_entry
+                    .as_ref()
+                    .and_then(|t| t.message.as_ref())
+                    .and_then(|m| m.content.as_ref())
+                {
+                    Some(Content::Text(text)) => blocks.push(ResolvedBlock {
+                        index: 0,
+                        kind: BlockKind::Text,
+                        fidelity: Fidelity::Verbatim,
+                        bytes: text.as_bytes().to_vec(),
+                    }),
+                    Some(Content::Blocks(content_blocks)) => {
+                        for (i, block) in content_blocks.iter().enumerate() {
+                            match block.ty.as_deref() {
+                                Some("text") => {
+                                    if let Some(text) = &block.text {
+                                        blocks.push(ResolvedBlock {
+                                            index: i as u32,
+                                            kind: BlockKind::Text,
+                                            fidelity: Fidelity::Verbatim,
+                                            bytes: text.as_bytes().to_vec(),
+                                        });
                                     }
-                                    Some("toolCall") => {
-                                        if let Some(arguments) =
-                                            json.pointer(&format!("/message/content/{i}/arguments"))
-                                        {
-                                            let (bytes, fidelity) =
-                                                if let Some(text) = arguments.as_str() {
-                                                    (text.as_bytes().to_vec(), Fidelity::Verbatim)
-                                                } else {
-                                                    (
-                                                        serde_json::to_vec(arguments).map_err(
-                                                            |_| {
-                                                                AdapterError::Unsupported(
-                                                                    "invalid tool arguments".into(),
-                                                                )
-                                                            },
-                                                        )?,
-                                                        Fidelity::NormalizedJson,
-                                                    )
-                                                };
-                                            blocks.push(ResolvedBlock {
-                                                index: i as u32,
-                                                kind: BlockKind::ToolCall,
-                                                fidelity,
-                                                bytes,
-                                            });
-                                        }
-                                    }
-                                    _ => {}
                                 }
+                                Some("toolCall") => {
+                                    if let Some(arguments) =
+                                        json.pointer(&format!("/message/content/{i}/arguments"))
+                                    {
+                                        let (bytes, fidelity) = if let Some(text) =
+                                            arguments.as_str()
+                                        {
+                                            (text.as_bytes().to_vec(), Fidelity::Verbatim)
+                                        } else {
+                                            (
+                                                serde_json::to_vec(arguments).map_err(|_| {
+                                                    AdapterError::Unsupported(
+                                                        "invalid tool arguments".into(),
+                                                    )
+                                                })?,
+                                                Fidelity::NormalizedJson,
+                                            )
+                                        };
+                                        blocks.push(ResolvedBlock {
+                                            index: i as u32,
+                                            kind: BlockKind::ToolCall,
+                                            fidelity,
+                                            bytes,
+                                        });
+                                    }
+                                }
+                                _ => {}
                             }
                         }
-                        None => {}
                     }
+                    None => {}
                 }
             }
         }

@@ -65,7 +65,9 @@ async fn migration_applies_fts_triggers_and_guards_hold() {
 }
 
 fn wal(dir: &std::path::Path) -> u64 {
-    std::fs::metadata(dir.join("index.sqlite-wal")).unwrap().len()
+    std::fs::metadata(dir.join("index.sqlite-wal"))
+        .unwrap()
+        .len()
 }
 
 async fn ckpt(ix: &Index) -> (i64, i64) {
@@ -119,7 +121,10 @@ async fn wal_resets_to_size_limit_unless_a_reader_pins_it() {
         .unwrap();
     assert!(wal(dir) > WAL_SIZE_LIMIT_BYTES);
     let (log, done) = ckpt(&ix).await;
-    assert_eq!(log, done, "PASSIVE copies every frame when no reader is pinned");
+    assert_eq!(
+        log, done,
+        "PASSIVE copies every frame when no reader is pinned"
+    );
     small_write(&ix).await;
     assert!(
         wal(dir) <= WAL_SIZE_LIMIT_BYTES,

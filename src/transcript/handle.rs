@@ -91,14 +91,12 @@ impl HandleKey {
         writeln!(f, "v1 {epoch} {}", hex(&key))?;
         f.sync_all()?;
         drop(f);
-        if create_new {
-            if path.exists() {
-                let _ = std::fs::remove_file(&tmp);
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::AlreadyExists,
-                    "signing key already exists",
-                ));
-            }
+        if create_new && path.exists() {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "signing key already exists",
+            ));
         }
         std::fs::rename(&tmp, path)?;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;

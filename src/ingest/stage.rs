@@ -572,43 +572,40 @@ fn samples_verify(file: &std::fs::File, records: &[RecordMeta]) -> bool {
 /// Test seam: called right after the parse finished, before the source is re-checked.
 pub type AfterParse = Arc<dyn Fn() + Send + Sync>;
 
-#[allow(clippy::too_many_arguments)]
+/// Shared inputs of one staging pass: where the session lives and how the snapshot is stamped.
+#[derive(Clone, Copy)]
+pub struct StageContext<'a> {
+    pub index: &'a Index,
+    pub sources: &'a SourceRegistry,
+    pub cfg: &'a Config,
+    pub clock: &'a SharedClock,
+    pub fingerprint: &'a str,
+}
+
 pub async fn stage_snapshot(
-    index: &Index,
-    sources: &SourceRegistry,
-    cfg: &Config,
+    ctx: &StageContext<'_>,
     session_id: &str,
     kind: SnapshotKind,
     cancel: Arc<AtomicBool>,
-    clock: &SharedClock,
-    pipeline_fingerprint: &str,
 ) -> Result<Staged, StageError> {
-    stage_with_hook(
+    stage_with_hook(ctx, session_id, kind, cancel, None).await
+}
+
+pub(crate) async fn stage_with_hook(
+    ctx: &StageContext<'_>,
+    session_id: &str,
+    kind: SnapshotKind,
+    cancel: Arc<AtomicBool>,
+    after_parse: Option<AfterParse>,
+) -> Result<Staged, StageError> {
+    let StageContext {
         index,
         sources,
         cfg,
-        session_id,
-        kind,
-        cancel,
         clock,
-        pipeline_fingerprint,
-        None,
-    )
-    .await
-}
+        fingerprint,
+    } = *ctx;
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn stage_with_hook(
-    index: &Index,
-    sources: &SourceRegistry,
-    cfg: &Config,
-    session_id: &str,
-    kind: SnapshotKind,
-    cancel: Arc<AtomicBool>,
-    clock: &SharedClock,
-    fingerprint: &str,
-    after_parse: Option<AfterParse>,
-) -> Result<Staged, StageError> {
     let row = load_session(index, session_id)
         .await?
         .ok_or_else(|| StageError::Source("unknown session".into()))?;
@@ -646,19 +643,16 @@ pub(crate) async fn stage_with_hook(
     .await?;
 
     let res = run(
-        index,
-        sources,
-        cfg,
-        &row,
-        harness,
-        session_id,
-        kind,
-        &snapshot_id,
+        Pass {
+            ctx: *ctx,
+            row: &row,
+            harness,
+            kind,
+            snapshot_id: &snapshot_id,
+            cancel,
+            after_parse,
+        },
         opened,
-        cancel,
-        clock,
-        fingerprint,
-        after_parse,
     )
     .await;
     if res.is_err() {
@@ -667,22 +661,33 @@ pub(crate) async fn stage_with_hook(
     res
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn run(
-    index: &Index,
-    sources: &SourceRegistry,
-    cfg: &Config,
-    row: &SessionRow,
+/// One staged snapshot being filled: the session row, its harness and the knobs of this pass.
+struct Pass<'a> {
+    ctx: StageContext<'a>,
+    row: &'a SessionRow,
     harness: HarnessKind,
-    _session_id: &str,
     kind: SnapshotKind,
-    snapshot_id: &str,
-    opened: crate::source::OpenedSource,
+    snapshot_id: &'a str,
     cancel: Arc<AtomicBool>,
-    _clock: &SharedClock,
-    _fingerprint: &str,
     after_parse: Option<AfterParse>,
-) -> Result<Staged, StageError> {
+}
+
+async fn run(pass: Pass<'_>, opened: crate::source::OpenedSource) -> Result<Staged, StageError> {
+    let Pass {
+        ctx:
+            StageContext {
+                index,
+                sources,
+                cfg,
+                ..
+            },
+        row,
+        harness,
+        kind,
+        snapshot_id,
+        cancel,
+        after_parse,
+    } = pass;
     let info = opened.info.clone();
     let opts = ParseOptions {
         max_record_bytes: cfg.ingestion.max_record_bytes,
@@ -928,7 +933,10 @@ mod graph_tests {
             rec("c", Some("m3")),
             rec("d", Some("c")),
         ];
-        let alias = HashMap::from([("m1".to_string(), "m3".to_string()), ("m2".to_string(), "m3".to_string())]);
+        let alias = HashMap::from([
+            ("m1".to_string(), "m3".to_string()),
+            ("m2".to_string(), "m3".to_string()),
+        ]);
         let live = live(&[
             ("u", Role::User),
             ("m3", Role::Assistant),

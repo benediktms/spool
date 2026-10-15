@@ -4,7 +4,7 @@
 
 use serde_json::json;
 use spool::clock::{ManualClock, SharedClock};
-use spool::config::{Config, SourceConfig};
+use spool::config::{Config, DiscoveryConfig, SourceConfig};
 use spool::domain::HarnessKind;
 use spool::embeddings::{EmbeddingService, FakeProvider};
 use spool::ingest::engine::IngestEngine;
@@ -60,15 +60,20 @@ impl Env {
                 .await
                 .unwrap();
         backend::setup(&jobs_pool).await.unwrap();
-        let mut cfg = Config::default();
-        cfg.sources = vec![SourceConfig {
-            id: "omp".into(),
-            kind: HarnessKind::Omp,
-            enabled: true,
-            roots: vec![dir.to_string_lossy().into_owned()],
-            include_subagents: false,
-        }];
-        cfg.discovery.interval_seconds = 3600; // tests drive discovery explicitly unless they say otherwise
+        let mut cfg = Config {
+            sources: vec![SourceConfig {
+                id: "omp".into(),
+                kind: HarnessKind::Omp,
+                enabled: true,
+                roots: vec![dir.to_string_lossy().into_owned()],
+                include_subagents: false,
+            }],
+            discovery: DiscoveryConfig {
+                interval_seconds: 3600,
+                ..DiscoveryConfig::default()
+            },
+            ..Config::default()
+        };
         f(&mut cfg);
         let cfg = Arc::new(cfg);
         let clock = ManualClock::new(T0);

@@ -137,9 +137,11 @@ fn err_json(status: u16, code: &str, message: &str) -> Action {
     )
 }
 
+type Handler = Arc<dyn Fn(usize, &Seen) -> Action + Send + Sync>;
+
 async fn serve(
     mut sock: TcpStream,
-    handler: Arc<dyn Fn(usize, &Seen) -> Action + Send + Sync>,
+    handler: Handler,
     seen: Arc<Mutex<Vec<Seen>>>,
     hits: Arc<AtomicUsize>,
 ) {
@@ -593,13 +595,15 @@ impl Lair {
         std::fs::create_dir_all(&paths.secrets_dir).unwrap();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
-        let mut cfg = Config::default();
-        cfg.embedding = EmbeddingConfig {
-            endpoint: format!("http://{}/v1/embeddings", listener.local_addr().unwrap()),
-            hosted_processing_approved: approved,
-            enabled,
-            dimensions: DIMS,
-            request_timeout_seconds: 1,
+        let cfg = Config {
+            embedding: EmbeddingConfig {
+                endpoint: format!("http://{}/v1/embeddings", listener.local_addr().unwrap()),
+                hosted_processing_approved: approved,
+                enabled,
+                dimensions: DIMS,
+                request_timeout_seconds: 1,
+                ..Default::default()
+            },
             ..Default::default()
         };
         Lair {

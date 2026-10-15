@@ -3,13 +3,23 @@
 
 use crate::common::*;
 use spool::domain::digest;
-use spool::ingest::chunk::{ChunkPlan, TokenCounter};
+use spool::ingest::chunk::{ChunkPlan, ChunkSpan, TokenCounter};
 use spool::ingest::engine::{IndexOutcome, IndexRequest, IngestEngine, IngestErrorKind};
-use spool::ingest::publish::{PublishOutcome, publish};
-use spool::ingest::stage::{SnapshotKind, stage_snapshot};
+use spool::ingest::publish::{PublishOutcome, chunk_logical_id, publish};
+use spool::ingest::stage::{SnapshotKind, StageContext, stage_snapshot};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+fn stage_ctx<'a>(env: &'a Env, fingerprint: &'a str) -> StageContext<'a> {
+    StageContext {
+        index: &env.index,
+        sources: &env.sources,
+        cfg: &env.cfg,
+        clock: &env.shared,
+        fingerprint,
+    }
+}
 
 fn fixture(rel: &str) -> String {
     std::fs::read_to_string(format!("{}/fixtures/{rel}", env!("CARGO_MANIFEST_DIR"))).unwrap()
@@ -287,14 +297,10 @@ async fn staging_is_invisible_and_publish_is_atomic() {
     let (sid, _) = env.add_omp("a.jsonl", &linear(60)).await;
     let fp = env.engine.pipeline_fingerprint();
     let staged = stage_snapshot(
-        &env.index,
-        &env.sources,
-        &env.cfg,
+        &stage_ctx(&env, &fp),
         &sid,
         SnapshotKind::Indexed,
         Env::arc_flag(false),
-        &env.shared,
-        &fp,
     )
     .await
     .unwrap();
@@ -353,7 +359,7 @@ async fn staging_is_invisible_and_publish_is_atomic() {
         env.n("SELECT count(*) FROM chunks_fts").await,
         chunks as i64
     );
-    assert_eq!(env.n("SELECT index_epoch FROM (SELECT CAST(value AS INTEGER) AS index_epoch FROM app_meta WHERE key='index_epoch')").await > 0, true);
+    assert!(env.n("SELECT index_epoch FROM (SELECT CAST(value AS INTEGER) AS index_epoch FROM app_meta WHERE key='index_epoch')").await > 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -408,18 +414,8 @@ async fn old_job_cannot_overwrite_newer_content() {
     let env = Env::new().await;
     let (sid, _) = env.add_omp("a.jsonl", &linear(4)).await;
     let fp = env.engine.pipeline_fingerprint();
-    let stage = || {
-        stage_snapshot(
-            &env.index,
-            &env.sources,
-            &env.cfg,
-            &sid,
-            SnapshotKind::Indexed,
-            Env::arc_flag(false),
-            &env.shared,
-            &fp,
-        )
-    };
+    let ctx = stage_ctx(&env, &fp);
+    let stage = || stage_snapshot(&ctx, &sid, SnapshotKind::Indexed, Env::arc_flag(false));
     let old = stage().await.unwrap();
     let new = stage().await.unwrap();
     assert_eq!(old.generation, new.generation);
@@ -478,14 +474,10 @@ async fn exclusion_is_never_resurrected() {
     let (sid, _) = env.add_omp("a.jsonl", &linear(4)).await;
     let fp = env.engine.pipeline_fingerprint();
     let staged = stage_snapshot(
-        &env.index,
-        &env.sources,
-        &env.cfg,
+        &stage_ctx(&env, &fp),
         &sid,
         SnapshotKind::Indexed,
         Env::arc_flag(false),
-        &env.shared,
-        &fp,
     )
     .await
     .unwrap();
@@ -517,6 +509,123 @@ async fn exclusion_is_never_resurrected() {
         .unwrap();
     assert_eq!(env.index(&sid).await.unwrap(), IndexOutcome::Excluded);
     assert_eq!(env.n("SELECT count(*) FROM chunks").await, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn publish_batches_many_chunks_and_spans_atomically() {
+    let env = Env::new().await;
+    let (sid, _) = env.add_omp("a.jsonl", &linear(4)).await;
+    let fp = env.engine.pipeline_fingerprint();
+    let staged = stage_snapshot(
+        &stage_ctx(&env, &fp),
+        &sid,
+        SnapshotKind::Indexed,
+        Env::arc_flag(false),
+    )
+    .await
+    .unwrap();
+    let plan: Vec<ChunkPlan> = (0..120u32)
+        .map(|i| {
+            let text = format!("USER: batchword{i:03}");
+            let n = if i % 10 == 9 { 0 } else { 3 };
+            ChunkPlan {
+                run_key: "r".into(),
+                ordinal: i,
+                input_hash: digest(text.as_bytes()),
+                rendered: text,
+                rendered_tokens: 3,
+                time_anchor: Some(i as i64),
+                spans: (0..n)
+                    .map(|j| ChunkSpan {
+                        message_key: format!("m{i}-{j}"),
+                        block_index: j,
+                        start: j as usize * 10,
+                        end: j as usize * 10 + 5,
+                        is_context: j == 0,
+                    })
+                    .collect(),
+                is_tail: i == 119,
+            }
+        })
+        .collect();
+
+    let mut duplicated = plan.clone();
+    duplicated.push(plan[0].clone());
+    assert!(
+        publish(
+            &env.index,
+            &env.shared,
+            &sid,
+            &staged.snapshot_id,
+            staged.generation,
+            &fp,
+            &duplicated,
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(env.n("SELECT count(*) FROM chunks").await, 0);
+    assert_eq!(env.n("SELECT count(*) FROM chunk_spans").await, 0);
+    assert_eq!(env.active(&sid).await, None);
+    assert_eq!(env.staging_count().await, 1);
+
+    let r = publish(
+        &env.index,
+        &env.shared,
+        &sid,
+        &staged.snapshot_id,
+        staged.generation,
+        &fp,
+        &plan,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(r, PublishOutcome::Published { generation: 1, .. }));
+    assert_eq!(
+        env.active(&sid).await.as_deref(),
+        Some(staged.snapshot_id.as_str())
+    );
+
+    let chunks: Vec<(i64, String, String)> =
+        sqlx::query_as("SELECT rowid, logical_id, body FROM chunks ORDER BY rowid")
+            .fetch_all(&env.index.writer)
+            .await
+            .unwrap();
+    assert_eq!(chunks.len(), plan.len());
+    let mut expected = Vec::new();
+    for ((rowid, logical_id, body), c) in chunks.iter().zip(&plan) {
+        assert_eq!(
+            logical_id,
+            &chunk_logical_id(&sid, env.cfg.chunking.version, c)
+        );
+        assert_eq!(body, &c.rendered);
+        for (seq, s) in c.spans.iter().enumerate() {
+            expected.push((
+                *rowid,
+                seq as i64,
+                s.message_key.clone(),
+                s.block_index as i64,
+                s.start as i64,
+                s.end as i64,
+                s.is_context as i64,
+            ));
+        }
+    }
+    assert!(expected.len() > 70);
+    let spans: Vec<(i64, i64, String, i64, i64, i64, i64)> = sqlx::query_as(
+        "SELECT chunk_rowid, seq, record_key, block_index, start_byte, end_byte, is_context FROM chunk_spans ORDER BY chunk_rowid, seq",
+    )
+    .fetch_all(&env.index.writer)
+    .await
+    .unwrap();
+    assert_eq!(spans, expected);
+
+    assert_eq!(env.fts("batchword000").await, 1);
+    assert_eq!(env.fts("batchword119").await, 1);
+    sqlx::query("INSERT INTO chunks_fts(chunks_fts, rank) VALUES('integrity-check', 1)")
+        .execute(&env.index.writer)
+        .await
+        .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -831,14 +940,10 @@ async fn source_read_snapshot_is_read_only_without_chunks() {
     let (sid, _) = env.add_omp("a.jsonl", &linear(6)).await;
     let fp = env.engine.pipeline_fingerprint();
     let s = stage_snapshot(
-        &env.index,
-        &env.sources,
-        &env.cfg,
+        &stage_ctx(&env, &fp),
         &sid,
         SnapshotKind::SourceRead,
         Env::arc_flag(false),
-        &env.shared,
-        &fp,
     )
     .await
     .unwrap();

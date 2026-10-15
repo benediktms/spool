@@ -397,8 +397,6 @@ impl SessionAdapter for CodexAdapter {
                                 counts.unknown_records += 1;
                                 coverage = Coverage::Partial;
                             }
-                        } else if matches!(event, "ItemCompleted") {
-                            meta.kind = RecordKind::Control;
                         } else {
                             meta.kind = RecordKind::Control;
                         }
@@ -409,16 +407,16 @@ impl SessionAdapter for CodexAdapter {
                         coverage = Coverage::Partial;
                     }
                 }
-                if x.ty.as_deref() == Some("response_item") {
-                    if let Some(ty) = p.ty.as_deref() {
-                        if canonical_response_item(ty) {
-                            if meta.kind == RecordKind::Control {
-                                counts.unknown_records = counts.unknown_records.saturating_sub(1);
-                            }
-                        } else {
-                            meta.kind = RecordKind::Unknown;
-                            coverage = Coverage::Partial;
+                if x.ty.as_deref() == Some("response_item")
+                    && let Some(ty) = p.ty.as_deref()
+                {
+                    if canonical_response_item(ty) {
+                        if meta.kind == RecordKind::Control {
+                            counts.unknown_records = counts.unknown_records.saturating_sub(1);
                         }
+                    } else {
+                        meta.kind = RecordKind::Unknown;
+                        coverage = Coverage::Partial;
                     }
                 }
                 for call in &calls {
@@ -523,24 +521,22 @@ impl SessionAdapter for CodexAdapter {
             match (json.get("type").and_then(Value::as_str), item_type) {
                 (Some("response_item"), Some("message")) => {
                     let role = json.pointer("/payload/role").and_then(Value::as_str);
-                    if matches!(role, Some("user" | "assistant")) {
-                        if let Some(content) =
+                    if matches!(role, Some("user" | "assistant"))
+                        && let Some(content) =
                             json.pointer("/payload/content").and_then(Value::as_array)
-                        {
-                            for (i, item) in content.iter().enumerate() {
-                                if matches!(
-                                    item.get("type").and_then(Value::as_str),
-                                    Some("input_text" | "output_text" | "text")
-                                ) {
-                                    if let Some(text) = item.get("text").and_then(Value::as_str) {
-                                        blocks.push(ResolvedBlock {
-                                            index: i as u32,
-                                            kind: BlockKind::Text,
-                                            fidelity: Fidelity::Verbatim,
-                                            bytes: text.as_bytes().to_vec(),
-                                        });
-                                    }
-                                }
+                    {
+                        for (i, item) in content.iter().enumerate() {
+                            if matches!(
+                                item.get("type").and_then(Value::as_str),
+                                Some("input_text" | "output_text" | "text")
+                            ) && let Some(text) = item.get("text").and_then(Value::as_str)
+                            {
+                                blocks.push(ResolvedBlock {
+                                    index: i as u32,
+                                    kind: BlockKind::Text,
+                                    fidelity: Fidelity::Verbatim,
+                                    bytes: text.as_bytes().to_vec(),
+                                });
                             }
                         }
                     }

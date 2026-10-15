@@ -354,7 +354,7 @@ async fn budget_defers_only_ingestion_and_resets_on_utc_day() {
     // still before midnight: deterministic under the injected clock
     h.clock.set_ms(NEXT_MIDNIGHT - 1);
     assert_eq!(svc2.status().budget.day, "2025-10-12");
-    assert_eq!(svc2.status().budget.ingest.used, 0 + 2 * n);
+    assert_eq!(svc2.status().budget.ingest.used, 2 * n);
     h.clock.set_ms(NEXT_MIDNIGHT);
     let st = svc2.status();
     assert_eq!(
@@ -510,7 +510,7 @@ async fn interrupted_requests_survive_a_kill_and_count_against_the_budget() {
         ]
     );
     let used = h.svc.status().budget.ingest.used;
-    assert!(used >= 900_000 && used < 950_000, "{used}");
+    assert!((900_000..950_000).contains(&used), "{used}");
 }
 
 #[tokio::test]

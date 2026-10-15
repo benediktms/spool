@@ -257,10 +257,10 @@ impl Snap {
         let mut stack = vec![key.to_string()];
         while let Some(k) = stack.pop() {
             let ch = self.msg_children_of(&k);
-            if ch.is_empty() {
-                if let Some(i) = self.msg_ix.get(&k) {
-                    out.push(*i);
-                }
+            if ch.is_empty()
+                && let Some(i) = self.msg_ix.get(&k)
+            {
+                out.push(*i);
             }
             for c in ch {
                 stack.push(self.msgs[*c].key.clone());
@@ -795,21 +795,21 @@ pub fn build_plan(
     if snap.coverage != "complete" {
         plan.partial.push("snapshot_partial".into());
     }
-    if let Some(b) = sel.before {
-        if b.1 < b.0 {
-            plan.warnings.push(warn(
-                "INCOMPLETE_CONTEXT",
-                "fewer preceding messages exist on this path than requested",
-            ));
-        }
+    if let Some(b) = sel.before
+        && b.1 < b.0
+    {
+        plan.warnings.push(warn(
+            "INCOMPLETE_CONTEXT",
+            "fewer preceding messages exist on this path than requested",
+        ));
     }
-    if let Some(a) = sel.after {
-        if a.1 < a.0 {
-            plan.warnings.push(warn(
-                "INCOMPLETE_CONTEXT",
-                "fewer following messages exist on this path than requested",
-            ));
-        }
+    if let Some(a) = sel.after
+        && a.1 < a.0
+    {
+        plan.warnings.push(warn(
+            "INCOMPLETE_CONTEXT",
+            "fewer following messages exist on this path than requested",
+        ));
     }
     if let Some(item) = &sel.item {
         build_item_plan(snap, tools, item, sel.leaf.as_deref(), view, &mut plan)?;
@@ -1101,13 +1101,13 @@ fn with_tools_plan(
             .into_iter()
             .flatten()
         {
-            if let Some((ck, cb)) = &r.call {
-                if call_on_path.contains(&(ck.as_str(), *cb)) {
-                    results_for
-                        .entry((ck.as_str(), *cb))
-                        .or_default()
-                        .push((r.rec.clone(), r.block));
-                }
+            if let Some((ck, cb)) = &r.call
+                && call_on_path.contains(&(ck.as_str(), *cb))
+            {
+                results_for
+                    .entry((ck.as_str(), *cb))
+                    .or_default()
+                    .push((r.rec.clone(), r.block));
             }
         }
     }

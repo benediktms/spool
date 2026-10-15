@@ -20,15 +20,9 @@ pub fn encode_le_f32(v: &[f32]) -> Vec<u8> {
 
 /// `None` when the byte length is not a multiple of four.
 pub fn decode_le_f32(bytes: &[u8]) -> Option<Vec<f32>> {
-    if bytes.len() % 4 != 0 {
-        return None;
-    }
-    Some(
-        bytes
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect(),
-    )
+    let (chunks, rest) = bytes.as_chunks::<4>();
+    rest.is_empty()
+        .then(|| chunks.iter().map(|c| f32::from_le_bytes(*c)).collect())
 }
 
 /// The single normalization implementation: rejects empty/non-finite/zero-norm vectors, then scales to unit

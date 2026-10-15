@@ -197,7 +197,7 @@ macro_rules! conformance_suite {
                 let message = sink.messages[0].clone();
                 let mut record = sink.records.iter().find(|record| record.key == message.record_key).unwrap().clone();
                 record.parent_key = Some("absent-parent".into());
-                let (graph, warnings) = SessionGraph::build(&[record], &[message.clone()]);
+                let (graph, warnings) = SessionGraph::build(std::slice::from_ref(&record), std::slice::from_ref(&message));
                 assert!(warnings.iter().any(|warning| warning.code == "missing_parent"));
                 assert_eq!(graph.message_parent(&message.record_key), None);
                 assert_eq!(graph.path_to(&message.record_key), [message.record_key.as_str()]);

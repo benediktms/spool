@@ -6,7 +6,6 @@
 //!
 //! `cargo test --test retrieval_eval -- --nocapture` prints the report that is recorded in
 //! docs/retrieval-eval.md.
-#![allow(dead_code)]
 
 #[path = "search_common/mod.rs"]
 mod search_common;
@@ -639,14 +638,13 @@ async fn build() -> Env {
     let key_path = tmp.path().join("handle.key");
     HandleKey::create(&key_path).unwrap();
     let keys = KeyStore::load(&key_path).unwrap();
-    let leases = LeaseManager::new(index.clone(), cfg.reader.clone(), shared.clone());
+    let leases = LeaseManager::new(index.clone(), cfg.reader.clone(), shared);
     let svc = SearchService::new(
         index.clone(),
         cfg.clone(),
         emb.clone(),
         leases.clone(),
         keys.clone(),
-        shared,
     );
     let env = Env {
         tmp,
@@ -670,8 +668,13 @@ async fn build() -> Env {
             .enumerate()
             .map(|(i, m)| (*m, Some(last - (s.msgs.len() - i) as i64 * 60_000)))
             .collect();
-        env.simple_with(s.id, "omp", s.cwd, "interactive", last, &texts, true)
-            .await;
+        let seed = search_common::Seed {
+            cwd: s.cwd,
+            last_activity: last,
+            embed: true,
+            ..search_common::Seed::default()
+        };
+        env.simple_with(s.id, &seed, &texts).await;
     }
     // fork: m0 (root) -> a1,a2 (sqlite branch) and b1,b2 (postgres branch)
     let last = now - 8 * DAY;
@@ -709,12 +712,14 @@ async fn build() -> Env {
     for (i, (key, parent, text)) in nodes.iter().enumerate() {
         env.message(
             &snap,
-            key,
-            i as i64,
-            "user",
-            Some(last + i as i64 * 1000),
-            *parent,
-            text,
+            Message {
+                key,
+                seq: i as i64,
+                role: "user",
+                ts: Some(last + i as i64 * 1000),
+                parent: *parent,
+                text,
+            },
         )
         .await;
     }
@@ -724,8 +729,7 @@ async fn build() -> Env {
         ("run_a", &["a1", "a2"]),
         ("run_b", &["b1", "b2"]),
     ];
-    let mut ord = 0;
-    for (run, keys) in runs {
+    for (ord, (run, keys)) in runs.iter().enumerate() {
         let mut body = String::new();
         let mut spans = Vec::new();
         for k in *keys {
@@ -742,12 +746,11 @@ async fn build() -> Env {
                 spans,
                 anchor: Some(last + 4000),
                 run,
-                ordinal: ord,
+                ordinal: ord as i64,
                 embed: true,
             },
         )
         .await;
-        ord += 1;
     }
     env.activate(FORK_ID, &snap).await;
     env

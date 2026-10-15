@@ -111,20 +111,19 @@ pub fn parse_when(input: &str, now_ms: i64, tz: Tz) -> Result<i64, String> {
         .chars()
         .last()
         .filter(|c| matches!(c, 's' | 'm' | 'h' | 'd' | 'w'))
+        && let Some(n) = num(&t[..t.len() - 1])
     {
-        if let Some(n) = num(&t[..t.len() - 1]) {
-            let per = match unit {
-                's' => 1,
-                'm' => 60,
-                'h' => 3600,
-                'd' => 86_400,
-                _ => 604_800,
-            };
-            return n
-                .checked_mul(per * 1000)
-                .and_then(|d| now_ms.checked_sub(d))
-                .ok_or_else(|| format!("relative date {input:?} is out of range"));
-        }
+        let per = match unit {
+            's' => 1,
+            'm' => 60,
+            'h' => 3600,
+            'd' => 86_400,
+            _ => 604_800,
+        };
+        return n
+            .checked_mul(per * 1000)
+            .and_then(|d| now_ms.checked_sub(d))
+            .ok_or_else(|| format!("relative date {input:?} is out of range"));
     }
     parse_civil(t, tz).ok_or_else(|| {
         format!("invalid date {input:?}: use 7d/12h/30m/2w or YYYY-MM-DD[THH:MM[:SS]][Z|+HH:MM]")

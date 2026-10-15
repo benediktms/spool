@@ -250,7 +250,10 @@ async fn status_reports_coverage_queue_workers_provider_and_storage_without_secr
         "dropping the table puts its pages on the freelist"
     );
     assert_eq!(s["storage"]["index_db_free_bytes"], index_free);
-    assert_eq!(s["storage"]["jobs_db_free_bytes"], free(&r.env.jobs_pool).await);
+    assert_eq!(
+        s["storage"]["jobs_db_free_bytes"],
+        free(&r.env.jobs_pool).await
+    );
 
     let allocated = ["index.sqlite", "index.sqlite-wal"]
         .iter()
@@ -753,10 +756,7 @@ async fn jobs_cancel_is_cooperative_and_retry_resumes() {
         "cancel stopped the backfill ({indexed_after_cancel})"
     );
     // already committed progress is kept: indexed sessions are still searchable
-    assert_eq!(
-        r.env.count("SELECT count(*) FROM chunks").await > 0 || indexed_after_cancel == 0,
-        true
-    );
+    assert!(r.env.count("SELECT count(*) FROM chunks").await > 0 || indexed_after_cancel == 0);
     assert_eq!(
         r.err("jobs_retry", json!({"operation_id": "op_missing"}))
             .await,

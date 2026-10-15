@@ -134,8 +134,7 @@ async fn literal_is_not_prefiltered_by_fts_and_not_biased_by_long_sessions() {
         .map(|i| (format!("needle@@ {i}"), Some(T0)))
         .collect();
     let refs: Vec<(&str, Option<i64>)> = many.iter().map(|(s, t)| (s.as_str(), *t)).collect();
-    env.simple_with("a_long", "omp", "/w", "interactive", T0, &refs, false)
-        .await;
+    env.simple_with("a_long", &Seed::default(), &refs).await;
     env.simple("b_other", "omp", "/w", &[("one needle@@ only", Some(T0))])
         .await;
     let r = env.ok(json!({"query": "@@", "mode": "literal"})).await;
@@ -341,12 +340,14 @@ async fn filters_apply_before_candidate_limits() {
     .await;
     env.simple_with(
         "sub",
-        "codex",
-        "/w/target",
-        "subagent",
-        T0,
+        &Seed {
+            source: "codex",
+            cwd: "/w/target",
+            kind: "subagent",
+            embed: true,
+            ..Seed::default()
+        },
         &[("widget widget", Some(T0))],
-        true,
     )
     .await;
     for (extra, expect) in [
@@ -416,12 +417,14 @@ async fn fusion_is_deterministic_and_uses_reciprocal_rank() {
         env.snapshot(sid, &snap, "published").await;
         env.message(
             &snap,
-            "m0",
-            0,
-            "user",
-            Some(T0),
-            None,
-            "gamma delta epsilon",
+            Message {
+                key: "m0",
+                seq: 0,
+                role: "user",
+                ts: Some(T0),
+                parent: None,
+                text: "gamma delta epsilon",
+            },
         )
         .await;
         env.chunk(
@@ -470,16 +473,11 @@ async fn fusion_is_deterministic_and_uses_reciprocal_rank() {
         .map(|i| (format!("deploy note {i}"), Some(T0)))
         .collect();
     let refs: Vec<(&str, Option<i64>)> = many.iter().map(|(s, t)| (s.as_str(), *t)).collect();
-    env.simple_with("s_many", "omp", "/w", "interactive", T0, &refs, false)
-        .await;
+    env.simple_with("s_many", &Seed::default(), &refs).await;
     env.simple_with(
         "s_one",
-        "omp",
-        "/w",
-        "interactive",
-        T0,
+        &Seed::default(),
         &[("deploy deploy deploy rollout", Some(T0))],
-        false,
     )
     .await;
     let r = env.ok(json!({"query": "deploy", "mode": "lexical"})).await;
@@ -493,12 +491,11 @@ async fn prefer_recent_only_reorders_near_ties() {
     for i in 0..48 {
         env.simple_with(
             &format!("q{i:02}"),
-            "omp",
-            "/w",
-            "interactive",
-            T0 + i * 1000,
+            &Seed {
+                last_activity: T0 + i * 1000,
+                ..Seed::default()
+            },
             &[("quokka habitat", Some(T0))],
-            false,
         )
         .await;
     }
@@ -553,12 +550,14 @@ async fn duplicate_spans_are_merged_and_context_not_duplicated() {
         let key = format!("m{i}");
         env.message(
             snap,
-            &key,
-            i,
-            "user",
-            Some(T0),
-            parent.as_deref(),
-            &format!("frobnicate item {i}"),
+            Message {
+                key: &key,
+                seq: i,
+                role: "user",
+                ts: Some(T0),
+                parent: parent.as_deref(),
+                text: &format!("frobnicate item {i}"),
+            },
         )
         .await;
         parent = Some(key);
@@ -635,24 +634,86 @@ async fn duplicate_spans_are_merged_and_context_not_duplicated() {
 }
 
 #[tokio::test]
+async fn match_found_past_many_context_only_candidates() {
+    let env = Env::with(|c| c.search.candidate_limit = 1100).await;
+    let (sid, snap) = ("s_ctx_only", "sn_ctx_only");
+    env.session(sid, "omp", "/w", "interactive", T0).await;
+    env.snapshot(sid, snap, "published").await;
+    let real =
+        "lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor zephyr";
+    env.message(
+        snap,
+        Message {
+            key: "m_real",
+            seq: 0,
+            role: "user",
+            ts: Some(T0),
+            parent: None,
+            text: real,
+        },
+    )
+    .await;
+    for i in 0..600 {
+        env.chunk(
+            sid,
+            snap,
+            &format!("ctx{i:04}"),
+            search_common::Chunk {
+                body: "USER: zephyr",
+                spans: vec![("m_real", 0, 0, 6, true)],
+                anchor: Some(T0),
+                run: "run0",
+                ordinal: i + 1,
+                embed: false,
+            },
+        )
+        .await;
+    }
+    let real_rowid = env
+        .chunk(
+            sid,
+            snap,
+            "real",
+            search_common::Chunk {
+                body: &format!("USER: {real}"),
+                spans: vec![("m_real", 0, 0, real.len() as i64, false)],
+                anchor: Some(T0),
+                run: "run0",
+                ordinal: 0,
+                embed: false,
+            },
+        )
+        .await;
+    env.activate(sid, snap).await;
+    let ranked: Vec<i64> = sqlx::query_scalar(
+        "SELECT rowid FROM chunks_fts WHERE chunks_fts MATCH 'zephyr' ORDER BY bm25(chunks_fts) ASC, rowid ASC",
+    )
+    .fetch_all(&env.index.reader)
+    .await
+    .unwrap();
+    let pos = ranked.iter().position(|r| *r == real_rowid).unwrap();
+    assert!(
+        pos >= 500,
+        "real chunk ranks {pos}, expected past the first batch"
+    );
+    let r = env.ok(json!({"query": "zephyr", "mode": "lexical"})).await;
+    assert_eq!(matches_of(&r, sid).len(), 1);
+}
+
+#[tokio::test]
 async fn long_session_does_not_hide_other_sessions() {
     let env = Env::with(|c| c.search.candidate_limit = 20).await;
     let many: Vec<(String, Option<i64>)> = (0..300)
         .map(|i| (format!("zephyr zephyr zephyr {i}"), Some(T0)))
         .collect();
     let refs: Vec<(&str, Option<i64>)> = many.iter().map(|(s, t)| (s.as_str(), *t)).collect();
-    env.simple_with("s_long", "omp", "/w", "interactive", T0, &refs, false)
-        .await;
+    env.simple_with("s_long", &Seed::default(), &refs).await;
     for i in 0..3 {
         let filler = "lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore et dolore magna aliqua";
         env.simple_with(
             &format!("s_other{i}"),
-            "omp",
-            "/w",
-            "interactive",
-            T0,
+            &Seed::default(),
             &[(&format!("{filler} zephyr {filler} {i}"), Some(T0))],
-            false,
         )
         .await;
     }
@@ -672,9 +733,8 @@ async fn long_session_does_not_hide_other_sessions() {
         c.search.max_candidate_limit = 40;
     })
     .await;
-    env.simple_with("s_long", "omp", "/w", "interactive", T0, &refs, false)
-        .await;
-    env.simple_with("s_other", "omp", "/w", "interactive", T0, &[("lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore et dolore magna aliqua zephyr", Some(T0))], false).await;
+    env.simple_with("s_long", &Seed::default(), &refs).await;
+    env.simple_with("s_other", &Seed::default(), &[("lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore et dolore magna aliqua zephyr", Some(T0))]).await;
     assert_eq!(
         ids(&env
             .ok(json!({"query": "zephyr", "mode": "lexical", "limit": 4}))
@@ -722,12 +782,14 @@ async fn inactive_staging_retired_and_excluded_never_leak() {
         env.snapshot(sid, snap, state).await;
         env.message(
             snap,
-            "m0",
-            0,
-            "user",
-            Some(T0),
-            None,
-            "leaktoken in hidden snapshot",
+            Message {
+                key: "m0",
+                seq: 0,
+                role: "user",
+                ts: Some(T0),
+                parent: None,
+                text: "leaktoken in hidden snapshot",
+            },
         )
         .await;
         env.chunk(
@@ -787,12 +849,8 @@ async fn embedding_profiles_are_separated() {
     let env = Env::new().await;
     env.simple_with(
         "s_a",
-        "omp",
-        "/w",
-        "interactive",
-        T0,
+        &Seed::default(),
         &[("the automobile broke down", Some(T0))],
-        false,
     )
     .await;
     sqlx::query("INSERT INTO embedding_profiles(id, provider, endpoint_identity, model, dimensions, rendering_version, normalization, generation, created_at) VALUES ('other-profile','fake','x','other',16,1,'unit',1,0)")
@@ -906,16 +964,8 @@ async fn output_is_bounded_including_text_copy() {
     let env = Env::with(|c| c.search.max_search_response_bytes = 9000).await;
     let big = format!("budgettok {}", "word ".repeat(700)); // > 1,200 bytes
     for i in 0..12 {
-        env.simple_with(
-            &format!("s{i:02}"),
-            "omp",
-            "/w",
-            "interactive",
-            T0,
-            &[(&big, Some(T0))],
-            false,
-        )
-        .await;
+        env.simple_with(&format!("s{i:02}"), &Seed::default(), &[(&big, Some(T0))])
+            .await;
     }
     let r = env
         .ok(json!({"query": "budgettok", "mode": "lexical", "limit": 12}))
@@ -950,7 +1000,7 @@ async fn output_is_bounded_including_text_copy() {
             .map(|k| (format!("budgettok{k} {}", "word ".repeat(700)), Some(T0)))
             .collect();
         let t: Vec<(&str, Option<i64>)> = texts.iter().map(|(s, t)| (s.as_str(), *t)).collect();
-        env.simple_with(&format!("d{i}"), "omp", "/w", "interactive", T0, &t, false)
+        env.simple_with(&format!("d{i}"), &Seed::default(), &t)
             .await;
     }
     let r = env
@@ -1015,22 +1065,26 @@ async fn date_anchor_semantics() {
     env.snapshot("d_ctx", "sn_ctx", "published").await;
     env.message(
         "sn_ctx",
-        "m0",
-        0,
-        "user",
-        Some(T0 - 100_000),
-        None,
-        "earlier marker context",
+        Message {
+            key: "m0",
+            seq: 0,
+            role: "user",
+            ts: Some(T0 - 100_000),
+            parent: None,
+            text: "earlier marker context",
+        },
     )
     .await;
     env.message(
         "sn_ctx",
-        "m1",
-        1,
-        "assistant",
-        Some(T0),
-        Some("m0"),
-        "marker answer",
+        Message {
+            key: "m1",
+            seq: 1,
+            role: "assistant",
+            ts: Some(T0),
+            parent: Some("m0"),
+            text: "marker answer",
+        },
     )
     .await;
     env.chunk(
@@ -1196,42 +1250,50 @@ async fn branch_ref_is_issued_only_when_needed() {
     env.snapshot("s_fork", "sn_fork", "published").await;
     env.message(
         "sn_fork",
-        "m0",
-        0,
-        "user",
-        Some(T0),
-        None,
-        "root question pivotword",
+        Message {
+            key: "m0",
+            seq: 0,
+            role: "user",
+            ts: Some(T0),
+            parent: None,
+            text: "root question pivotword",
+        },
     )
     .await;
     env.message(
         "sn_fork",
-        "m1",
-        1,
-        "assistant",
-        Some(T0),
-        Some("m0"),
-        "shared answer",
+        Message {
+            key: "m1",
+            seq: 1,
+            role: "assistant",
+            ts: Some(T0),
+            parent: Some("m0"),
+            text: "shared answer",
+        },
     )
     .await;
     env.message(
         "sn_fork",
-        "m2a",
-        2,
-        "user",
-        Some(T0),
-        Some("m1"),
-        "left branch tailword",
+        Message {
+            key: "m2a",
+            seq: 2,
+            role: "user",
+            ts: Some(T0),
+            parent: Some("m1"),
+            text: "left branch tailword",
+        },
     )
     .await;
     env.message(
         "sn_fork",
-        "m2b",
-        3,
-        "user",
-        Some(T0),
-        Some("m1"),
-        "right branch",
+        Message {
+            key: "m2b",
+            seq: 3,
+            role: "user",
+            ts: Some(T0),
+            parent: Some("m1"),
+            text: "right branch",
+        },
     )
     .await;
     let ch =
@@ -1398,16 +1460,28 @@ async fn literal_uses_the_chunk_anchor_like_lexical() {
     // One chunk holds the user message (t1) and the assistant message (t2); its anchor is the last message.
     env.session("lit_a", "omp", "/w", "interactive", T0).await;
     env.snapshot("lit_a", "sn_a", "published").await;
-    env.message("sn_a", "m1", 0, "user", Some(t1), None, "ask [L]? now")
-        .await;
     env.message(
         "sn_a",
-        "m2",
-        1,
-        "assistant",
-        Some(t2),
-        Some("m1"),
-        "northstar answer",
+        Message {
+            key: "m1",
+            seq: 0,
+            role: "user",
+            ts: Some(t1),
+            parent: None,
+            text: "ask [L]? now",
+        },
+    )
+    .await;
+    env.message(
+        "sn_a",
+        Message {
+            key: "m2",
+            seq: 1,
+            role: "assistant",
+            ts: Some(t2),
+            parent: Some("m1"),
+            text: "northstar answer",
+        },
     )
     .await;
     env.chunk(
@@ -1467,16 +1541,28 @@ async fn literal_uses_the_chunk_anchor_like_lexical() {
     // A match in a message that is only CONTEXT of a later chunk is dated by the chunk that owns it.
     env.session("lit_b", "omp", "/w", "interactive", T0).await;
     env.snapshot("lit_b", "sn_b", "published").await;
-    env.message("sn_b", "m1", 0, "user", Some(t1), None, "ask [L]? now")
-        .await;
     env.message(
         "sn_b",
-        "m2",
-        1,
-        "assistant",
-        Some(t2),
-        Some("m1"),
-        "northstar answer",
+        Message {
+            key: "m1",
+            seq: 0,
+            role: "user",
+            ts: Some(t1),
+            parent: None,
+            text: "ask [L]? now",
+        },
+    )
+    .await;
+    env.message(
+        "sn_b",
+        Message {
+            key: "m2",
+            seq: 1,
+            role: "assistant",
+            ts: Some(t2),
+            parent: Some("m1"),
+            text: "northstar answer",
+        },
     )
     .await;
     for (ordinal, anchor, spans, body) in [
@@ -1554,7 +1640,7 @@ async fn profile_migration_queries_the_old_profile_until_the_current_corpus_is_c
             env.index.clone(),
             ecfg,
             env.cfg.search.clone(),
-            shared.clone(),
+            shared,
             fake_b.clone(),
         )
         .with_profile_providers(Arc::new(move |spec| {
@@ -1583,7 +1669,6 @@ async fn profile_migration_queries_the_old_profile_until_the_current_corpus_is_c
         svc_b.clone(),
         env.leases.clone(),
         env.keys.clone(),
-        shared,
     );
     let sem = |q: &'static str| json!({"query": q, "mode": "semantic"});
 
@@ -1617,16 +1702,8 @@ async fn profile_migration_queries_the_old_profile_until_the_current_corpus_is_c
 
     // A session published meanwhile (this one needs vectors the new profile lacks) blocks the switch even after
     // everything that was published when the migration started is covered.
-    env.simple_with(
-        "m3",
-        "omp",
-        "/w",
-        "interactive",
-        T0,
-        &[("garden tomato soil", Some(T0))],
-        false,
-    )
-    .await;
+    env.simple_with("m3", &Seed::default(), &[("garden tomato soil", Some(T0))])
+        .await;
     svc_b
         .embed_documents(
             vec![(
@@ -1645,12 +1722,8 @@ async fn profile_migration_queries_the_old_profile_until_the_current_corpus_is_c
     // A later session whose input hash is already cached for the new profile is covered without a request.
     env.simple_with(
         "m4",
-        "omp",
-        "/w",
-        "interactive",
-        T0,
+        &Seed::default(),
         &[("driving a sedan today", Some(T0))],
-        false,
     )
     .await;
     let before = fake_b.calls_for(Purpose::Ingest);

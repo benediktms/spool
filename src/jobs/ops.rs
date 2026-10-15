@@ -59,24 +59,23 @@ pub async fn begin(
 ) -> Result<(OpRow, bool), AppError> {
     let params_json = serde_json::to_string(params).unwrap_or_default();
     let mut tx = index.writer.begin().await.map_err(storage_err)?;
-    if let Some(k) = key {
-        if let Some(r) = sqlx::query("SELECT * FROM operations WHERE idempotency_key = ?")
+    if let Some(k) = key
+        && let Some(r) = sqlx::query("SELECT * FROM operations WHERE idempotency_key = ?")
             .bind(k)
             .fetch_optional(&mut *tx)
             .await
             .map_err(storage_err)?
+    {
+        let existing = op(&r);
+        if existing.kind != kind
+            || serde_json::to_string(&existing.params).unwrap_or_default() != params_json
         {
-            let existing = op(&r);
-            if existing.kind != kind
-                || serde_json::to_string(&existing.params).unwrap_or_default() != params_json
-            {
-                return Err(AppError::new(
-                    "IDEMPOTENCY_CONFLICT",
-                    "this idempotency key was already used with different parameters",
-                ));
-            }
-            return Ok((existing, false));
+            return Err(AppError::new(
+                "IDEMPOTENCY_CONFLICT",
+                "this idempotency key was already used with different parameters",
+            ));
         }
+        return Ok((existing, false));
     }
     let id = ids::new_id("op");
     sqlx::query(

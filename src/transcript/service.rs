@@ -5,13 +5,12 @@
 use super::cursor::{CursorPayload, short_hash};
 use super::handle::{HandleError, HandleKey, KeyStore};
 use super::lease::{LeaseManager, LeaseState, PinTarget};
-use super::locator::{Observation, SourceCtx};
+use super::locator::{Observation, SourceCtx, SourceLimits};
 use super::reader::{PageEnv, RefMaker, assemble, record_digest_hex};
 use super::refs::{Anchor, BranchRef, ItemKind, ItemRef, MatchRef, MessageRef, short_digest};
 use super::selection::*;
 use super::types::*;
 use crate::adapters::{SessionAdapter, adapter_for};
-use crate::clock::SharedClock;
 use crate::config::Config;
 use crate::ipc::AppError;
 use crate::mcp::budget::tool_result_bytes;
@@ -51,8 +50,6 @@ pub struct ReadService {
     keys: KeyStore,
     sources: Arc<SourceRegistry>,
     stager: Arc<dyn SourceReadStager>,
-    #[allow(dead_code)]
-    clock: SharedClock,
 }
 
 fn invalid(msg: impl Into<String>) -> AppError {
@@ -170,6 +167,23 @@ impl Dec {
     }
 }
 
+/// Everything `ReadService::run` needs to plan and assemble one page (initial read or continuation).
+struct RunInput<'a> {
+    row: &'a SessionRow,
+    session_id: &'a str,
+    snap: &'a Snap,
+    anchor: Anchor,
+    expires: i64,
+    view: View,
+    policy: SourcePolicy,
+    sel: &'a ResolvedSel,
+    pos: (u32, u32, u64),
+    expect_next: Option<&'a str>,
+    pre_warnings: Vec<Warning>,
+    max_bytes: usize,
+    max_items: usize,
+}
+
 impl ReadService {
     pub fn new(
         index: Index,
@@ -178,7 +192,6 @@ impl ReadService {
         keys: KeyStore,
         sources: Arc<SourceRegistry>,
         stager: Arc<dyn SourceReadStager>,
-        clock: SharedClock,
     ) -> Self {
         Self {
             index,
@@ -187,7 +200,6 @@ impl ReadService {
             keys,
             sources,
             stager,
-            clock,
         }
     }
 
@@ -537,21 +549,21 @@ impl ReadService {
                 return Err(branch_required(&snap, &leaves, &rm, max_bytes));
             }
         };
-        self.run(
-            &row,
-            &session_id,
-            &snap,
+        self.run(RunInput {
+            row: &row,
+            session_id: &session_id,
+            snap: &snap,
             anchor,
             expires,
             view,
             policy,
-            &sel,
-            (0, 0, 0),
-            None,
+            sel: &sel,
+            pos: (0, 0, 0),
+            expect_next: None,
             pre_warnings,
             max_bytes,
             max_items,
-        )
+        })
         .await
     }
 
@@ -677,21 +689,21 @@ impl ReadService {
                     e
                 }
             })?;
-        self.run(
-            &row,
-            &session_id,
-            &snap,
-            c.a.clone(),
+        self.run(RunInput {
+            row: &row,
+            session_id: &session_id,
+            snap: &snap,
+            anchor: c.a.clone(),
             expires,
-            c.v,
-            c.p,
-            &c.s,
-            (c.i, c.b, c.o),
-            Some(&c.n),
-            Vec::new(),
+            view: c.v,
+            policy: c.p,
+            sel: &c.s,
+            pos: (c.i, c.b, c.o),
+            expect_next: Some(&c.n),
+            pre_warnings: Vec::new(),
             max_bytes,
             max_items,
-        )
+        })
         .await
     }
 
@@ -715,29 +727,30 @@ impl ReadService {
             row.path.clone(),
             snap,
             adapter,
-            self.cfg.ingestion.max_record_bytes,
-            self.cfg.reader.max_source_read_bytes,
-            self.cfg.reader.max_read_millis,
+            SourceLimits {
+                max_record_bytes: self.cfg.ingestion.max_record_bytes,
+                max_read_bytes: self.cfg.reader.max_source_read_bytes,
+                max_read_millis: self.cfg.reader.max_read_millis,
+            },
         ))
     }
 
-    #[allow(clippy::too_many_arguments)]
-    async fn run(
-        &self,
-        row: &SessionRow,
-        session_id: &str,
-        snap: &Snap,
-        anchor: Anchor,
-        expires: i64,
-        view: View,
-        policy: SourcePolicy,
-        sel: &ResolvedSel,
-        pos: (u32, u32, u64),
-        expect_next: Option<&str>,
-        pre_warnings: Vec<Warning>,
-        max_bytes: usize,
-        max_items: usize,
-    ) -> Result<Value, AppError> {
+    async fn run(&self, req: RunInput<'_>) -> Result<Value, AppError> {
+        let RunInput {
+            row,
+            session_id,
+            snap,
+            anchor,
+            expires,
+            view,
+            policy,
+            sel,
+            pos,
+            expect_next,
+            pre_warnings,
+            max_bytes,
+            max_items,
+        } = req;
         let tools = if view == View::WithTools {
             Some(Tools::load(&self.index.reader, &snap.id).await?)
         } else {

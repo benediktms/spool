@@ -37,6 +37,37 @@ pub struct Chunk<'a> {
     pub embed: bool,
 }
 
+/// One message record (and its single authored block) of a snapshot.
+pub struct Message<'a> {
+    pub key: &'a str,
+    pub seq: i64,
+    pub role: &'a str,
+    pub ts: Option<i64>,
+    pub parent: Option<&'a str>,
+    pub text: &'a str,
+}
+
+/// Session-level settings of `Env::simple_with`; the default is an unembedded interactive `omp` session at `T0`.
+pub struct Seed<'a> {
+    pub source: &'a str,
+    pub cwd: &'a str,
+    pub kind: &'a str,
+    pub last_activity: i64,
+    pub embed: bool,
+}
+
+impl Default for Seed<'_> {
+    fn default() -> Self {
+        Self {
+            source: "omp",
+            cwd: "/w",
+            kind: "interactive",
+            last_activity: T0,
+            embed: false,
+        }
+    }
+}
+
 impl Env {
     pub async fn new() -> Self {
         Self::with(|_| {}).await
@@ -64,14 +95,13 @@ impl Env {
         let key_path = tmp.path().join("handle.key");
         HandleKey::create(&key_path).unwrap();
         let keys = KeyStore::load(&key_path).unwrap();
-        let leases = LeaseManager::new(index.clone(), cfg.reader.clone(), shared.clone());
+        let leases = LeaseManager::new(index.clone(), cfg.reader.clone(), shared);
         let svc = SearchService::new(
             index.clone(),
             cfg.clone(),
             emb.clone(),
             leases.clone(),
             keys.clone(),
-            shared,
         );
         let env = Self {
             tmp,
@@ -154,16 +184,15 @@ impl Env {
             .unwrap();
     }
 
-    pub async fn message(
-        &self,
-        snap: &str,
-        key: &str,
-        seq: i64,
-        role: &str,
-        ts: Option<i64>,
-        parent: Option<&str>,
-        text: &str,
-    ) {
+    pub async fn message(&self, snap: &str, m: Message<'_>) {
+        let Message {
+            key,
+            seq,
+            role,
+            ts,
+            parent,
+            text,
+        } = m;
         sqlx::query("INSERT INTO records(snapshot_id, key, ord, parent_key, kind, ts, offset, len, digest) VALUES (?,?,?,?, 'message', ?, 0, 10, zeroblob(32))")
             .bind(snap)
             .bind(key)
@@ -250,29 +279,41 @@ impl Env {
     /// One interactive session with a linear conversation: for each `(text, ts)` one user message record
     /// (record key `m{n}`) and one chunk whose body is `USER: text` anchored on that block, embedded.
     pub async fn simple(&self, id: &str, source: &str, cwd: &str, texts: &[(&str, Option<i64>)]) {
-        self.simple_with(id, source, cwd, "interactive", T0, texts, true)
-            .await
+        let seed = Seed {
+            source,
+            cwd,
+            embed: true,
+            ..Seed::default()
+        };
+        self.simple_with(id, &seed, texts).await
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub async fn simple_with(
-        &self,
-        id: &str,
-        source: &str,
-        cwd: &str,
-        kind: &str,
-        last_activity: i64,
-        texts: &[(&str, Option<i64>)],
-        embed: bool,
-    ) {
+    pub async fn simple_with(&self, id: &str, seed: &Seed<'_>, texts: &[(&str, Option<i64>)]) {
+        let Seed {
+            source,
+            cwd,
+            kind,
+            last_activity,
+            embed,
+        } = *seed;
         self.session(id, source, cwd, kind, last_activity).await;
         let snap = format!("sn_{id}");
         self.snapshot(id, &snap, "published").await;
         let mut parent: Option<String> = None;
         for (n, (text, ts)) in texts.iter().enumerate() {
             let key = format!("m{n}");
-            self.message(&snap, &key, n as i64, "user", *ts, parent.as_deref(), text)
-                .await;
+            self.message(
+                &snap,
+                Message {
+                    key: &key,
+                    seq: n as i64,
+                    role: "user",
+                    ts: *ts,
+                    parent: parent.as_deref(),
+                    text,
+                },
+            )
+            .await;
             let body = format!("USER: {text}");
             self.chunk(
                 id,

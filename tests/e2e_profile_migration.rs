@@ -358,11 +358,7 @@ async fn profile_change_keeps_old_queries_until_the_published_corpus_is_covered(
     // Old semantic recall works while the target has no coverage; queries are embedded by model A only.
     let r = search(&env.home, "kubernetes ingress timeout");
     assert_eq!(r["mode_used"], "semantic", "{r}");
-    assert_eq!(
-        r["results"][0]["session_id"].as_str().is_some(),
-        true,
-        "{r}"
-    );
+    assert!(r["results"][0]["session_id"].as_str().is_some(), "{r}");
     assert_eq!(
         embedding_ids(&env.home).1,
         id_a,

@@ -91,14 +91,7 @@ async fn run(n_chunks: usize) {
     HandleKey::create(&tmp.path().join("k")).unwrap();
     let keys = KeyStore::load(&tmp.path().join("k")).unwrap();
     let leases = LeaseManager::new(index.clone(), cfg.reader.clone(), clock.clone());
-    let svc = SearchService::new(
-        index.clone(),
-        cfg.clone(),
-        emb.clone(),
-        leases,
-        keys,
-        clock.clone(),
-    );
+    let svc = SearchService::new(index.clone(), cfg.clone(), emb.clone(), leases, keys);
 
     // ---- seed: 20 chunks per session, one message+block+span per chunk
     let words = vocab(4000);

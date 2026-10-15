@@ -6,7 +6,13 @@ use super::stage::{StageError, StageMeta, kind_str};
 use crate::clock::SharedClock;
 use crate::ids::hex;
 use crate::storage::index::{Index, bump_epoch, retire_snapshot};
-use sqlx::Row;
+use sqlx::{QueryBuilder, Row, Sqlite};
+use std::collections::HashMap;
+
+/// Binds per INSERT, matching the ~500 used by the other batched queries (SQLite's limit is far higher).
+const MAX_BINDS: usize = 500;
+const CHUNK_COLS: usize = 10;
+const SPAN_COLS: usize = 7;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PublishOutcome {
@@ -66,7 +72,7 @@ pub async fn publish(
         return Err(StageError::Source("unknown session".into()));
     };
     let generation: i64 = sess.get("generation");
-    let active: Option<String> = sess.get("active_snapshot_id");
+    let active: Option<&str> = sess.get("active_snapshot_id");
     let excluded = sess.get::<i64, _>("excl") != 0 || sess.get::<i64, _>("tomb") != 0;
 
     let snap = sqlx::query("SELECT state, fingerprint, counts_json, coverage, generation FROM snapshots WHERE id = ? AND session_id = ? AND kind = 'indexed'")
@@ -82,8 +88,8 @@ pub async fn publish(
     } else {
         match &snap {
             Some(s)
-                if s.get::<String, _>("state") == "staging"
-                    && s.get::<String, _>("fingerprint") == fingerprint =>
+                if s.get::<&str, _>("state") == "staging"
+                    && s.get::<&str, _>("fingerprint") == fingerprint =>
             {
                 None
             }
@@ -100,38 +106,63 @@ pub async fn publish(
         return Ok(outcome);
     }
     let snap = snap.expect("checked above");
-    let meta: StageMeta = serde_json::from_str(&snap.get::<String, _>("counts_json"))
+    let meta: StageMeta = serde_json::from_str(snap.get::<&str, _>("counts_json"))
         .map_err(|_| StageError::Storage("snapshot meta".into()))?;
-    let coverage: String = snap.get("coverage");
+    let coverage: &str = snap.get("coverage");
 
-    for c in plan {
-        let row = sqlx::query(
-            "INSERT INTO chunks(logical_id,snapshot_id,session_id,run_key,ordinal,body,input_hash,time_anchor,rendered_tokens,is_tail) VALUES (?,?,?,?,?,?,?,?,?,?)",
-        )
-        .bind(chunk_logical_id(session_id, meta.chunker_version, c))
-        .bind(snapshot_id)
-        .bind(session_id)
-        .bind(&c.run_key)
-        .bind(c.ordinal as i64)
-        .bind(&c.rendered)
-        .bind(&c.input_hash[..])
-        .bind(c.time_anchor)
-        .bind(c.rendered_tokens as i64)
-        .bind(c.is_tail as i64)
-        .execute(&mut *tx)
-        .await?;
-        let rowid = row.last_insert_rowid();
-        for (i, s) in c.spans.iter().enumerate() {
-            sqlx::query("INSERT INTO chunk_spans(chunk_rowid,seq,record_key,block_index,start_byte,end_byte,is_context) VALUES (?,?,?,?,?,?,?)")
-                .bind(rowid)
-                .bind(i as i64)
-                .bind(&s.message_key)
-                .bind(s.block_index as i64)
-                .bind(s.start as i64)
-                .bind(s.end as i64)
-                .bind(s.is_context as i64)
-                .execute(&mut *tx)
-                .await?;
+    for batch in plan.chunks(MAX_BINDS / CHUNK_COLS) {
+        let ids: Vec<String> = batch
+            .iter()
+            .map(|c| chunk_logical_id(session_id, meta.chunker_version, c))
+            .collect();
+        let mut qb = QueryBuilder::<Sqlite>::new(
+            "INSERT INTO chunks(logical_id,snapshot_id,session_id,run_key,ordinal,body,input_hash,time_anchor,rendered_tokens,is_tail) ",
+        );
+        qb.push_values(batch.iter().zip(&ids), |mut b, (c, id)| {
+            b.push_bind(id)
+                .push_bind(snapshot_id)
+                .push_bind(session_id)
+                .push_bind(&c.run_key)
+                .push_bind(c.ordinal as i64)
+                .push_bind(&c.rendered)
+                .push_bind(&c.input_hash[..])
+                .push_bind(c.time_anchor)
+                .push_bind(c.rendered_tokens as i64)
+                .push_bind(c.is_tail as i64);
+        });
+        qb.push(" RETURNING rowid, logical_id");
+        let rows = qb.build().fetch_all(&mut *tx).await?;
+        let rowids: HashMap<&str, i64> = rows
+            .iter()
+            .map(|r| (r.get::<&str, _>("logical_id"), r.get::<i64, _>("rowid")))
+            .collect();
+
+        let mut spans = Vec::new();
+        for (c, id) in batch.iter().zip(&ids) {
+            let rowid = *rowids
+                .get(id.as_str())
+                .ok_or_else(|| StageError::Storage("chunk rowid missing".into()))?;
+            spans.extend(
+                c.spans
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| (rowid, i as i64, s)),
+            );
+        }
+        for part in spans.chunks(MAX_BINDS / SPAN_COLS) {
+            let mut qb = QueryBuilder::<Sqlite>::new(
+                "INSERT INTO chunk_spans(chunk_rowid,seq,record_key,block_index,start_byte,end_byte,is_context) ",
+            );
+            qb.push_values(part, |mut b, &(rowid, seq, s)| {
+                b.push_bind(rowid)
+                    .push_bind(seq)
+                    .push_bind(&s.message_key)
+                    .push_bind(s.block_index as i64)
+                    .push_bind(s.start as i64)
+                    .push_bind(s.end as i64)
+                    .push_bind(s.is_context as i64);
+            });
+            qb.build().execute(&mut *tx).await?;
         }
     }
 
@@ -155,7 +186,7 @@ pub async fn publish(
     .bind(meta.lineage_verified as i64)
     .bind(meta.started_at)
     .bind(meta.last_activity_at)
-    .bind(&coverage)
+    .bind(coverage)
     .bind(fingerprint)
     .bind(session_id)
     .execute(&mut *tx)
@@ -163,8 +194,8 @@ pub async fn publish(
 
     let retired = match active {
         Some(prev) if prev != snapshot_id => {
-            retire_snapshot(&mut tx, &prev, now).await?;
-            Some(prev)
+            retire_snapshot(&mut tx, prev, now).await?;
+            Some(prev.to_owned())
         }
         _ => None,
     };

@@ -32,10 +32,10 @@ impl SessionGraph {
             .extend(messages.iter().map(|m| m.record_key.clone()));
         let mut clear = HashSet::<String>::new();
         for r in records {
-            if let Some(p) = &r.parent_key {
-                if !g.parents.contains_key(p) {
-                    warnings.push(warn("missing_parent", &r.key, r.locator));
-                }
+            if let Some(p) = &r.parent_key
+                && !g.parents.contains_key(p)
+            {
+                warnings.push(warn("missing_parent", &r.key, r.locator));
             }
             let mut p = r.parent_key.clone();
             let mut seen = HashSet::from([r.key.clone()]);
@@ -111,10 +111,9 @@ impl SessionGraph {
             g.message_parent.insert(key.clone(), None);
             if !warnings.iter().any(|warning| {
                 warning.code == "cycle" && warning.record_key.as_deref() == Some(key)
-            }) {
-                if let Some(record) = records.iter().find(|record| record.key == *key) {
-                    warnings.push(warn("cycle", key, record.locator));
-                }
+            }) && let Some(record) = records.iter().find(|record| record.key == *key)
+            {
+                warnings.push(warn("cycle", key, record.locator));
             }
         }
         let children: HashMap<String, usize> =

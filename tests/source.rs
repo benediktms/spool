@@ -120,14 +120,22 @@ fn symlink_and_replaced_parent_never_escape_root() {
     let roots = roots(&root_path);
     let canonical_root = fs::canonicalize(&root_path).unwrap();
 
-    symlink(outside.join("secret.jsonl"), canonical_root.join("linked-file.jsonl")).unwrap();
+    symlink(
+        outside.join("secret.jsonl"),
+        canonical_root.join("linked-file.jsonl"),
+    )
+    .unwrap();
     let first = roots.scan(&AtomicBool::new(false), 20);
     assert!(!first.files.iter().any(|file| {
         file.path
             .file_name()
             .is_some_and(|name| name == "linked-file.jsonl")
     }));
-    assert!(roots.open(&canonical_root.join("linked-file.jsonl")).is_err());
+    assert!(
+        roots
+            .open(&canonical_root.join("linked-file.jsonl"))
+            .is_err()
+    );
 
     fs::rename(canonical_root.join("nested"), canonical_root.join("held")).unwrap();
     symlink(&outside, canonical_root.join("nested")).unwrap();
@@ -138,7 +146,11 @@ fn symlink_and_replaced_parent_never_escape_root() {
             .iter()
             .any(|file| file.path.ends_with("nested/secret.jsonl"))
     );
-    assert!(roots.open(&canonical_root.join("nested/secret.jsonl")).is_err());
+    assert!(
+        roots
+            .open(&canonical_root.join("nested/secret.jsonl"))
+            .is_err()
+    );
     assert!(
         replaced
             .files
@@ -175,8 +187,11 @@ fn scan_yields_only_jsonl_transcripts_and_ignores_unreadable_artifacts() {
         fs::write(dir.path().join(path), b"x").unwrap();
     }
     if rustix::process::geteuid().as_raw() != 0 {
-        fs::set_permissions(session.join("locked.log"), fs::Permissions::from_mode(0o000))
-            .unwrap();
+        fs::set_permissions(
+            session.join("locked.log"),
+            fs::Permissions::from_mode(0o000),
+        )
+        .unwrap();
     }
     let roots = roots(dir.path());
     let canonical_root = fs::canonicalize(dir.path()).unwrap();

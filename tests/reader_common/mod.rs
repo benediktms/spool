@@ -147,7 +147,6 @@ impl Env {
             keys.clone(),
             sources.clone(),
             engine.source_read_stager(),
-            shared.clone(),
         );
         Self {
             tmp,
@@ -198,7 +197,6 @@ impl Env {
             self.keys.clone(),
             self.sources.clone(),
             self.engine.source_read_stager(),
-            self.shared.clone(),
         );
     }
 
@@ -219,7 +217,6 @@ impl Env {
             self.keys.clone(),
             self.sources.clone(),
             self.engine.source_read_stager(),
-            self.shared.clone(),
         );
     }
 
@@ -306,13 +303,10 @@ impl Env {
     pub async fn pages(&self, first: Value, max_bytes: usize) -> Vec<Value> {
         let max_items = first.get("max_items").cloned();
         let mut out = vec![self.ok(first).await];
-        loop {
-            let Some(c) = out.last().unwrap()["page"]["next_cursor"]
-                .as_str()
-                .map(str::to_string)
-            else {
-                break;
-            };
+        while let Some(c) = out.last().unwrap()["page"]["next_cursor"]
+            .as_str()
+            .map(str::to_string)
+        {
             let mut args = json!({"cursor": c, "max_bytes": max_bytes});
             if let Some(m) = &max_items {
                 args["max_items"] = m.clone();

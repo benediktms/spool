@@ -290,6 +290,7 @@ impl DiscoveryService {
                 eligibility,
                 debounce,
                 scan_started,
+                now: self.clock.now_ms(),
             };
             let page_after = after.clone();
             self.process_page(&ctx, page.files, page_after, &mut state, &mut rep, &cancel)
@@ -315,15 +316,8 @@ impl DiscoveryService {
         rep.finished = completed && !any_errors;
         rep.complete = rep.finished;
         if auto {
-            self.finish_auto(
-                &mut rep,
-                source_id,
-                scan_started,
-                &state,
-                any_errors,
-                &cancel,
-            )
-            .await?;
+            self.finish_auto(&mut rep, source_id, scan_started, &state, &cancel)
+                .await?;
         }
         Ok(rep)
     }
@@ -334,7 +328,6 @@ impl DiscoveryService {
         source_id: &str,
         scan_started: i64,
         state: &PageState,
-        any_errors: bool,
         cancel: &AtomicBool,
     ) -> anyhow::Result<()> {
         let now = self.clock.now_ms();
@@ -357,7 +350,6 @@ impl DiscoveryService {
                 format!("incomplete scan, {} errors", rep.errors)
             };
             rep.error = Some(why.clone());
-            let _ = any_errors;
             catalog::record_scan(&self.index, source_id, now, Some(&why), None).await?;
         }
         let summary = serde_json::to_string(rep)?;
@@ -382,7 +374,6 @@ impl DiscoveryService {
         if files.is_empty() {
             return Ok(());
         }
-        let now = self.clock.now_ms();
         let source_id = ctx.source.id.as_str();
         let paths: Vec<String> = files
             .iter()
@@ -421,7 +412,7 @@ impl DiscoveryService {
             if known.contains_key(key.as_ref()) {
                 return false;
             }
-            if now - f.mtime_ms < ctx.debounce {
+            if ctx.is_recent(f) {
                 return false;
             }
             if ident_hits.contains(key.as_ref()) {
@@ -494,18 +485,16 @@ impl DiscoveryService {
                 break;
             }
             let key = f.path.to_string_lossy().into_owned();
-            let recent = now - f.mtime_ms < ctx.debounce;
+            let recent = ctx.is_recent(f);
             if let Some(k) = known.get(&key) {
                 seen.push(key.clone());
-                self.apply_known(&mut tx, ctx, f, k, recent, st, rep, now)
-                    .await?;
+                Self::apply_known(&mut tx, ctx, f, k, st, rep).await?;
             } else if recent {
                 // Brand-new file still being written: skip, and keep the watermark below it.
                 rep.debounced += 1;
                 st.floor(f.mtime_ms);
             } else if let Some(p) = probe_map.get(&key) {
-                self.apply_unknown(&mut tx, ctx, f, p.as_ref(), moves.get(&key), st, rep, now)
-                    .await?;
+                Self::apply_unknown(&mut tx, ctx, f, p.as_ref(), moves.get(&key), st, rep).await?;
             } else {
                 rep.skipped_old += 1;
             }
@@ -513,7 +502,6 @@ impl DiscoveryService {
         }
         catalog::touch_seen(&mut tx, &seen, ctx.scan_started).await?;
         tx.commit().await?;
-        let _ = &files;
         Ok(())
     }
 
@@ -570,45 +558,38 @@ impl DiscoveryService {
         .await?)
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn apply_known(
-        &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         ctx: &PageCtx<'_>,
         f: &SourceFileInfo,
         k: &KnownFile,
-        recent: bool,
         st: &mut PageState,
         rep: &mut Report,
-        now: i64,
     ) -> anyhow::Result<()> {
+        let recent = ctx.is_recent(f);
         let unchanged = k.size == Some(f.len as i64)
             && k.mtime_ms == Some(f.mtime_ms)
             && k.dev == Some(f.dev as i64)
             && k.ino == Some(f.ino as i64);
         if matches!(ctx.mode, Mode::CatalogOnly) {
             // Dry run: never rewrite the stored stat, or a later real run would see a stale file as current.
-            return self
-                .apply_explicit_known(
-                    tx,
-                    ctx,
-                    f,
-                    k,
-                    unchanged && k.exists_status == "present",
-                    st,
-                    rep,
-                )
-                .await;
+            return Self::apply_explicit_known(
+                tx,
+                ctx,
+                f,
+                k,
+                unchanged && k.exists_status == "present",
+                st,
+                rep,
+            )
+            .await;
         }
         let revived = k.exists_status != "present";
-        let path = f.path.to_string_lossy();
         if revived {
             sqlx::query("UPDATE sessions SET source_status = 'present', tombstoned_at = NULL, missing_confirmed_at = NULL WHERE id = ?").bind(&k.session_id).execute(&mut **tx).await?;
         }
         if unchanged && !revived {
-            return self
-                .apply_explicit_known(tx, ctx, f, k, true, st, rep)
-                .await;
+            return Self::apply_explicit_known(tx, ctx, f, k, true, st, rep).await;
         }
         if !unchanged && recent {
             // Still being written: leave the stored stat, retry next scan, hold the watermark back.
@@ -616,17 +597,7 @@ impl DiscoveryService {
             st.floor(f.mtime_ms);
             return Ok(());
         }
-        catalog::upsert_source_file(
-            &mut **tx,
-            &k.session_id,
-            &path,
-            f.len,
-            f.mtime_ms,
-            f.dev,
-            f.ino,
-            now,
-        )
-        .await?;
+        catalog::upsert_source_file(tx, &k.session_id, f, ctx.now).await?;
         if !unchanged {
             rep.changed += 1;
         }
@@ -639,19 +610,17 @@ impl DiscoveryService {
             let promote =
                 k.eligibility == "backfill" && !k.has_snapshot && f.mtime_ms >= ctx.cutoff;
             if promote {
-                catalog::set_eligibility(&mut **tx, &k.session_id, ctx.eligibility).await?;
+                catalog::set_eligibility(tx, &k.session_id, ctx.eligibility).await?;
             }
             if k.has_snapshot || promote || k.eligibility != "backfill" {
-                catalog::mark_pending(&mut **tx, &k.session_id, None).await?;
+                catalog::mark_pending(tx, &k.session_id, None).await?;
             }
             return Ok(());
         }
-        self.apply_explicit_known(tx, ctx, f, k, false, st, rep)
-            .await
+        Self::apply_explicit_known(tx, ctx, f, k, false, st, rep).await
     }
 
     async fn apply_explicit_known(
-        &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         ctx: &PageCtx<'_>,
         f: &SourceFileInfo,
@@ -696,7 +665,7 @@ impl DiscoveryService {
             }
             Mode::Enqueue(op) => {
                 catalog::set_eligibility(
-                    &mut **tx,
+                    tx,
                     &k.session_id,
                     if k.eligibility == "backfill" {
                         "manual"
@@ -705,7 +674,7 @@ impl DiscoveryService {
                     },
                 )
                 .await?;
-                catalog::mark_pending(&mut **tx, &k.session_id, Some(op)).await?;
+                catalog::mark_pending(tx, &k.session_id, Some(op)).await?;
                 st.queued += 1;
             }
             Mode::Auto => {}
@@ -713,9 +682,7 @@ impl DiscoveryService {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn apply_unknown(
-        &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         ctx: &PageCtx<'_>,
         f: &SourceFileInfo,
@@ -723,13 +690,11 @@ impl DiscoveryService {
         mv: Option<&MoveInfo>,
         st: &mut PageState,
         rep: &mut Report,
-        now: i64,
     ) -> anyhow::Result<()> {
         let source_id = ctx.source.id.as_str();
-        let path = f.path.to_string_lossy().into_owned();
         // 1. verified move by file identity
         if let Some(k) = mv.and_then(|m| m.by_ident.as_ref()) {
-            self.move_to(tx, ctx, k, f, now, rep).await?;
+            Self::move_to(tx, ctx, k, f, rep).await?;
             return Ok(());
         }
         // 2. same native id whose old path is gone => move
@@ -739,7 +704,7 @@ impl DiscoveryService {
                 .find(|(_, exists)| !exists)
                 .map(|(k, _)| k)
         }) {
-            self.move_to(tx, ctx, k, f, now, rep).await?;
+            Self::move_to(tx, ctx, k, f, rep).await?;
             return Ok(());
         }
         let (native, kind, cwd, activity, failed) = match probe {
@@ -789,7 +754,7 @@ impl DiscoveryService {
             None
         };
         let (sid, created) = catalog::upsert_session(
-            &mut **tx,
+            tx,
             &NewSession {
                 source_id,
                 native_id: &native,
@@ -801,11 +766,10 @@ impl DiscoveryService {
                 eligibility: label,
                 operation_id: op,
             },
-            now,
+            ctx.now,
         )
         .await?;
-        catalog::upsert_source_file(&mut **tx, &sid, &path, f.len, f.mtime_ms, f.dev, f.ino, now)
-            .await?;
+        catalog::upsert_source_file(tx, &sid, f, ctx.now).await?;
         if created {
             rep.new_sessions += 1;
         }
@@ -833,7 +797,7 @@ impl DiscoveryService {
             }
             Mode::Enqueue(_) => {
                 if !failed {
-                    catalog::mark_pending(&mut **tx, &sid, op).await?;
+                    catalog::mark_pending(tx, &sid, op).await?;
                 }
                 st.queued += 1;
             }
@@ -844,26 +808,14 @@ impl DiscoveryService {
 
     /// Update path/stat of an existing session (rename or verified move) instead of recreating it.
     async fn move_to(
-        &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         ctx: &PageCtx<'_>,
         k: &KnownFile,
         f: &SourceFileInfo,
-        now: i64,
         rep: &mut Report,
     ) -> anyhow::Result<()> {
         let changed = k.size != Some(f.len as i64) || k.mtime_ms != Some(f.mtime_ms);
-        catalog::upsert_source_file(
-            &mut **tx,
-            &k.session_id,
-            &f.path.to_string_lossy(),
-            f.len,
-            f.mtime_ms,
-            f.dev,
-            f.ino,
-            now,
-        )
-        .await?;
+        catalog::upsert_source_file(tx, &k.session_id, f, ctx.now).await?;
         sqlx::query("UPDATE sessions SET source_status = 'present', tombstoned_at = NULL, missing_confirmed_at = NULL WHERE id = ?").bind(&k.session_id).execute(&mut **tx).await?;
         rep.moved += 1;
         if changed
@@ -871,7 +823,7 @@ impl DiscoveryService {
             && (k.has_snapshot || k.eligibility != "backfill")
             && matches!(ctx.mode, Mode::Auto)
         {
-            catalog::mark_pending(&mut **tx, &k.session_id, None).await?;
+            catalog::mark_pending(tx, &k.session_id, None).await?;
         }
         Ok(())
     }
@@ -892,6 +844,15 @@ struct PageCtx<'a> {
     eligibility: &'static str,
     debounce: i64,
     scan_started: i64,
+    /// Clock reading taken when this page was read; stamps every catalog write for the page.
+    now: i64,
+}
+
+impl PageCtx<'_> {
+    /// Still inside the debounce window: the file may be mid-write.
+    fn is_recent(&self, f: &SourceFileInfo) -> bool {
+        self.now - f.mtime_ms < self.debounce
+    }
 }
 
 struct PageState {

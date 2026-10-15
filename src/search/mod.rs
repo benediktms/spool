@@ -8,7 +8,6 @@ mod types;
 pub use query::{format_rfc3339, parse_rfc3339_utc};
 pub use types::*;
 
-use crate::clock::SharedClock;
 use crate::config::Config;
 use crate::embeddings::{EmbedError, EmbedErrorKind, EmbeddingService};
 use crate::ipc::AppError;
@@ -34,6 +33,8 @@ const MAX_EXCERPT_BYTES: usize = 1200;
 const MAX_FILTER_LIST: usize = 256;
 /// Retrieval is retried when a snapshot is retired / excluded between the read transaction and the lease pin.
 const MAX_ATTEMPTS: usize = 3;
+/// Candidates whose spans are fetched per query while grouping.
+const SPAN_LOOKAHEAD: usize = 500;
 
 const DESCRIPTION: &str = "Search indexed user/assistant conversation from local agent sessions. Results are excerpts from a partial, \
 explicitly scoped corpus (see `coverage`); absence of a result does not mean a conversation does not exist. Read a match with \
@@ -62,9 +63,6 @@ pub struct SearchService {
     embeddings: Arc<EmbeddingService>,
     leases: LeaseManager,
     keys: KeyStore,
-    #[allow(dead_code)]
-    // part of the service seam; refs and leases take their time from the LeaseManager
-    clock: SharedClock,
     scan_permits: Arc<Semaphore>,
     coverage_cache: retrieve::CoverageCache,
 }
@@ -80,13 +78,23 @@ struct Plan {
     case_sensitive: bool,
 }
 
+/// The lexical side of a search: highlight terms, the FTS expression (if any) and its first candidate window.
+struct LexicalQuery<'a> {
+    terms: &'a [String],
+    expr: Option<&'a str>,
+    hits: Vec<Scored>,
+}
+
+/// (1-based rank, raw retriever score) of a chunk in one retriever's candidate list.
+type Rank = Option<(usize, f64)>;
+
 /// One retrieved chunk after fusion.
 struct Fused {
     rowid: i64,
     logical_id: String,
     score: f64,
-    lex: Option<(usize, f64)>,
-    sem: Option<(usize, f64)>,
+    lex: Rank,
+    sem: Rank,
 }
 
 struct GMatch {
@@ -97,7 +105,7 @@ struct GMatch {
     spans: Vec<(i64, usize, SpanRow)>,
     matched_by: BTreeSet<&'static str>,
     ctx_outside: bool,
-    debug: Option<(Option<(usize, f64)>, Option<(usize, f64)>, f64)>,
+    debug: Option<(Rank, Rank, f64)>,
 }
 
 struct Group {
@@ -149,7 +157,6 @@ impl SearchService {
         embeddings: Arc<EmbeddingService>,
         leases: LeaseManager,
         keys: KeyStore,
-        clock: SharedClock,
     ) -> Self {
         let permits = cfg.search.semantic_scan_concurrency.max(1);
         Self {
@@ -158,7 +165,6 @@ impl SearchService {
             embeddings,
             leases,
             keys,
-            clock,
             scan_permits: Arc::new(Semaphore::new(permits)),
             coverage_cache: Default::default(),
         }
@@ -293,12 +299,12 @@ impl SearchService {
                 .transpose()
         };
         let (after, before) = (ts("after", &input.after)?, ts("before", &input.before)?);
-        if let (Some(a), Some(b)) = (after, before) {
-            if a >= b {
-                return Err(invalid(
-                    "after must be earlier than before (after is inclusive, before is exclusive)",
-                ));
-            }
+        if let (Some(a), Some(b)) = (after, before)
+            && a >= b
+        {
+            return Err(invalid(
+                "after must be earlier than before (after is inclusive, before is exclusive)",
+            ));
         }
         let kinds: BTreeSet<String> = if input.session_kinds.is_empty() {
             ["interactive".to_string()].into()
@@ -313,10 +319,10 @@ impl SearchService {
         if let Some(p) = input.project_path.as_deref() {
             let norm = query::normalize_abs_path(p)
                 .ok_or_else(|| invalid("project_path must be an absolute path"))?;
-            if let Ok(canon) = tokio::fs::canonicalize(&norm).await {
-                if let Some(c) = canon.to_str() {
-                    cwds.push(c.to_string());
-                }
+            if let Ok(canon) = tokio::fs::canonicalize(&norm).await
+                && let Some(c) = canon.to_str()
+            {
+                cwds.push(c.to_string());
             }
             if !cwds.contains(&norm) {
                 cwds.push(norm);
@@ -468,10 +474,12 @@ impl SearchService {
                         &plan.filters,
                         &profile_id,
                         q.1.clone(),
-                        max_l,
-                        cfg.vector_batch_bytes.max(4),
-                        cancel,
-                        deadline,
+                        retrieve::ScanLimits {
+                            k: max_l,
+                            batch_bytes: cfg.vector_batch_bytes.max(4),
+                            cancel,
+                            deadline,
+                        },
                     )
                     .await?;
                     if !out.complete {
@@ -486,9 +494,11 @@ impl SearchService {
             self.chunk_sessions(
                 conn,
                 plan,
-                &terms,
-                fts.as_ref().map(|f| f.0.as_str()),
-                lex,
+                LexicalQuery {
+                    terms: &terms,
+                    expr: fts.as_ref().map(|f| f.0.as_str()),
+                    hits: lex,
+                },
                 &sem,
                 max_l,
             )
@@ -507,28 +517,30 @@ impl SearchService {
     /// Adaptive fusion + grouping: widen the per-retriever candidate window (200 -> ... -> 2000) while grouping
     /// leaves fewer sessions than requested and a retriever still has unused candidates. Lexical candidates are
     /// fetched lazily (top-k only) and re-fetched with a larger window on expansion.
-    #[allow(clippy::too_many_arguments)]
     async fn chunk_sessions(
         &self,
         conn: &mut sqlx::SqliteConnection,
         plan: &Plan,
-        terms: &[String],
-        expr: Option<&str>,
-        mut lex: Vec<Scored>,
+        lexical: LexicalQuery<'_>,
         sem: &[Scored],
         max_l: usize,
     ) -> Result<Vec<SessionDraft>, AppError> {
+        let LexicalQuery {
+            terms,
+            expr,
+            hits: mut lex,
+        } = lexical;
         let k = f64::from(self.cfg.search.rrf_constant);
         let mut l = self.cfg.search.candidate_limit.clamp(1, max_l);
         let mut lex_window = l;
         let mut metas: HashMap<i64, ChunkMeta> = HashMap::new();
         let mut spans: HashMap<i64, Vec<SpanRow>> = HashMap::new();
         let groups = loop {
-            if let Some(e) = expr {
-                if l > lex_window {
-                    lex = retrieve::lexical(conn, &plan.filters, e, l).await?;
-                    lex_window = l;
-                }
+            if let Some(e) = expr
+                && l > lex_window
+            {
+                lex = retrieve::lexical(conn, &plan.filters, e, l).await?;
+                lex_window = l;
             }
             let lex_more = expr.is_some() && lex.len() >= lex_window;
             let fused = fuse(&lex[..lex.len().min(l)], &sem[..sem.len().min(l)], k);
@@ -560,7 +572,7 @@ impl SearchService {
             let mut matches = Vec::new();
             for m in &g.matches {
                 matches.push(
-                    self.finish_match(
+                    Self::finish_match(
                         conn,
                         plan,
                         terms,
@@ -591,7 +603,7 @@ impl SearchService {
     ) -> Result<Vec<Group>, AppError> {
         let mut groups: Vec<Group> = Vec::new();
         let mut index: HashMap<String, usize> = HashMap::new();
-        for f in fused {
+        for (pos, f) in fused.iter().enumerate() {
             let Some(m) = metas.get(&f.rowid) else {
                 continue;
             };
@@ -610,8 +622,19 @@ impl SearchService {
                 continue;
             }
             if !cache.contains_key(&m.rowid) {
-                let s = retrieve::load_spans(conn, m).await?;
-                cache.insert(m.rowid, s);
+                let batch: Vec<i64> = fused[pos..]
+                    .iter()
+                    .take(SPAN_LOOKAHEAD)
+                    .filter_map(|c| metas.get(&c.rowid))
+                    .filter(|c| {
+                        !cache.contains_key(&c.rowid)
+                            && index
+                                .get(c.session_id.as_str())
+                                .is_none_or(|gi| groups[*gi].matches.len() < plan.per_session)
+                    })
+                    .map(|c| c.rowid)
+                    .collect();
+                cache.extend(retrieve::load_spans(conn, &batch).await?);
             }
             let all = &cache[&m.rowid];
             // A chunk without an anchored (non-context) span cannot produce a readable reference.
@@ -660,9 +683,7 @@ impl SearchService {
     }
 
     /// Turn a grouped match into its anchored spans, digest, branch leaf and bounded excerpt.
-    #[allow(clippy::too_many_arguments)]
     async fn finish_match(
-        &self,
         conn: &mut sqlx::SqliteConnection,
         plan: &Plan,
         terms: &[String],

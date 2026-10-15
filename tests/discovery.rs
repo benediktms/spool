@@ -589,7 +589,7 @@ async fn exclusion_persists_across_rediscovery_restart_and_row_recreation() {
             .await,
         1
     );
-    assert_eq!(env.session_by_native("excl").await.unwrap().excluded, true);
+    assert!(env.session_by_native("excl").await.unwrap().excluded);
 
     // the file changes and is rediscovered: still excluded, never pending
     std::fs::write(&p, omp_body("excl", &["hello", "more"])).unwrap();
