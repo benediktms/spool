@@ -118,6 +118,10 @@ const CHUNK_FROM: &str = "FROM chunks c \
     JOIN sessions s ON s.id = c.session_id AND s.active_snapshot_id = c.snapshot_id \
     JOIN snapshots sn ON sn.id = c.snapshot_id AND sn.state = 'published'";
 
+const COVERAGE_FROM: &str = "FROM sessions s \
+    JOIN snapshots sn ON sn.id = s.active_snapshot_id AND sn.state = 'published' \
+    JOIN chunks c INDEXED BY chunks_coverage ON c.snapshot_id = s.active_snapshot_id AND c.session_id = s.id";
+
 // ---------------------------------------------------------------- lexical
 
 #[derive(Debug, Clone)]
@@ -710,13 +714,13 @@ pub async fn coverage(
         Some(v) => v,
         None => {
             let active: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-                "SELECT count(*) {CHUNK_FROM} WHERE s.excluded = 0"
+                "SELECT count(*) {COVERAGE_FROM} WHERE s.excluded = 0"
             )))
             .fetch_one(&mut *conn)
             .await
             .map_err(storage_err)?;
             let embedded: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-                "SELECT count(*) {CHUNK_FROM} JOIN embeddings e ON e.profile_id = ? AND e.input_hash = c.input_hash WHERE s.excluded = 0"
+                "SELECT count(*) {COVERAGE_FROM} JOIN embeddings e INDEXED BY embeddings_key ON e.profile_id = ? AND e.input_hash = c.input_hash WHERE s.excluded = 0"
             )))
             .bind(profile_id)
             .fetch_one(&mut *conn)

@@ -107,3 +107,25 @@ targets passed. Formatting and `cargo clippy --locked --all-targets --all-featur
 also passed without warnings. A final release-binary smoke indexed 20 synthetic sessions into 340
 chunks and returned search hits before and after restart. Its during/after p95 ratio was 3.14x
 (24.0/7.6 ms), further evidence that the ratio target is not consistently met.
+
+## Coverage-count I/O (2026-10-16)
+
+Measured once on a private backup of the local index, using a fresh SQLite process for each count.
+Migration 0004 and the coverage-only join hints preserve exact counts while avoiding chunk bodies and vectors.
+
+| Count | Result before / after | Page misses before | Page misses after |
+|---|---|---|---|
+| Active chunks | 3,056 / 3,056 | 1,851 | 442 |
+| Embedded chunks | 2,732 / 2,732 | 5,451 | 482 |
+
+Both queries use `COVERING INDEX chunks_coverage`; the embedded count also uses
+`COVERING INDEX embeddings_key`. The semantic scan still uses the embeddings primary key and
+`chunks_hash`, with no temporary sort.
+
+`chunks_coverage` occupies 76 pages (311,296 bytes) for 3,056 chunks: 102 bytes/row and 2.3% of
+the chunks table. `embeddings_key` occupies 40 pages (163,840 bytes) for 2,424 vectors:
+68 bytes/row and 1.4% of the embeddings table. The private backup was deleted afterward.
+
+Release executable smoke: 20 sessions × 20 messages, all 20 indexed, search hits before and
+after restart. This is functional smoke evidence, not a latency benchmark. Counts remain cached
+per epoch; this change does not interrupt SQLite statements after an outer retrieval timeout.
