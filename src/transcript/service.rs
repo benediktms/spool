@@ -184,6 +184,13 @@ struct RunInput<'a> {
     max_items: usize,
 }
 
+struct Pinned {
+    snap: Snap,
+    anchor: Anchor,
+    expires: i64,
+    warnings: Vec<Warning>,
+}
+
 impl ReadService {
     pub fn new(
         index: Index,
@@ -364,21 +371,7 @@ impl ReadService {
     // Initial read
     // -----------------------------------------------------------------------------------------
 
-    async fn initial_read(
-        &self,
-        input: ReadSessionInput,
-        max_bytes: usize,
-        max_items: usize,
-    ) -> Result<Value, AppError> {
-        let session_id = input
-            .session_id
-            .clone()
-            .ok_or_else(|| invalid("session_id is required for an initial read"))?;
-        let selection = input
-            .selection
-            .clone()
-            .unwrap_or(SelectionInput::Session { branch_ref: None });
-        let view = input.view.unwrap_or(View::Conversation);
+    fn check_view(&self, view: View) -> Result<(), AppError> {
         if view == View::RawRecords && !self.cfg.mcp.allow_raw_records {
             return Err(app_err(
                 "FORBIDDEN",
@@ -387,6 +380,12 @@ impl ReadService {
                 "change_request",
             ));
         }
+        Ok(())
+    }
+
+    fn view_policy(&self, input: &ReadSessionInput) -> Result<(View, SourcePolicy), AppError> {
+        let view = input.view.unwrap_or(View::Conversation);
+        self.check_view(view)?;
         if view != View::Conversation
             && matches!(
                 input.source_policy,
@@ -407,63 +406,37 @@ impl ReadService {
             } else {
                 SourcePolicy::RequireSource
             });
+        Ok((view, policy))
+    }
+
+    async fn initial_read(
+        &self,
+        input: ReadSessionInput,
+        max_bytes: usize,
+        max_items: usize,
+    ) -> Result<Value, AppError> {
+        let session_id = input
+            .session_id
+            .clone()
+            .ok_or_else(|| invalid("session_id is required for an initial read"))?;
+        let selection = input
+            .selection
+            .clone()
+            .unwrap_or(SelectionInput::Session { branch_ref: None });
+        let (view, policy) = self.view_policy(&input)?;
         let row = self.check_access(&session_id).await?;
         let key = self.keys.current();
         let dec = decode_selection(&key, &selection)?;
 
         // Pinned observation (any ref) or a fresh one (plain session selection).
-        let anchors = dec.anchors();
-        let mut expires = 0;
-        for a in &anchors {
-            expires = self.validate_anchor(&session_id, a).await?;
-        }
-        if anchors.windows(2).any(|w| w[0].snapshot != w[1].snapshot) {
-            return Err(app_err(
-                "INVALID_RANGE",
-                "references belong to different snapshots",
-                false,
-                "change_request",
-            ));
-        }
-        let (snap, anchor, pre_warnings) = match anchors.first() {
-            Some(a) => {
-                let snap = Snap::load(&self.index.reader, &a.snapshot).await?;
-                if snap.session_id != session_id {
-                    return Err(invalid("a reference belongs to a different session"));
-                }
-                (snap, (*a).clone(), Vec::new())
-            }
-            None => {
-                let mut attempt = 0;
-                loop {
-                    let (snap, warnings) = self
-                        .choose_session_snapshot(&session_id, &row, policy)
-                        .await?;
-                    match self
-                        .leases
-                        .pin(&[PinTarget {
-                            session_id: session_id.clone(),
-                            snapshot_id: snap.id.clone(),
-                        }])
-                        .await
-                    {
-                        Ok(lease) => {
-                            expires = lease.expires_at_ms;
-                            let anchor = Anchor {
-                                lease: lease.lease_id,
-                                manifest: lease.manifest_ids[0].clone(),
-                                session: session_id.clone(),
-                                snapshot: snap.id.clone(),
-                            };
-                            break (snap, anchor, warnings);
-                        }
-                        // the snapshot was retired between choice and pin: choose again once
-                        Err(e) if e.code == "STALE_REFERENCE" && attempt == 0 => attempt += 1,
-                        Err(e) => return Err(e),
-                    }
-                }
-            }
-        };
+        let Pinned {
+            snap,
+            anchor,
+            expires,
+            warnings,
+        } = self
+            .pin_snapshot(&session_id, &row, policy, &dec.anchors())
+            .await?;
 
         let rm = RefMaker {
             key: &key,
@@ -474,75 +447,7 @@ impl ReadService {
         if let Dec::Match { m, .. } = &dec {
             self.verify_match_content(&snap, m).await?;
         }
-        let resolved = match &dec {
-            Dec::Session(b) => resolve_session(&snap, b.as_ref().map(|b| b.leaf.as_str())),
-            Dec::Match {
-                m,
-                before,
-                after,
-                branch,
-            } => {
-                let mut recs: Vec<String> = Vec::new();
-                for s in &m.spans {
-                    if !recs.contains(&s.r) {
-                        recs.push(s.r.clone());
-                    }
-                }
-                resolve_window(
-                    &snap,
-                    SelKind::Match,
-                    WindowInput {
-                        anchors: &recs,
-                        before: *before,
-                        after: *after,
-                        branch_leaf: branch.as_ref().map(|b| b.leaf.as_str()),
-                    },
-                )
-            }
-            Dec::Message {
-                m,
-                before,
-                after,
-                branch,
-            } => resolve_window(
-                &snap,
-                SelKind::Message,
-                WindowInput {
-                    anchors: std::slice::from_ref(&m.record),
-                    before: *before,
-                    after: *after,
-                    branch_leaf: branch.as_ref().map(|b| b.leaf.as_str()),
-                },
-            ),
-            Dec::Range {
-                from,
-                through,
-                branch,
-            } => resolve_range(
-                &snap,
-                &from.record,
-                &through.record,
-                branch.as_ref().map(|b| b.leaf.as_str()),
-            ),
-            Dec::Item { i, branch } => {
-                let tools = if view == View::WithTools && matches!(i.kind, ItemKind::ToolCall) {
-                    Some(Tools::load(&self.index.reader, &snap.id).await?)
-                } else {
-                    None
-                };
-                resolve_item(
-                    &snap,
-                    tools.as_ref(),
-                    ItemSel {
-                        k: i.kind,
-                        r: i.record.clone(),
-                        b: i.block,
-                    },
-                    branch.as_ref().map(|b| b.leaf.as_str()),
-                )
-            }
-        };
-        let sel = match resolved {
+        let sel = match self.resolve_decoded(&snap, &dec, view).await {
             Ok(s) => s,
             Err(SelFail::App(e)) => return Err(e),
             Err(SelFail::Branch(leaves)) => {
@@ -560,11 +465,162 @@ impl ReadService {
             sel: &sel,
             pos: (0, 0, 0),
             expect_next: None,
-            pre_warnings,
+            pre_warnings: warnings,
             max_bytes,
             max_items,
         })
         .await
+    }
+
+    async fn pin_fresh(
+        &self,
+        session_id: &str,
+        row: &SessionRow,
+        policy: SourcePolicy,
+    ) -> Result<Pinned, AppError> {
+        let mut attempt = 0;
+        loop {
+            let (snap, warnings) = self
+                .choose_session_snapshot(session_id, row, policy)
+                .await?;
+            match self
+                .leases
+                .pin(&[PinTarget {
+                    session_id: session_id.to_string(),
+                    snapshot_id: snap.id.clone(),
+                }])
+                .await
+            {
+                Ok(lease) => {
+                    let anchor = Anchor {
+                        lease: lease.lease_id,
+                        manifest: lease.manifest_ids[0].clone(),
+                        session: session_id.to_string(),
+                        snapshot: snap.id.clone(),
+                    };
+                    return Ok(Pinned {
+                        snap,
+                        anchor,
+                        expires: lease.expires_at_ms,
+                        warnings,
+                    });
+                }
+                // the snapshot was retired between choice and pin: choose again once
+                Err(e) if e.code == "STALE_REFERENCE" && attempt == 0 => attempt += 1,
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    async fn pin_snapshot(
+        &self,
+        session_id: &str,
+        row: &SessionRow,
+        policy: SourcePolicy,
+        anchors: &[&Anchor],
+    ) -> Result<Pinned, AppError> {
+        let mut expires = 0;
+        for a in anchors {
+            expires = self.validate_anchor(session_id, a).await?;
+        }
+        if anchors.windows(2).any(|w| w[0].snapshot != w[1].snapshot) {
+            return Err(app_err(
+                "INVALID_RANGE",
+                "references belong to different snapshots",
+                false,
+                "change_request",
+            ));
+        }
+
+        let Some(a) = anchors.first() else {
+            return self.pin_fresh(session_id, row, policy).await;
+        };
+        let snap = Snap::load(&self.index.reader, &a.snapshot).await?;
+        if snap.session_id != session_id {
+            return Err(invalid("a reference belongs to a different session"));
+        }
+        Ok(Pinned {
+            snap,
+            anchor: (*a).clone(),
+            expires,
+            warnings: Vec::new(),
+        })
+    }
+
+    async fn resolve_decoded(
+        &self,
+        snap: &Snap,
+        dec: &Dec,
+        view: View,
+    ) -> Result<ResolvedSel, SelFail> {
+        match dec {
+            Dec::Session(b) => resolve_session(snap, b.as_ref().map(|b| b.leaf.as_str())),
+            Dec::Match {
+                m,
+                before,
+                after,
+                branch,
+            } => {
+                let mut recs: Vec<String> = Vec::new();
+                for s in &m.spans {
+                    if !recs.contains(&s.r) {
+                        recs.push(s.r.clone());
+                    }
+                }
+                resolve_window(
+                    snap,
+                    SelKind::Match,
+                    WindowInput {
+                        anchors: &recs,
+                        before: *before,
+                        after: *after,
+                        branch_leaf: branch.as_ref().map(|b| b.leaf.as_str()),
+                    },
+                )
+            }
+            Dec::Message {
+                m,
+                before,
+                after,
+                branch,
+            } => resolve_window(
+                snap,
+                SelKind::Message,
+                WindowInput {
+                    anchors: std::slice::from_ref(&m.record),
+                    before: *before,
+                    after: *after,
+                    branch_leaf: branch.as_ref().map(|b| b.leaf.as_str()),
+                },
+            ),
+            Dec::Range {
+                from,
+                through,
+                branch,
+            } => resolve_range(
+                snap,
+                &from.record,
+                &through.record,
+                branch.as_ref().map(|b| b.leaf.as_str()),
+            ),
+            Dec::Item { i, branch } => {
+                let tools = if view == View::WithTools && matches!(i.kind, ItemKind::ToolCall) {
+                    Some(Tools::load(&self.index.reader, &snap.id).await?)
+                } else {
+                    None
+                };
+                resolve_item(
+                    snap,
+                    tools.as_ref(),
+                    ItemSel {
+                        k: i.kind,
+                        r: i.record.clone(),
+                        b: i.block,
+                    },
+                    branch.as_ref().map(|b| b.leaf.as_str()),
+                )
+            }
+        }
     }
 
     /// Snapshot for a session selection without a pinned reference (spec 14.2.5).
@@ -660,14 +716,7 @@ impl ReadService {
         let c = CursorPayload::decode(&key, token).map_err(|e| handle_err(e, true))?;
         let session_id = c.a.session.clone();
         let row = self.check_access(&session_id).await?;
-        if c.v == View::RawRecords && !self.cfg.mcp.allow_raw_records {
-            return Err(app_err(
-                "FORBIDDEN",
-                "the raw_records view is not enabled in local configuration (mcp.allow_raw_records)",
-                false,
-                "change_request",
-            ));
-        }
+        self.check_view(c.v)?;
         let expires = self.validate_anchor(&session_id, &c.a).await.map_err(|e| {
             if e.code == "INVALID_ARGUMENT" {
                 invalid("cursor is not valid")
