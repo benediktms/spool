@@ -16,12 +16,12 @@ use crate::clock::SharedClock;
 use crate::config::Config;
 use crate::domain::*;
 use crate::ids;
-use crate::source::SourceFileInfo;
-use crate::sources::SourceRegistry;
+use crate::source::{ScanOutcome, SourceFileInfo};
+use crate::sources::{SourceEntry, SourceRegistry};
 use crate::storage::catalog::{self, DAY_MS, KnownFile, NewSession, SourceRow};
 use crate::storage::index::Index;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -223,36 +223,8 @@ impl DiscoveryService {
         };
         let auto = matches!(sel, Selection::Auto);
         let scan_started = self.clock.now_ms();
-        let src = if auto {
-            catalog::begin_bootstrap(
-                &self.index,
-                source_id,
-                scan_started,
-                self.cfg.discovery.bootstrap_days,
-            )
-            .await?
-        } else {
-            catalog::source(&self.index, source_id)
-                .await?
-                .ok_or_else(|| anyhow::anyhow!("source row missing"))?
-        };
-        let overlap = self.cfg.discovery.watermark_overlap_seconds as i64 * 1000;
-        let cutoff = src.discovery_watermark.map(|w| w - overlap).unwrap_or(
-            src.bootstrap_cutoff
-                .unwrap_or(scan_started - self.cfg.discovery.bootstrap_days as i64 * DAY_MS),
-        );
-        let eligibility = if src.discovery_watermark.is_none() {
-            "bootstrap"
-        } else {
-            "active"
-        };
-        // An explicit request is consent to index what is on disk now; the engine handles a file that
-        // keeps growing (follow-up). Only periodic discovery waits for files to settle.
-        let debounce = if auto {
-            self.cfg.discovery.debounce_seconds as i64 * 1000
-        } else {
-            0
-        };
+        let src = self.scan_source(source_id, auto, scan_started).await?;
+        let mut ctx = self.page_ctx(&src, &entry, &sel, &mode, scan_started, &cancel);
         let mut state = PageState {
             debounce_floor: None,
             queued: 0,
@@ -263,37 +235,15 @@ impl DiscoveryService {
         let mut any_errors = false;
         let mut completed = false;
         loop {
-            let reg = self.sources.clone();
-            let id = source_id.to_string();
-            let c = cancel.clone();
-            let a = after.clone();
-            let n = self.page_size;
-            let permit = self.cpu.clone().acquire_owned().await?;
-            let page = tokio::task::spawn_blocking(move || {
-                let _p = permit;
-                reg.scan_from(&id, &c, n, a.as_deref())
-            })
-            .await?;
+            let page = self.scan_page(source_id, &cancel, after.clone()).await?;
             let Some(page) = page else { break };
             if !page.errors.is_empty() {
                 any_errors = true;
                 rep.errors += page.errors.len();
             }
             rep.scanned += page.files.len();
-            let ctx = PageCtx {
-                source: &src,
-                kind: entry.kind,
-                include_subagents: entry.include_subagents,
-                sel: &sel,
-                mode: &mode,
-                cutoff,
-                eligibility,
-                debounce,
-                scan_started,
-                now: self.clock.now_ms(),
-            };
-            let page_after = after.clone();
-            self.process_page(&ctx, page.files, page_after, &mut state, &mut rep, &cancel)
+            ctx.now = self.clock.now_ms();
+            self.process_page(&ctx, &page.files, after.clone(), &mut state, &mut rep)
                 .await?;
             if state.stopped {
                 rep.next_after = state
@@ -320,6 +270,87 @@ impl DiscoveryService {
                 .await?;
         }
         Ok(rep)
+    }
+
+    async fn scan_source(
+        &self,
+        source_id: &str,
+        auto: bool,
+        scan_started: i64,
+    ) -> anyhow::Result<SourceRow> {
+        Ok(if auto {
+            catalog::begin_bootstrap(
+                &self.index,
+                source_id,
+                scan_started,
+                self.cfg.discovery.bootstrap_days,
+            )
+            .await?
+        } else {
+            catalog::source(&self.index, source_id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("source row missing"))?
+        })
+    }
+
+    fn page_ctx<'a>(
+        &self,
+        src: &'a SourceRow,
+        entry: &SourceEntry,
+        sel: &'a Selection,
+        mode: &'a Mode,
+        scan_started: i64,
+        cancel: &'a Arc<AtomicBool>,
+    ) -> PageCtx<'a> {
+        let auto = matches!(sel, Selection::Auto);
+        let overlap = self.cfg.discovery.watermark_overlap_seconds as i64 * 1000;
+        let cutoff = src.discovery_watermark.map(|w| w - overlap).unwrap_or(
+            src.bootstrap_cutoff
+                .unwrap_or(scan_started - self.cfg.discovery.bootstrap_days as i64 * DAY_MS),
+        );
+        let eligibility = if src.discovery_watermark.is_none() {
+            "bootstrap"
+        } else {
+            "active"
+        };
+        // An explicit request is consent to index what is on disk now; the engine handles a file that
+        // keeps growing (follow-up). Only periodic discovery waits for files to settle.
+        let debounce = if auto {
+            self.cfg.discovery.debounce_seconds as i64 * 1000
+        } else {
+            0
+        };
+        PageCtx {
+            source: src,
+            kind: entry.kind,
+            include_subagents: entry.include_subagents,
+            sel,
+            mode,
+            cancel,
+            cutoff,
+            eligibility,
+            debounce,
+            scan_started,
+            now: scan_started,
+        }
+    }
+
+    async fn scan_page(
+        &self,
+        source_id: &str,
+        cancel: &Arc<AtomicBool>,
+        after: Option<PathBuf>,
+    ) -> anyhow::Result<Option<ScanOutcome>> {
+        let reg = self.sources.clone();
+        let id = source_id.to_string();
+        let c = cancel.clone();
+        let n = self.page_size;
+        let permit = self.cpu.clone().acquire_owned().await?;
+        Ok(tokio::task::spawn_blocking(move || {
+            let _p = permit;
+            reg.scan_from(&id, &c, n, after.as_deref())
+        })
+        .await?)
     }
 
     async fn finish_auto(
@@ -365,71 +396,101 @@ impl DiscoveryService {
     async fn process_page(
         &self,
         ctx: &PageCtx<'_>,
-        files: Vec<SourceFileInfo>,
+        files: &[SourceFileInfo],
         page_after: Option<PathBuf>,
         st: &mut PageState,
         rep: &mut Report,
-        cancel: &Arc<AtomicBool>,
     ) -> anyhow::Result<()> {
         if files.is_empty() {
             return Ok(());
         }
+        let plan = self.plan_page(ctx, files).await?;
+
+        let mut tx = self.index.writer.begin().await?;
+        let seen = Self::apply_page(&mut tx, ctx, files, &plan, page_after, st, rep).await?;
+        catalog::touch_seen(&mut tx, &seen, ctx.scan_started).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn plan_page(
+        &self,
+        ctx: &PageCtx<'_>,
+        files: &[SourceFileInfo],
+    ) -> anyhow::Result<PagePlan> {
         let source_id = ctx.source.id.as_str();
+        let known = self.known_files(source_id, files).await?;
+        let renamed = self.renamed_paths(source_id, files, &known).await?;
+        // Which unseen files must be opened for identity? Auto skips files older than the cutoff
+        // without touching them (an old unseen file is never auto-indexed, so no probe cost).
+        let to_probe: Vec<SourceFileInfo> = files
+            .iter()
+            .filter(|f| ctx.needs_probe(f, &known, &renamed))
+            .cloned()
+            .collect();
+        let probes = self.probe_blocking(ctx, to_probe).await?;
+        // Identity/old-path context for each probed file, read before the write transaction.
+        let moves = self.move_info(source_id, &probes).await?;
+        let probes: HashMap<String, Option<Probe>> = probes
+            .into_iter()
+            .map(|(i, p)| (i.path.to_string_lossy().into_owned(), p))
+            .collect();
+        Ok(PagePlan {
+            known,
+            probes,
+            moves,
+        })
+    }
+
+    async fn known_files(
+        &self,
+        source_id: &str,
+        files: &[SourceFileInfo],
+    ) -> anyhow::Result<HashMap<String, KnownFile>> {
         let paths: Vec<String> = files
             .iter()
             .map(|f| f.path.to_string_lossy().into_owned())
             .collect();
-        let known: HashMap<String, KnownFile> = {
-            let mut conn = self.index.reader.acquire().await?;
-            catalog::known_by_paths(&mut conn, source_id, &paths)
-                .await?
-                .into_iter()
-                .map(|k| (k.path.clone(), k))
-                .collect()
-        };
-        // An unseen path may be a renamed known file even when it is older than the cutoff: identity
-        // lookups are indexed and cheap, so check every unknown path (no probe needed to ask).
-        let mut ident_hits: std::collections::HashSet<String> = std::collections::HashSet::new();
-        {
-            let mut conn = self.index.reader.acquire().await?;
-            for f in &files {
-                let key = f.path.to_string_lossy();
-                if known.contains_key(key.as_ref()) {
-                    continue;
-                }
-                if catalog::known_by_identity(&mut conn, source_id, f.dev, f.ino)
-                    .await?
-                    .is_some_and(|k| k.path != key)
-                {
-                    ident_hits.insert(key.into_owned());
-                }
-            }
-        }
-        // Which unseen files must be opened for identity? Auto skips files older than the cutoff
-        // without touching them (an old unseen file is never auto-indexed, so no probe cost).
-        let needs_probe = |f: &SourceFileInfo| -> bool {
+        let mut conn = self.index.reader.acquire().await?;
+        Ok(catalog::known_by_paths(&mut conn, source_id, &paths)
+            .await?
+            .into_iter()
+            .map(|k| (k.path.clone(), k))
+            .collect())
+    }
+
+    /// An unseen path may be a renamed known file even when it is older than the cutoff: identity
+    /// lookups are indexed and cheap, so check every unknown path (no probe needed to ask).
+    async fn renamed_paths(
+        &self,
+        source_id: &str,
+        files: &[SourceFileInfo],
+        known: &HashMap<String, KnownFile>,
+    ) -> anyhow::Result<HashSet<String>> {
+        let mut ident_hits: HashSet<String> = HashSet::new();
+        let mut conn = self.index.reader.acquire().await?;
+        for f in files {
             let key = f.path.to_string_lossy();
             if known.contains_key(key.as_ref()) {
-                return false;
+                continue;
             }
-            if ctx.is_recent(f) {
-                return false;
+            if catalog::known_by_identity(&mut conn, source_id, f.dev, f.ino)
+                .await?
+                .is_some_and(|k| k.path != key)
+            {
+                ident_hits.insert(key.into_owned());
             }
-            if ident_hits.contains(key.as_ref()) {
-                return true;
-            }
-            match ctx.sel {
-                Selection::Auto => f.mtime_ms >= ctx.cutoff,
-                Selection::Since(s) => f.mtime_ms >= *s,
-                Selection::All => true,
-            }
-        };
-        let to_probe: Vec<SourceFileInfo> =
-            files.iter().filter(|f| needs_probe(f)).cloned().collect();
-        let probes = self.probe_blocking(ctx, to_probe, cancel.clone()).await?;
-        // Identity/old-path context for each probed file, read before the write transaction.
+        }
+        Ok(ident_hits)
+    }
+
+    async fn move_info(
+        &self,
+        source_id: &str,
+        probes: &[(SourceFileInfo, Option<Probe>)],
+    ) -> anyhow::Result<HashMap<String, MoveInfo>> {
         let mut moves: HashMap<String, MoveInfo> = HashMap::new();
-        for (info, probe) in &probes {
+        for (info, probe) in probes {
             let mut conn = self.index.reader.acquire().await?;
             // Inode reuse guard: an identity match only counts as a move when the native id agrees.
             let by_ident = catalog::known_by_identity(&mut conn, source_id, info.dev, info.ino)
@@ -466,50 +527,54 @@ impl DiscoveryService {
                 },
             );
         }
-        let probe_map: HashMap<String, Option<Probe>> = probes
-            .into_iter()
-            .map(|(i, p)| (i.path.to_string_lossy().into_owned(), p))
-            .collect();
+        Ok(moves)
+    }
 
-        let mut tx = self.index.writer.begin().await?;
+    /// Applies the planned page inside the caller's transaction; returns the paths to mark seen.
+    async fn apply_page(
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        ctx: &PageCtx<'_>,
+        files: &[SourceFileInfo],
+        plan: &PagePlan,
+        mut page_after: Option<PathBuf>,
+        st: &mut PageState,
+        rep: &mut Report,
+    ) -> anyhow::Result<Vec<String>> {
         let mut seen: Vec<String> = Vec::new();
         let mut last_done: Option<PathBuf> = None;
-        for f in &files {
-            if cancel.load(Ordering::Relaxed) {
+        for f in files {
+            if ctx.cancel.load(Ordering::Relaxed) {
                 break;
             }
             if st.queued >= st.budget {
                 // Resume strictly after the last processed file (or the page's own cursor).
                 st.stopped = true;
-                st.cursor = last_done.clone().or_else(|| page_after.clone());
+                st.cursor = last_done.take().or_else(|| page_after.take());
                 break;
             }
             let key = f.path.to_string_lossy().into_owned();
             let recent = ctx.is_recent(f);
-            if let Some(k) = known.get(&key) {
+            if let Some(k) = plan.known.get(&key) {
                 seen.push(key.clone());
-                Self::apply_known(&mut tx, ctx, f, k, st, rep).await?;
+                Self::apply_known(tx, ctx, f, k, st, rep).await?;
             } else if recent {
                 // Brand-new file still being written: skip, and keep the watermark below it.
                 rep.debounced += 1;
                 st.floor(f.mtime_ms);
-            } else if let Some(p) = probe_map.get(&key) {
-                Self::apply_unknown(&mut tx, ctx, f, p.as_ref(), moves.get(&key), st, rep).await?;
+            } else if let Some(p) = plan.probes.get(&key) {
+                Self::apply_unknown(tx, ctx, f, p.as_ref(), plan.moves.get(&key), st, rep).await?;
             } else {
                 rep.skipped_old += 1;
             }
             last_done = Some(f.path.clone());
         }
-        catalog::touch_seen(&mut tx, &seen, ctx.scan_started).await?;
-        tx.commit().await?;
-        Ok(())
+        Ok(seen)
     }
 
     async fn probe_blocking(
         &self,
         ctx: &PageCtx<'_>,
         files: Vec<SourceFileInfo>,
-        cancel: Arc<AtomicBool>,
     ) -> anyhow::Result<Vec<(SourceFileInfo, Option<Probe>)>> {
         if files.is_empty() {
             return Ok(Vec::new());
@@ -518,6 +583,7 @@ impl DiscoveryService {
         let source_id = ctx.source.id.clone();
         let kind = ctx.kind;
         let max_record = self.cfg.ingestion.max_record_bytes;
+        let cancel = ctx.cancel.clone();
         let permit = self.cpu.clone().acquire_owned().await?;
         Ok(tokio::task::spawn_blocking(move || {
             let _p = permit;
@@ -834,12 +900,19 @@ struct MoveInfo {
     by_native: Vec<(KnownFile, bool)>,
 }
 
+struct PagePlan {
+    known: HashMap<String, KnownFile>,
+    probes: HashMap<String, Option<Probe>>,
+    moves: HashMap<String, MoveInfo>,
+}
+
 struct PageCtx<'a> {
     source: &'a SourceRow,
     kind: HarnessKind,
     include_subagents: bool,
     sel: &'a Selection,
     mode: &'a Mode,
+    cancel: &'a Arc<AtomicBool>,
     cutoff: i64,
     eligibility: &'static str,
     debounce: i64,
@@ -852,6 +925,29 @@ impl PageCtx<'_> {
     /// Still inside the debounce window: the file may be mid-write.
     fn is_recent(&self, f: &SourceFileInfo) -> bool {
         self.now - f.mtime_ms < self.debounce
+    }
+
+    fn needs_probe(
+        &self,
+        f: &SourceFileInfo,
+        known: &HashMap<String, KnownFile>,
+        renamed: &HashSet<String>,
+    ) -> bool {
+        let key = f.path.to_string_lossy();
+        if known.contains_key(key.as_ref()) {
+            return false;
+        }
+        if self.is_recent(f) {
+            return false;
+        }
+        if renamed.contains(key.as_ref()) {
+            return true;
+        }
+        match self.sel {
+            Selection::Auto => f.mtime_ms >= self.cutoff,
+            Selection::Since(s) => f.mtime_ms >= *s,
+            Selection::All => true,
+        }
     }
 }
 
