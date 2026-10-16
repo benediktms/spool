@@ -88,6 +88,8 @@ struct LexicalQuery<'a> {
 /// (1-based rank, raw retriever score) of a chunk in one retriever's candidate list.
 type Rank = Option<(usize, f64)>;
 
+type QueryVector = (String, Arc<Vec<f32>>);
+
 /// One retrieved chunk after fusion.
 struct Fused {
     rowid: i64,
@@ -197,11 +199,34 @@ impl SearchService {
         let cancel = Arc::new(AtomicBool::new(false));
         let _guard = CancelOnDrop(cancel.clone());
 
+        let (mode_used, qvec, warnings) = self.embed_query(&plan).await?;
+        let mut last_err = None;
+        for _ in 0..MAX_ATTEMPTS {
+            let ret = self
+                .retrieve_within_deadline(&plan, mode_used, qvec.clone(), cancel.clone())
+                .await?;
+            match self.finish(&plan, mode_used, ret, warnings.clone()).await {
+                Ok(v) => return Ok(v),
+                Err(e) if matches!(e.code.as_str(), "STALE_REFERENCE" | "SESSION_NOT_FOUND") => {
+                    last_err = Some(e)
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(last_err.unwrap_or_else(|| {
+            AppError::new("INDEX_BUSY", "the index changed while searching; retry")
+        }))
+    }
+
+    async fn embed_query(
+        &self,
+        plan: &Plan,
+    ) -> Result<(Mode, Option<QueryVector>, Vec<Warning>), AppError> {
         let mut warnings = Vec::new();
         let mut mode_used = plan.mode;
         let mut qvec = None;
         if matches!(plan.mode, Mode::Hybrid | Mode::Semantic) {
-            match self.query_vector(&plan).await {
+            match self.query_vector(plan).await {
                 Ok(v) => qvec = Some(v),
                 Err(e) if plan.mode == Mode::Hybrid => {
                     mode_used = Mode::Lexical;
@@ -215,34 +240,30 @@ impl SearchService {
                 Err(e) => return Err(e),
             }
         }
+        Ok((mode_used, qvec, warnings))
+    }
 
+    async fn retrieve_within_deadline(
+        &self,
+        plan: &Plan,
+        mode: Mode,
+        qvec: Option<QueryVector>,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<Retrieved, AppError> {
         let deadline_ms = self.cfg.search.semantic_query_deadline_ms.max(1);
-        let mut last_err = None;
-        for _ in 0..MAX_ATTEMPTS {
-            let deadline = Instant::now() + Duration::from_millis(deadline_ms);
-            // The scan observes `deadline` itself (partial result + warning); the outer timeout is a hard stop.
-            let ret = tokio::time::timeout(
-                Duration::from_millis(deadline_ms * 2),
-                self.retrieve(&plan, mode_used, qvec.clone(), cancel.clone(), deadline),
-            )
-            .await
-            .map_err(|_| {
-                let mut e = AppError::new("INDEX_BUSY", "local retrieval exceeded its deadline");
-                e.retryable = true;
-                e.recovery = Some("retry_later".into());
-                e
-            })??;
-            match self.finish(&plan, mode_used, ret, warnings.clone()).await {
-                Ok(v) => return Ok(v),
-                Err(e) if matches!(e.code.as_str(), "STALE_REFERENCE" | "SESSION_NOT_FOUND") => {
-                    last_err = Some(e)
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        Err(last_err.unwrap_or_else(|| {
-            AppError::new("INDEX_BUSY", "the index changed while searching; retry")
-        }))
+        let deadline = Instant::now() + Duration::from_millis(deadline_ms);
+        // The scan observes `deadline` itself (partial result + warning); the outer timeout is a hard stop.
+        tokio::time::timeout(
+            Duration::from_millis(deadline_ms * 2),
+            self.retrieve(plan, mode, qvec, cancel, deadline),
+        )
+        .await
+        .map_err(|_| {
+            let mut e = AppError::new("INDEX_BUSY", "local retrieval exceeded its deadline");
+            e.retryable = true;
+            e.recovery = Some("retry_later".into());
+            e
+        })?
     }
 
     // ------------------------------------------------------------------ validation
@@ -357,7 +378,7 @@ impl SearchService {
     // ------------------------------------------------------------------ provider
 
     /// Embed the query once, before any local read transaction exists.
-    async fn query_vector(&self, plan: &Plan) -> Result<(String, Arc<Vec<f32>>), AppError> {
+    async fn query_vector(&self, plan: &Plan) -> Result<QueryVector, AppError> {
         let s = &self.cfg.search;
         let budget = Duration::from_millis(
             if plan.mode == Mode::Hybrid {
@@ -391,11 +412,57 @@ impl SearchService {
 
     // ------------------------------------------------------------------ retrieval (one read transaction)
 
+    async fn literal_drafts(
+        &self,
+        conn: &mut sqlx::SqliteConnection,
+        plan: &Plan,
+        max_l: usize,
+        warnings: &mut Vec<Warning>,
+    ) -> Result<Vec<SessionDraft>, AppError> {
+        let rows = retrieve::literal(
+            conn,
+            &plan.filters,
+            &plan.query,
+            plan.case_sensitive,
+            plan.per_session,
+            plan.prefer_recent,
+            max_l,
+        )
+        .await?;
+        if rows.len() >= max_l {
+            warnings.push(warn(
+                "candidate_limit_reached",
+                "More literal matches exist than were examined; narrow the filters.",
+            ));
+        }
+        self.literal_sessions(conn, plan, rows).await
+    }
+
+    async fn semantic_candidates(
+        conn: &mut sqlx::SqliteConnection,
+        plan: &Plan,
+        q: &QueryVector,
+        coverage: &retrieve::CoverageRow,
+        limits: retrieve::ScanLimits,
+        warnings: &mut Vec<Warning>,
+    ) -> Result<Vec<Scored>, AppError> {
+        let out = retrieve::semantic_scan(conn, &plan.filters, &q.0, q.1.clone(), limits).await?;
+        if !out.complete {
+            warnings.push(warn(
+                "semantic_scan_incomplete",
+                "The semantic scan hit its local deadline; semantic candidates are partial.",
+            ));
+        } else if out.top.is_empty() && coverage.embedded_chunks == 0 {
+            warnings.push(warn("semantic_index_empty", "No chunk has a vector for the active embedding profile yet; results are lexical only."));
+        }
+        Ok(out.top)
+    }
+
     async fn retrieve(
         &self,
         plan: &Plan,
         mode: Mode,
-        qvec: Option<(String, Arc<Vec<f32>>)>,
+        qvec: Option<QueryVector>,
         cancel: Arc<AtomicBool>,
         deadline: Instant,
     ) -> Result<Retrieved, AppError> {
@@ -427,23 +494,8 @@ impl SearchService {
         let max_l = cfg.max_candidate_limit.max(cfg.candidate_limit).max(1);
 
         let sessions = if mode == Mode::Literal {
-            let rows = retrieve::literal(
-                conn,
-                &plan.filters,
-                &plan.query,
-                plan.case_sensitive,
-                plan.per_session,
-                plan.prefer_recent,
-                max_l,
-            )
-            .await?;
-            if rows.len() >= max_l {
-                warnings.push(warn(
-                    "candidate_limit_reached",
-                    "More literal matches exist than were examined; narrow the filters.",
-                ));
-            }
-            self.literal_sessions(conn, plan, rows).await?
+            self.literal_drafts(conn, plan, max_l, &mut warnings)
+                .await?
         } else {
             let fts = if mode == Mode::Semantic {
                 None
@@ -469,25 +521,14 @@ impl SearchService {
             };
             let sem = match &qvec {
                 Some(q) => {
-                    let out = retrieve::semantic_scan(
-                        conn,
-                        &plan.filters,
-                        &profile_id,
-                        q.1.clone(),
-                        retrieve::ScanLimits {
-                            k: max_l,
-                            batch_bytes: cfg.vector_batch_bytes.max(4),
-                            cancel,
-                            deadline,
-                        },
-                    )
-                    .await?;
-                    if !out.complete {
-                        warnings.push(warn("semantic_scan_incomplete", "The semantic scan hit its local deadline; semantic candidates are partial."));
-                    } else if out.top.is_empty() && coverage.embedded_chunks == 0 {
-                        warnings.push(warn("semantic_index_empty", "No chunk has a vector for the active embedding profile yet; results are lexical only."));
-                    }
-                    out.top
+                    let limits = retrieve::ScanLimits {
+                        k: max_l,
+                        batch_bytes: cfg.vector_batch_bytes.max(4),
+                        cancel,
+                        deadline,
+                    };
+                    Self::semantic_candidates(conn, plan, q, &coverage, limits, &mut warnings)
+                        .await?
                 }
                 None => Vec::new(),
             };
