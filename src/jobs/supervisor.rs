@@ -2,9 +2,10 @@
 //! independently of the request server (spec 11.8). A stopped or repeatedly failing worker shows up
 //! as `ingestion_degraded` and is restarted with bounded, backed-off attempts; search keeps running.
 //!
-//! Registering a worker name fails with `WORKER_ALREADY_EXISTS` until the dead incarnation's
-//! `last_seen` is older than the heartbeat (docs/dependency-baseline.md). That is expected after a
-//! kill, so the supervisor retries it without counting it as a worker failure.
+//! Registering a worker name fails with `WORKER_ALREADY_EXISTS` until the previous incarnation's
+//! `last_seen` is older than the heartbeat (docs/dependency-baseline.md), which is expected after
+//! any restart. The supervisor reads that lease first and sleeps out the remainder, so Apalis never
+//! logs the refusal; a refusal that still happens is retried without counting as a worker failure.
 
 use super::backend::{self, Liveness};
 use super::handlers::{self, JobCtx};
@@ -118,6 +119,24 @@ fn record_worker_event(status: &Status, clock: &SharedClock, event: &Event) {
     });
 }
 
+/// Seconds until the backend will accept `name` again, mirroring `register_worker.sql`
+/// (refused while `now - last_seen <= heartbeat`). `None` means register now. A failed read also
+/// means register now: the backend then reports the genuine error itself.
+async fn registration_wait(pool: &SqlitePool, name: &str, heartbeat: Duration) -> Option<Duration> {
+    let left: i64 = sqlx::query_scalar(
+        "SELECT ?1 - (strftime('%s', 'now') - last_seen) + 1 FROM Workers WHERE id = ?2",
+    )
+    .bind(i64::try_from(heartbeat.as_secs()).ok()?)
+    .bind(name)
+    .fetch_optional(pool)
+    .await
+    .ok()??;
+    u64::try_from(left)
+        .ok()
+        .filter(|s| *s > 0)
+        .map(Duration::from_secs)
+}
+
 async fn stop_signal(mut rx: watch::Receiver<bool>) -> Result<(), WorkerError> {
     let _ = rx.wait_for(|v| *v).await;
     Ok(())
@@ -189,6 +208,18 @@ fn supervise(
         loop {
             if *stop.borrow() {
                 break;
+            }
+            let name = status
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .name
+                .clone();
+            if let Some(wait) =
+                registration_wait(&ctx.sub.pool, &name, ctx.sub.liveness.heartbeat_interval).await
+            {
+                tracing::info!(worker = %name, wait_secs = wait.as_secs(), "waiting for previous worker lease to expire");
+                tokio::select! { _ = tokio::time::sleep(wait) => {}, _ = stop.changed() => {} }
+                continue;
             }
             let started = Instant::now();
             let (kill_tx, kill_rx) = tokio::sync::oneshot::channel::<()>();
@@ -961,5 +992,33 @@ mod tests {
                 .last_started_ms,
             Some(123)
         );
+    }
+
+    #[tokio::test]
+    async fn registration_waits_only_while_backend_would_refuse() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        backend::setup(&pool).await.unwrap();
+        let hb = Duration::from_secs(300);
+        assert_eq!(registration_wait(&pool, "w", hb).await, None);
+
+        for (age, expected) in [(0, Some(280..=301)), (100, Some(150..=201)), (1000, None)] {
+            sqlx::query(
+                "INSERT OR REPLACE INTO Workers (id, worker_type, storage_name, last_seen) \
+                 VALUES ('w', 't', 's', CAST(strftime('%s', 'now') AS INTEGER) - ?1)",
+            )
+            .bind(age)
+            .execute(&pool)
+            .await
+            .unwrap();
+            let wait = registration_wait(&pool, "w", hb).await.map(|d| d.as_secs());
+            match expected {
+                Some(range) => assert!(range.contains(&wait.unwrap()), "age {age}: {wait:?}"),
+                None => assert_eq!(wait, None, "age {age}"),
+            }
+        }
     }
 }

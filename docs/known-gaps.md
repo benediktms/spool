@@ -40,9 +40,10 @@ suite and run actually covered, read `docs/smoke-results.md`, `docs/dependency-b
 * **Apalis retry.** Transient ingestion failures use Apalis' native `retry` layer (`IngestRetry`: 5 attempts, 5 s
   base, 15 min cap, jitter, `Retry-After` floor) on the same task; there is no application retry scheduler. The
   backoff is an in-process sleep (`tests/jobs.rs` measures it); backend re-enqueue after a crash increments attempts.
-* **Worker re-registration.** After an unclean daemon exit the backend refuses to re-register the same worker name
-  for up to one heartbeat interval (30 s default, `WORKER_ALREADY_EXISTS`); the supervisor retries with backoff, so
-  ingestion resumes about 30 s after a restart, while search and read are available immediately.
+* **Worker re-registration.** After any daemon exit the backend refuses to re-register the same worker name
+  for up to one heartbeat interval (30 s default, `WORKER_ALREADY_EXISTS`); the supervisor waits out the remaining
+  lease before registering (one info log, no error spam), so ingestion resumes about 30 s after a restart, while
+  search and read are available immediately.
 * **Provider consent is all-or-nothing per install** (`embedding.hosted_processing_approved`); there is no
   per-source consent.
 * **Encryption.** The index is plain SQLite protected only by owner-only filesystem permissions; there is no

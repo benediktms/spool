@@ -52,8 +52,8 @@ differing release candidates; `apalis-sqlite 1.0.0` / `apalis 1.0.0` are publish
 * Registration (`register`): first re-enqueues orphans locked by a worker with the **same name**
   whose `last_seen` is at least `heartbeat_interval` old, then inserts the worker. Registering a
   worker name whose `last_seen` is not older than `heartbeat_interval` fails with
-  `WORKER_ALREADY_EXISTS` (the transaction rolls back). The supervisor must therefore retry
-  registration; the test does exactly that.
+  `WORKER_ALREADY_EXISTS` (the transaction rolls back). The supervisor therefore reads `Workers.last_seen`
+  first and sleeps out the remainder (`registration_wait`); a refusal that still occurs is retried every 500 ms.
 * Readiness: `WorkerStream` emits `Event::Start` before the backend is polled, so it does not
   confirm registration. After `Persisted::poll_ready` receives a successful `register`, it emits
   `Event::HeartBeat` before fetching work; this also happens when the queue is idle. The supervisor
