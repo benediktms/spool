@@ -7,6 +7,7 @@ use spool::config::SourceConfig;
 use spool::discovery::{DiscoveryService, Mode, Report, Selection};
 use spool::domain::HarnessKind;
 use spool::storage::catalog;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -305,6 +306,7 @@ async fn restart_after_more_than_seven_days_resumes_from_the_prior_watermark() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn incomplete_scan_never_advances_the_watermark_or_tombstones() {
     let env = Env::new().await;
@@ -352,6 +354,7 @@ async fn incomplete_scan_never_advances_the_watermark_or_tombstones() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn unavailable_root_is_an_incomplete_scan_not_mass_deletion() {
     let env = Env::new().await;
@@ -371,6 +374,7 @@ async fn unavailable_root_is_an_incomplete_scan_not_mass_deletion() {
     assert_eq!(source_row(&env).await.discovery_watermark, Some(T0));
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn paged_scan_with_error_in_an_early_page_stays_incomplete() {
     let env = Env::new().await;
@@ -456,6 +460,7 @@ async fn rename_updates_the_path_instead_of_recreating_the_session() {
     assert_eq!(after.source_status, "present");
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn confirmed_deletion_tombstones_then_removes_results_on_the_next_completed_scan() {
     let env = Env::new().await;

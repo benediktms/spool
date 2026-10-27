@@ -1,13 +1,14 @@
-> **Repository reference copy.** This is the implementation specification as received (text below unchanged). Its statements that code, schemas, examples or tests "do not exist yet" describe the state when it was written; current verified status is in `docs/known-gaps.md`, `docs/smoke-results.md`, `docs/dependency-baseline.md` and `docs/adapter-verification.md`.
+> **Repository reference copy.** Current verified status is recorded in `docs/known-gaps.md`,
+> `docs/smoke-results.md`, `docs/dependency-baseline.md` and `docs/adapter-verification.md`.
 
 # Spool: implementation specification
 
 **Status:** Proposed implementation contract, version 1.0  
 **Date:** 12 October 2026  
 **Executable and package name:** `spool` (display name: Spool). All CLI examples, paths, and service identifiers in this document use this name.  
-**Primary deployment:** A per-user macOS service; Linux user-service support follows the same application contract.
+**Primary deployment:** Per-user macOS, Linux, and Windows local services.
 
-This document specifies a local search engine for agent-session conversation history. It is not a memory system. Requirements using MUST are release requirements; SHOULD identifies an intentional preference with a documented exception permitted. Configuration values are proposed starting defaults, not measured performance claims. Code and schemas describe the intended application, not a completed or tested implementation. Section 14.2 is the complete `read_session` contract. The standalone file `contract.md` repeats it and MUST match it.
+This document specifies a local search engine for agent-session conversation history. It is not a memory system. Requirements using MUST are release requirements; SHOULD identifies an intentional preference with a documented exception permitted. Configuration values are proposed starting defaults, not measured performance claims. Code and schemas describe the intended application, not a completed or tested implementation. Section 14.2 is the complete `read_session` contract. The standalone file `read-session-contract.md` repeats it and MUST match it.
 
 ## 1. Product contract
 
@@ -40,15 +41,16 @@ Do not import raw tool output into the searchable corpus as an optimization or f
 
 The first usable milestone MUST support OhMyPi end to end. Codex and Claude Code use the same adapter contract and are subsequent milestones before the cross-harness v1 release. Do not delay a usable OhMyPi build until every adapter is complete. A release MUST advertise only adapters and format variants covered by passing fixtures.
 
-macOS is the first installation target. Linux service integration is a separate, bounded milestone; Windows is out of scope for v1. All normal application commands and storage must remain portable Rust.
+macOS, Linux, and Windows use the same application contract. Windows x64 support targets Windows
+10/11; native verification ran on Windows 11 x64 only. Windows 10 and ARM variants MUST NOT be advertised as verified.
 
 ### 1.3 Key decisions
 
 | Decision | Contract |
 |---|---|
 | Process model | One persistent daemon owns all writable databases. Each MCP client runs `spool mcp`, a thin stdio bridge to the daemon. |
-| Local access | Owner-only Unix-domain socket. The CLI and `spool mcp` use the same local IPC. No HTTP listener, no HTTP MCP client, no bearer credentials. |
-| Access boundary | Filesystem permissions: directories 0700, socket and sensitive files 0600. No isolation from a hostile process of the same user. |
+| Local access | Owner-only local IPC: Unix-domain socket on macOS/Linux, local named pipe on Windows. The CLI and `spool mcp` use the same endpoint. No HTTP listener, no HTTP MCP client, no bearer credentials. |
+| Access boundary | Unix directories 0700 and sensitive files/socket 0600; equivalent protected current-user + SYSTEM Windows ACLs. No isolation from a hostile process of the same user. |
 | MCP surface | `search_sessions`, `read_session`, `index_status` only. Administration is CLI-only. |
 | Handle integrity | Handles are signed with a persistent signing key. The signature protects integrity. It is not client authentication. |
 | Runtime | Tokio multithreaded runtime with explicitly bounded blocking work |
@@ -79,7 +81,7 @@ Before implementing product features, create and commit a minimal compiling inte
 
 1. Pins compatible published Apalis, SQLite-backend, Tokio, SQLx, and `rmcp` versions in `Cargo.lock`.
 2. Enqueues and executes a durable SQLite job, kills its worker, and demonstrates the pinned backend's recovery procedure.
-3. Runs real stdio MCP clients against `spool mcp`, which forwards over the owner-only Unix-domain socket to the daemon and returns one tool result. Use the protocol negotiation that the SDK supports, and test it with each actual client. Do not assume or invent supported protocol versions.
+3. Runs real stdio MCP clients against `spool mcp`, which forwards over the owner-only local IPC endpoint to the daemon and returns one tool result. Use the protocol negotiation that the SDK supports, and test it with each actual client. Do not assume or invent supported protocol versions.
 4. Opens the search database through the chosen SQLx version and confirms FTS5 availability.
 5. Confirms there is one compatible `libsqlite3-sys` linkage in the dependency graph.
 
@@ -89,7 +91,11 @@ Record actual package versions, negotiated protocol versions per tested client, 
 
 ### 3.1 Installation and first run
 
-`spool init` writes configuration, creates the state directories (mode 0700), and generates the persistent handle-signing key (mode 0600). It reports recognized source roots without ingesting them yet. The user chooses enabled sources and explicitly permits hosted embedding of their conversational text. Without hosted permission or an API key, the daemon still supports lexical indexing and search.
+`spool init` writes configuration, creates platform-private state directories, and generates the persistent
+handle-signing key. On Unix this means directories mode 0700 and sensitive files mode 0600; Windows
+uses protected current-user + SYSTEM ACLs. It reports recognized source roots without ingesting them
+yet. The user chooses enabled sources and explicitly permits hosted embedding of their conversational
+text. Without hosted permission or an API key, the daemon still supports lexical indexing and search.
 
 `spool service install` installs a per-user service. `spool service start` starts it. Startup returns readiness after storage and request handling are available; initial ingestion continues independently.
 
@@ -120,7 +126,7 @@ OhMyPi / Codex / Claude Code / other MCP clients
                          |
             stdio: one `spool mcp` per client
                          |
-      owner-only Unix-domain socket (local IPC)
+      owner-only local IPC endpoint
             (the `spool` CLI uses the same IPC)
                          |
              one per-user daemon
@@ -142,7 +148,7 @@ OhMyPi / Codex / Claude Code / other MCP clients
 Apalis persists execution state separately in jobs.sqlite.
 ```
 
-The daemon is a foreground executable supervised by the operating system. Do not double-fork or implement self-daemonization. Only the daemon opens writable database connections. Normal CLI commands and the stdio bridge call daemon services through the local IPC socket. An explicitly named offline maintenance command may open storage only after acquiring the same exclusive process lock.
+The daemon is a foreground executable supervised by the operating system. Do not double-fork or implement self-daemonization. Only the daemon opens writable database connections. Normal CLI commands and the stdio bridge call daemon services through the local IPC endpoint. An explicitly named offline maintenance command may open storage only after acquiring the same exclusive process lock.
 
 ### 4.1 Concurrency budgets
 
@@ -187,7 +193,7 @@ src/
   mcp/{server,tools,bridge}.rs
   ipc/{server,client,framing}.rs
   control/
-  service/{macos,linux}.rs
+  service/{macos,linux,windows}.rs
   telemetry/
 ```
 
@@ -327,9 +333,9 @@ Byte offsets are hints validated against the source identity and record digest. 
 
 ### 6.3 Filesystem boundary
 
-Configure an explicit allowlist of transcript roots. Accept source/session identifiers in APIs, not unrestricted filesystem paths. Resolve symlinks and canonical containment at open time. Refuse escapes, special device files, and sources owned by a different user by default.
+Configure an explicit allowlist of transcript roots. Accept source/session identifiers in APIs, not unrestricted filesystem paths. Resolve containment at open time. Refuse escapes, reparse points/symlinks, special device files, and sources owned by a different user by default.
 
-Keep an already-open file descriptor while validating and reading a range; avoid validating one path and then opening an attacker-swapped target. Every external blob also passes root containment checks.
+Keep an already-open file handle while validating and reading a range; avoid validating one path and then opening an attacker-swapped target. Windows traversal is handle-relative, no-follow, and validates ownership plus volume/file identity. Every external blob also passes root containment checks.
 
 A raw transcript may contain commands, URLs, malicious instructions, or secrets. Retrieval returns data only. The daemon never executes commands, opens arbitrary referenced URLs, or follows transcript instructions.
 
@@ -1144,9 +1150,9 @@ The server MUST separately enforce local I/O, scan, and time budgets. When one i
 
 #### 14.2.8 Handle lifetime and local safety
 
-Handles are versioned, signed opaque tokens. The signature protects integrity: it detects forged or altered handles. It does not authenticate a client and it does not authorize access. Spool has no client credentials. The access boundary is the owner-only filesystem permissions on the state directory (0700) and on the daemon socket and other sensitive files (0600). Those permissions give no isolation from a hostile process that runs as the same operating-system user (section 15.2). Validate current local enablement, enabled source roots, and exclusions on every call. Raw view needs local enablement (`mcp.allow_raw_records`).
+Handles are versioned, signed opaque tokens. The signature protects integrity: it detects forged or altered handles. It does not authenticate a client and it does not authorize access. Spool has no client credentials. The access boundary is platform-private state: Unix state directories 0700 and sensitive files/socket 0600; Windows protected current-user + SYSTEM ACLs and local named-pipe ownership checks. Those controls give no isolation from a hostile process that runs as the same operating-system user (section 15.2). Validate current local enablement, enabled source roots, and exclusions on every call. Raw view needs local enablement (`mcp.allow_raw_records`).
 
-The daemon signs handles with a persistent signing key. It stores the key in a file with mode 0600. Explicit key rotation revokes the handles that the old key signed.
+The daemon signs handles with a persistent signing key. It stores the key in a platform-private file (Unix mode 0600). Explicit key rotation revokes the handles that the old key signed.
 
 Retain the manifest and indexed material that issued live handles need, for a bounded lease. Expose the actual expiry. A suggested initial TTL is thirty minutes. The TTL is configurable. A search match handle uses the same lease mechanism as a read handle, and the search output exposes its expiry (section 14.1). Bound the number of active leases and the bytes of retained state. Both bounds are configurable. Reject new reads under resource pressure with `RESOURCE_LIMIT`. Do not promise unbounded retention.
 
@@ -1233,27 +1239,45 @@ Include `retryable`, a bounded human-readable explanation, and a safe next actio
 
 ## 15. Local IPC and security
 
-### 15.1 Daemon IPC socket
+### 15.1 Daemon IPC endpoint
 
-The daemon listens on one Unix-domain socket in the state directory (`state/spool.sock` by default). The `spool` CLI and `spool mcp` both use this socket. There is no HTTP listener, no TCP listener, and no HTTP MCP client. Do not implement HTTP transport compatibility, bearer credentials, credential rotation, `Host` or `Origin` validation, or CORS.
+The daemon listens on one configured local endpoint (`state/spool.sock` by default). On macOS/Linux
+it is a Unix-domain socket in the state directory. On Windows the absolute configured socket path is
+hashed into a local named-pipe name; the configuration value remains endpoint identity and no
+`spool.sock` file is created. The `spool` CLI and `spool mcp` both use this endpoint. There is no
+HTTP listener, no TCP listener, and no HTTP MCP client. Do not implement HTTP transport
+compatibility, bearer credentials, credential rotation, `Host` or `Origin` validation, or CORS.
 
-Create the socket under the exclusive state-directory lock (section 17.1). Remove a stale socket only after you hold that lock. Never bind over a socket that a live daemon owns. Set the state directory to mode 0700 and the socket to mode 0600 before the daemon accepts a request. Where the platform supports it, SHOULD reject a peer whose user ID differs from the daemon's. Config validation rejects a socket path that is longer than the platform limit.
+Create the endpoint under the exclusive state-directory lock (section 17.1). Unix removes a stale
+socket only after holding that lock and never binds over a live daemon. Windows uses first-instance
+pipe protection. Unix sets the state directory to mode 0700 and socket to mode 0600; Windows uses
+the protected ACL equivalent and validates the server owner before a client writes a request.
+Platform-specific path limits apply only where relevant; long configured socket paths remain valid
+Windows endpoint identities.
 
 Bound the size of each IPC request and response. Reject malformed or oversized frames.
 
 ### 15.2 Access model
 
-Filesystem permissions are the only access control: directories 0700, socket and sensitive files 0600. Sensitive files include the handle-signing key, the provider credential file, the databases, and their WAL files. There are no client credentials, no credential scopes, and no authentication step. Anything that can open the socket can use every enabled MCP tool.
+Filesystem permissions are the only access control. Unix uses directories 0700 and sensitive
+files/socket 0600. Windows protected DACLs grant full access only to the current user and
+LocalSystem; state paths reject reparse points, owner checks require the current user, and inherited
+ACEs are limited to approved entries. Sensitive files include the handle-signing key, provider
+credential file, databases, and WAL files. There are no client credentials, credential scopes, or
+authentication step. Anything that can open the local endpoint can use every enabled MCP tool.
 
-These permissions give no isolation from a hostile process that runs as the same operating-system user. Document this boundary. Do not claim more.
+These controls give no isolation from a hostile process that runs as the same operating-system user.
+Document this boundary. Do not claim more.
 
 The MCP surface is `search_sessions`, `read_session`, and `index_status` (section 14). Administration is CLI-only. Raw view needs local enablement (`mcp.allow_raw_records = true`). Semantic and hybrid search can send queries to the provider and spend approved query budget, even though the MCP surface is read-oriented.
 
-Handles carry a signature from a persistent signing key (mode 0600, generated by `spool init`, kept across restarts). The signature protects handle integrity. It is not client authentication. Explicit key rotation (`spool handles rotate-key`) revokes existing handles.
+Handles carry a signature from a persistent signing key (Unix mode 0600, generated by `spool init`, kept across restarts). The signature protects handle integrity. It is not client authentication. Explicit key rotation (`spool handles rotate-key`) revokes existing handles.
 
 ### 15.3 Stdio bridge
 
-`spool mcp` exposes the three read tools over stdio and forwards each call over the IPC socket. It does not open databases, start workers, or fork an untracked daemon. It contains no HTTP client.
+`spool mcp` exposes the three read tools over stdio and forwards each call over the local IPC
+endpoint. It does not open databases, start workers, or fork an untracked daemon. It contains no
+HTTP client.
 
 Use the SDK's supported stdio protocol negotiation. Test it with each actual client that a release advertises. Do not claim protocol versions that you did not test. Preserve tool schemas, structured results, errors, cancellation, output limits, and supported capabilities. Expose only the tool surface that the bridge can faithfully forward.
 
@@ -1261,7 +1285,11 @@ Only MCP frames are written to stdout. Diagnostics go to stderr. If the daemon i
 
 ### 15.4 Data handling
 
-The index contains sensitive conversational text and sensitive vectors. Protect config and state directories with mode 0700, and the socket, signing key, credential files, and databases with mode 0600, where supported. `doctor` and daemon startup verify these modes (sections 17.1 and 18). Normal SQLite is not application-layer encrypted. Document reliance on OS account permissions and optional full-disk encryption. Do not claim encryption that does not exist.
+The index contains sensitive conversational text and sensitive vectors. Protect config and state
+directories with Unix mode 0700/0600 or equivalent Windows protected ACLs. `doctor` and daemon
+startup verify these controls (sections 17.1 and 18). Normal SQLite is not application-layer
+encrypted. Document reliance on OS account permissions and optional full-disk encryption. Do not
+claim encryption that does not exist.
 
 Hosted processing requires explicit configuration. Transmit only rendered conversational chunk text and search queries, not source paths, raw tools, credentials, or full transcript records as side metadata. Text can itself contain secrets that the user pasted. Filtering tool blocks is not a secret scanner. Offer source exclusions before ingestion. Do not claim automatic complete redaction.
 
@@ -1373,9 +1401,18 @@ roots = ["~/.claude/projects"]
 include_subagents = false
 ```
 
+On Windows, `ipc.socket_path` remains the configured endpoint identity but maps to a local named
+pipe rather than a filesystem socket; `state/spool.sock` is not created.
+
 With `hosted_processing_approved = false`, the example intentionally runs without transmitting text. `init` must explain and obtain the user's chosen setting rather than silently converting false to true. Missing credentials have the same lexical-only fallback, with distinct status.
 
-Config validation rejects incompatible limits, unknown fields, a socket path longer than the platform limit, duplicate source IDs, invalid roots, and a chunk hard limit above provider capabilities. Resolve relative paths against the config directory. Never expand command substitutions. Changes affecting extraction or embeddings invalidate the corresponding fingerprints explicitly.
+Config validation rejects incompatible limits, unknown fields, a socket path longer than the
+platform limit where a Unix socket is used, duplicate source IDs, invalid roots, and a chunk hard
+limit above provider capabilities. On Windows, the absolute configured socket path is retained as
+endpoint identity and can exceed Unix socket limits. Resolve relative paths against the config
+directory. `~/` expands using `HOME` on Unix and `USERPROFILE` on Windows. Never expand command
+substitutions. Changes affecting extraction or embeddings invalidate the corresponding fingerprints
+explicitly.
 
 Do not log the resolved config if it includes credential material. `config show` redacts secrets and distinguishes defaults from overrides.
 
@@ -1421,7 +1458,7 @@ spool mcp
 spool mcp config --client CLIENT_NAME
 ```
 
-Relative dates are parsed in the CLI using an explicit timezone, translated into absolute timestamps, and printed in dry-run output. The MCP API accepts absolute timestamps only. `--all`, purge, rebuild, and signing-key rotation must never be implicit consequences of search. The `read` flags map one-to-one to the selections in section 14.2.2: do not invent different range rules. A cursor read accepts no other selection flags. All commands run through the daemon's IPC socket.
+Relative dates are parsed in the CLI using an explicit timezone, translated into absolute timestamps, and printed in dry-run output. The MCP API accepts absolute timestamps only. `--all`, purge, rebuild, and signing-key rotation must never be implicit consequences of search. The `read` flags map one-to-one to the selections in section 14.2.2: do not invent different range rules. A cursor read accepts no other selection flags. All commands run through the daemon's local IPC endpoint.
 
 `jobs cancel` cancels the requested background operation cooperatively and preserves committed indexing progress. It does not delete the source or discard already useful search data. Cancellation of a waiting CLI/MCP connection is different from explicit cancellation of a durable operation.
 
@@ -1429,24 +1466,24 @@ Client-specific MCP configuration generation must be covered by actual compatibi
 
 ### 16.3 Directory layout
 
-macOS:
-
 ```text
-~/Library/Application Support/Spool/            (mode 0700)
+macOS: ~/Library/Application Support/Spool/          Linux: ~/.local/state/spool/ (XDG)
+Windows: %LOCALAPPDATA%\Spool\ (fallback: %USERPROFILE%\AppData\Local\Spool)
   config.toml
-  state/                                         (mode 0700)
-    index.sqlite                                 (0600)
-    jobs.sqlite                                  (0600)
-    daemon.lock
-    spool.sock                                   (0600)
-  secrets/                                       (mode 0700)
-    handle-signing.key                           (0600)
-    provider.key                                 (0600)
-~/Library/Logs/Spool/
-~/Library/LaunchAgents/com.spool.daemon.plist
+  state/  index.sqlite  jobs.sqlite  daemon.lock
+  secrets/  handle-signing.key  provider.key
+Unix: directories 0700; sensitive files and Unix socket 0600.
+Windows: protected DACL current user + LocalSystem; no filesystem entry for the named pipe.
+macOS logs: ~/Library/Logs/Spool/     Linux logs: <state>/logs/     Windows logs: <root>/logs/
+macOS service: ~/Library/LaunchAgents/com.spool.daemon.plist
+Linux service: ~/.config/systemd/user/spool-daemon.service
+Windows service: per-user Task Scheduler task invoking spool-service.exe beside spool.exe
 ```
 
-Linux uses the corresponding XDG config/state locations. The provider credential file is a v1 baseline with restrictive permissions; integration with OS credential storage can replace it later without changing the embedding interface. Service managers must not depend on credentials inherited from an interactive shell session.
+`SPOOL_HOME` replaces the root (including logs). The provider credential file is a v1 baseline with
+restrictive permissions; integration with OS credential storage can replace it later without changing
+the embedding interface. Service managers must not depend on credentials inherited from an
+interactive shell session.
 
 ## 17. Daemon lifecycle
 
@@ -1454,9 +1491,9 @@ Linux uses the corresponding XDG config/state locations. The provider credential
 
 1. Parse and validate configuration.
 2. Acquire an OS-held exclusive lock for the state directory; do not use the mere existence of a PID file as exclusivity.
-3. Verify ownership and permissions (directories 0700, sensitive files 0600). Create the handle-signing key only if the explicit initialization workflow requests it.
+3. Verify platform-private ownership and permissions (Unix 0700/0600; Windows protected ACLs). Create the handle-signing key only if the explicit initialization workflow requests it.
 4. Open databases, apply compatible migrations, and run minimal capability checks.
-5. Bind the owner-only IPC socket and expose readiness for existing search data.
+5. Bind the owner-only local IPC endpoint and expose readiness for existing search data.
 6. Start Apalis workers and their supervisor.
 7. Recover interrupted jobs through the backend, reconcile application state, and schedule source discovery.
 
@@ -1466,7 +1503,7 @@ The lock is released by process exit, including crashes. A second daemon using t
 
 ### 17.2 Shutdown
 
-On SIGTERM/SIGINT, stop accepting new control operations and new ingestion tasks, cancel discovery, and allow short in-flight requests to finish. Cancel or finish the current provider batch according to its deadline, persist completed batches, and stop the worker without falsely acknowledging unfinished work.
+On SIGTERM/SIGINT (or the Windows global shutdown event), stop accepting new control operations and new ingestion tasks, cancel discovery, and allow short in-flight requests to finish. Cancel or finish the current provider batch according to its deadline, persist completed batches, and stop the worker without falsely acknowledging unfinished work.
 
 Use an initial fifteen-second graceful shutdown target. Blocking loops must cooperate. A hard termination must leave published SQLite transactions valid and recoverable job/application state. Do not attempt a blocking full VACUUM during shutdown.
 
@@ -1482,7 +1519,25 @@ A LaunchAgent runs in the user's login context. It is not a promise to index whi
 
 Provide a systemd user unit running the foreground daemon with restart-on-failure and a bounded stop timeout. Do not require root or enable user lingering implicitly. Document the difference between a user-login service and operation after logout when lingering has been explicitly configured.
 
-### 17.5 Storage failure and maintenance
+### 17.5 Windows service
+
+Install a marked per-user Task Scheduler logon task, running with `InteractiveToken` and
+`LeastPrivilege`, through the native windowless `spool-service.exe` beside `spool.exe`. Capture
+absolute executable and `SPOOL_HOME` paths at install. The helper starts the daemon without a console
+window, waits for it, and preserves its exit status; do not use a PowerShell startup script.
+Captured service-manager commands MUST also suppress console-window creation.
+Use Task Scheduler's bounded native restart-on-failure policy (three retries, one-minute interval),
+not a permanent custom retry loop. `start` runs the task; `stop` signals the protected global
+shutdown event and waits for lock release before a timeout fallback; `restart` performs that stop
+then runs the task. Refuse to alter a foreign task. It is a login-session task, not a promise of
+operation while logged out. Uninstall removes only the task, preserving state and installed executables.
+
+The logon trigger MUST name the current user's SID, rather than trigger on every user's login.
+Registration passes closed, flushed UTF-16LE XML with a BOM and matching declaration to `schtasks`.
+The one-minute restart interval is the [platform minimum](https://learn.microsoft.com/en-us/windows/win32/taskschd/taskschedulerschema-interval-restarttype-element).
+Windows tests use native `TASK_VALIDATE_ONLY` to validate XML without registering persistent test tasks.
+
+### 17.6 Storage failure and maintenance
 
 At the configured warning threshold, surface a warning. At the hard storage threshold, pause new ingestion and preserve existing search; do not silently delete old conversations to free space. Include WAL size in the budget.
 
@@ -1699,7 +1754,7 @@ Implement the source catalog, OhMyPi adapter, block filtering, graph reconstruct
 
 ### Milestone 2: local lexical search
 
-Implement schema/migrations, staging/publication, FTS, literal search, source filters, grouped results, and the three MCP tools with bounded schemas. Implement explicit manual daemon-owned ingestion through the existing Apalis submission path (`spool index --session` and `spool index --since`), so that real OhMyPi lexical search works before automatic discovery arrives in Milestone 4. Implement the security and permission controls before any transcript-bearing MCP tool is exposed: the owner-only IPC socket, directory and file modes, the persistent signing key, signed handles with persistent manifests and bounded leases, and raw-view local enablement. Deliver the reader JSON Schemas, example exchanges, and structural schema tests (sections 14.2 and 22). Use a foreground daemon at this stage.
+Implement schema/migrations, staging/publication, FTS, literal search, source filters, grouped results, and the three MCP tools with bounded schemas. Implement explicit manual daemon-owned ingestion through the existing Apalis submission path (`spool index --session` and `spool index --since`), so that real OhMyPi lexical search works before automatic discovery arrives in Milestone 4. Implement the security and permission controls before any transcript-bearing MCP tool is exposed: the owner-only local IPC endpoint, platform-private state, the persistent signing key, signed handles with persistent manifests and bounded leases, and raw-view local enablement. Deliver the reader JSON Schemas, example exchanges, and structural schema tests (sections 14.2 and 22). Use a foreground daemon at this stage.
 
 **Exit gate:** Useful end-to-end search and read workflow without any provider key, from manually ingested real OhMyPi sessions. Concurrent search does not observe staging data. Permission checks and handle-integrity tests pass.
 
@@ -1787,7 +1842,7 @@ The implementation is not ready for release unless all of the following are true
 10. The seven-day policy limits initial selection, not ongoing index retention, and restart does not lose activity during downtime.
 11. One daemon owns each state directory, and closing MCP clients never shuts down ingestion.
 12. Corpus scope, vector coverage, source freshness, exclusions, provider health, and failures are observable.
-13. Local access is explicit, bounded, and tested. No network or HTTP listener exists. The IPC socket is owner-only through filesystem permissions (directories 0700, socket and sensitive files 0600). The documentation states that these permissions give no isolation from a hostile process of the same user.
+13. Local access is explicit, bounded, and tested. No network or HTTP listener exists. The local IPC endpoint is owner-only through Unix filesystem permissions (directories 0700, socket and sensitive files 0600) or equivalent Windows protected ACLs. The documentation states that these controls give no isolation from a hostile process of the same user.
 14. There are no generated summaries, semantic episodes, knowledge extraction, memory consolidation, or hidden LLM calls.
 15. The MCP surface is exactly `search_sessions`, `read_session`, and `index_status`. Administration is CLI-only.
 16. Handles carry a signature from a persistent signing key, and unexpired handles survive a daemon restart. Lease-pinned retired snapshots and manifests are bounded by configurable count and byte limits and are released at expiry.

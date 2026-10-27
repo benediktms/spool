@@ -1,7 +1,8 @@
 # MCP tools
 
 Spool exposes exactly three read-oriented tools through `spool mcp` (a stdio bridge that forwards
-each call over the daemon's Unix socket): `search_sessions`, `read_session`, `index_status`.
+each call over the daemon's owner-only local IPC endpoint): `search_sessions`, `read_session`,
+`index_status`. The endpoint is a Unix socket on macOS/Linux and a local named pipe on Windows.
 There is no administrative tool. Indexing, backfill, job control, exclusion, purge, rebuild,
 source enable/disable, key rotation and service control are CLI-only (`spool --help`), so an MCP
 caller can never start an indexing operation or make Spool send stored transcript text to a
@@ -24,11 +25,14 @@ process. Only shapes verified against real clients are emitted (see
 |---|---|---|
 | Claude Code | `.mcp.json` / `--mcp-config` JSON: `{"mcpServers":{"spool":{"type":"stdio","command":"/abs/spool","args":["mcp"]}}}` | project `.mcp.json`, or `claude --mcp-config FILE` |
 | Codex | TOML `[mcp_servers.spool]` with `command` and `args = ["mcp"]` | `~/.codex/config.toml` |
-| OMP | same JSON shape as Claude, project-local `.mcp.json` | project directory |
+| OMP | same JSON shape as Claude | `~/.omp/agent/mcp.json` (user) or `.omp/mcp.json` (project); root `.mcp.json` is a portable fallback |
 
 The command path is absolute. The output contains no provider key, no database path and no
 environment. If you run Spool with a non-default `SPOOL_HOME`, the client must be started with the
-same `SPOOL_HOME` so `spool mcp` finds the socket.
+same `SPOOL_HOME` so `spool mcp` finds the local endpoint.
+
+In OMP, run `/mcp reload` after changing the file, then `/mcp test spool` to check discovery and
+the three advertised tools. The user-level configuration applies to new sessions in every project.
 
 If the daemon is not running the tool returns a structured error `DAEMON_NOT_READY`
 (`retryable = true`, `recovery = "start_daemon"`) with the start command; stdout carries only

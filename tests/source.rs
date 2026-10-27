@@ -1,13 +1,10 @@
 use spool::source::SourceRoots;
-use std::{
-    fs,
-    os::unix::{
-        fs::{PermissionsExt, symlink},
-        net::UnixListener,
-    },
-    path::PathBuf,
-    sync::atomic::AtomicBool,
+#[cfg(unix)]
+use std::os::unix::{
+    fs::{PermissionsExt, symlink},
+    net::UnixListener,
 };
+use std::{fs, path::PathBuf, sync::atomic::AtomicBool};
 
 fn roots(path: &std::path::Path) -> SourceRoots {
     SourceRoots::new(&[path.to_owned()]).unwrap()
@@ -33,6 +30,7 @@ fn collect_pages(roots: &SourceRoots, limit: usize) -> Vec<PathBuf> {
     paths
 }
 
+#[cfg(unix)]
 #[test]
 fn pagination_covers_large_flat_and_nested_directories_once() {
     let dir = tempfile::tempdir().unwrap();
@@ -67,6 +65,7 @@ fn pagination_covers_large_flat_and_nested_directories_once() {
     assert_eq!(paths.len(), 15);
 }
 
+#[cfg(unix)]
 #[test]
 fn cursor_survives_removals_and_additions_without_repeating_paths() {
     let dir = tempfile::tempdir().unwrap();
@@ -90,6 +89,7 @@ fn cursor_survives_removals_and_additions_without_repeating_paths() {
     assert_eq!(names, ["c.jsonl", "cc.jsonl", "e.jsonl"]);
 }
 
+#[cfg(unix)]
 #[test]
 fn inaccessible_file_makes_scan_incomplete() {
     if rustix::process::geteuid().as_raw() == 0 {
@@ -108,6 +108,7 @@ fn inaccessible_file_makes_scan_incomplete() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn symlink_and_replaced_parent_never_escape_root() {
     let temp = tempfile::tempdir().unwrap();
@@ -159,6 +160,7 @@ fn symlink_and_replaced_parent_never_escape_root() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn non_regular_socket_entry_is_not_scanned_or_opened_as_a_source() {
     let dir = tempfile::tempdir().unwrap();
@@ -171,6 +173,7 @@ fn non_regular_socket_entry_is_not_scanned_or_opened_as_a_source() {
     assert!(roots.open(&canonical_root.join("socket")).is_err());
 }
 
+#[cfg(unix)]
 #[test]
 fn scan_yields_only_jsonl_transcripts_and_ignores_unreadable_artifacts() {
     let dir = tempfile::tempdir().unwrap();
@@ -207,11 +210,13 @@ fn scan_yields_only_jsonl_transcripts_and_ignores_unreadable_artifacts() {
     assert!(page.errors.is_empty());
 }
 
+#[cfg(unix)]
 #[test]
 fn character_device_cannot_be_configured_as_a_source_root() {
     assert!(SourceRoots::new(&[PathBuf::from("/dev/null")]).is_err());
 }
 
+#[cfg(unix)]
 fn collect_pages_from(
     roots: &SourceRoots,
     limit: usize,
@@ -233,6 +238,7 @@ fn collect_pages_from(
     paths
 }
 
+#[cfg(unix)]
 fn collect_files(dir: &std::path::Path, files: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(dir).unwrap() {
         let path = entry.unwrap().path();
@@ -242,4 +248,84 @@ fn collect_files(dir: &std::path::Path, files: &mut Vec<PathBuf>) {
             files.push(path);
         }
     }
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_scan_open_rejects_escapes_and_keeps_file_identity() {
+    use std::io::Read;
+    use std::process::Command;
+
+    let temp = tempfile::tempdir().unwrap();
+    let root_path = temp.path().join("root");
+    let outside = temp.path().join("outside");
+    fs::create_dir_all(root_path.join("nested")).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(root_path.join("a.jsonl"), b"one").unwrap();
+    fs::write(root_path.join("nested/b.jsonl"), b"two").unwrap();
+    fs::write(outside.join("secret.jsonl"), b"outside").unwrap();
+
+    let roots = roots(&root_path);
+    let canonical_root = fs::canonicalize(&root_path).unwrap();
+    let first = roots.scan_from(&AtomicBool::new(false), 1, None);
+    assert!(first.errors.is_empty(), "{:#?}", first.errors);
+    assert!(first.truncated);
+    assert_eq!(first.files.len(), 1);
+    assert_eq!(
+        first.next_after.as_ref(),
+        first.files.first().map(|file| &file.path)
+    );
+
+    let cancelled = AtomicBool::new(true);
+    let cancelled = roots.scan(&cancelled, 10);
+    assert!(!cancelled.complete);
+    assert!(cancelled.files.is_empty());
+
+    let paths = collect_pages(&roots, 1);
+    assert_eq!(paths.len(), 2);
+    let a = canonical_root.join("a.jsonl");
+    let info = roots
+        .scan(&AtomicBool::new(false), 10)
+        .files
+        .into_iter()
+        .find(|file| file.path == a)
+        .unwrap();
+    let mut body = String::new();
+    let mut opened = roots.open(&a).unwrap();
+    opened.file.read_to_string(&mut body).unwrap();
+    assert_eq!(body, "one");
+    fs::rename(&a, canonical_root.join("renamed.jsonl")).unwrap();
+    let renamed = roots
+        .scan(&AtomicBool::new(false), 10)
+        .files
+        .into_iter()
+        .find(|file| file.path.ends_with("renamed.jsonl"))
+        .unwrap();
+    assert_eq!((renamed.dev, renamed.ino), (info.dev, info.ino));
+
+    let junction = root_path.join("outside");
+    assert!(
+        Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&outside)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let page = roots.scan(&AtomicBool::new(false), 10);
+    assert!(
+        !page
+            .files
+            .iter()
+            .any(|file| file.path.ends_with("outside/secret.jsonl"))
+    );
+    assert!(
+        roots
+            .open(&canonical_root.join("outside/secret.jsonl"))
+            .is_err()
+    );
+
+    let windir = PathBuf::from(std::env::var_os("WINDIR").unwrap());
+    assert!(SourceRoots::new(&[windir]).is_err());
 }

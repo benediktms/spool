@@ -1,5 +1,5 @@
 //! Foreground per-user daemon (spec 4, 17): state-dir lock, permission checks, databases, services,
-//! owner-only IPC socket, supervised Apalis workers.
+//! owner-only local IPC, supervised Apalis workers.
 
 use crate::clock::{self, SharedClock};
 use crate::config::{Config, Paths};
@@ -18,14 +18,22 @@ use crate::transcript::handle::KeyStore;
 use crate::transcript::lease::LeaseManager;
 use anyhow::{Context, Result, bail};
 use sqlx::SqlitePool;
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-use std::path::Path;
+use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
-use tokio::net::UnixListener;
+/// Create or verify a private state directory.
+pub fn ensure_private_dir(path: &std::path::Path) -> Result<()> {
+    perms::ensure_private_dir(path).map_err(Into::into)
+}
 
 /// Identifier returned by `index_status` so a client can tell which dependency baseline runs.
 pub const BASELINE_ID: &str = "apalis-sqlite-1.0.0+sqlx-0.9.0+rmcp-3.5.1";
+
+#[cfg(windows)]
+fn has_console_window() -> bool {
+    // SAFETY: GetConsoleWindow takes no arguments and only observes this process's console.
+    unsafe { !windows_sys::Win32::System::Console::GetConsoleWindow().is_null() }
+}
 
 pub struct Daemon {
     pub paths: Paths,
@@ -42,60 +50,36 @@ pub struct Daemon {
     _lock: std::fs::File,
 }
 
-/// Create (mode 0700) or verify a private directory. An existing path must be a real directory
-/// (never a symlink) owned by the current user BEFORE we change its mode.
-pub fn ensure_private_dir(p: &Path) -> Result<()> {
-    use std::os::unix::fs::MetadataExt;
-    match std::fs::symlink_metadata(p) {
-        Ok(md) => {
-            if !md.file_type().is_dir() {
-                bail!(
-                    "{} exists but is not a real directory (symlinks are refused)",
-                    p.display()
-                );
-            }
-            let uid = rustix::process::geteuid().as_raw();
-            if md.uid() != uid {
-                bail!(
-                    "{} is owned by uid {}, not the current user ({uid})",
-                    p.display(),
-                    md.uid()
-                );
-            }
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            std::fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(p)?;
-        }
-        Err(e) => return Err(e.into()),
-    }
-    std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o700))?;
-    Ok(())
-}
-
 /// OS-held exclusive lock; released on process exit including crashes (spec 17.1).
 fn lock_state_dir(p: &Paths) -> Result<std::fs::File> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let f = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .mode(0o600)
-        .open(&p.lock)
-        .context("opening daemon.lock")?;
-    match rustix::fs::flock(&f, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+    let f = perms::open_private_file(&p.lock).context("opening daemon.lock")?;
+    match f.try_lock() {
         Ok(()) => Ok(f),
-        Err(e) if e == rustix::io::Errno::WOULDBLOCK => {
+        Err(std::fs::TryLockError::WouldBlock) => {
             bail!(
                 "another spool daemon holds {} (socket {})",
                 p.lock.display(),
                 p.socket.display()
             )
         }
-        Err(e) => Err(e).context("locking daemon.lock"),
+        Err(std::fs::TryLockError::Error(e)) => Err(e).context("locking daemon.lock"),
     }
+}
+
+fn tighten_database_files(paths: &Paths) -> Result<()> {
+    for database in [&paths.index_db, &paths.jobs_db] {
+        for suffix in ["", "-wal", "-shm"] {
+            let mut file = database.as_os_str().to_owned();
+            file.push(suffix);
+            let file = PathBuf::from(file);
+            match perms::set_private(&file, 0o600) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+    Ok(())
 }
 
 impl Daemon {
@@ -113,9 +97,9 @@ impl Daemon {
         paths.socket = cfg.socket_path(&paths.root)?;
         paths.validate()?;
         let paths = paths.clone();
-        ensure_private_dir(&paths.root)?;
-        ensure_private_dir(&paths.state_dir)?;
-        ensure_private_dir(&paths.secrets_dir)?;
+        perms::ensure_private_dir(&paths.root)?;
+        perms::ensure_private_dir(&paths.state_dir)?;
+        perms::ensure_private_dir(&paths.secrets_dir)?;
         let lock = lock_state_dir(&paths)?;
         // Spec 17.1 step 3: verify ownership/permissions. Files we created are tightened; foreign
         // ownership or a loose secret is a startup error.
@@ -145,12 +129,10 @@ impl Daemon {
         let jobs_pool = storage::connect(&paths.jobs_db, 4, busy)
             .await
             .context("opening jobs.sqlite")?;
-        for f in [&paths.index_db, &paths.jobs_db] {
-            std::fs::set_permissions(f, std::fs::Permissions::from_mode(0o600))?;
-        }
         let sqlite_version = storage::check_fts5(&index.writer)
             .await
             .context("FTS5 capability check failed")?;
+        tighten_database_files(&paths)?;
         let cfg = Arc::new(cfg);
         let sources = Arc::new(SourceRegistry::new(&cfg)?);
         let embeddings = Arc::new(EmbeddingService::from_config(
@@ -187,10 +169,12 @@ impl Daemon {
         })
     }
 
-    /// Bind the socket with mode 0600. Only a *stale Unix socket owned by us* is replaced: a live
-    /// listener, a regular file, a directory or a symlink at the path is an error and is left alone.
-    pub fn bind(&self) -> Result<UnixListener> {
-        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    /// Bind the private local IPC endpoint. Unix replaces only an owner-owned stale socket;
+    /// Windows names a protected pipe from the configured socket path and never touches it.
+    #[cfg(unix)]
+    pub fn bind(&self) -> Result<ipc::transport::Listener> {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+
         let sock = &self.paths.socket;
         let reserved = [
             &self.paths.config_file,
@@ -211,7 +195,7 @@ impl Daemon {
         let parent = sock
             .parent()
             .context("socket path has no parent directory")?;
-        ensure_private_dir(parent)?;
+        perms::ensure_private_dir(parent)?;
         match std::fs::symlink_metadata(sock) {
             Ok(md) => {
                 if !md.file_type().is_socket() || md.uid() != rustix::process::geteuid().as_raw() {
@@ -232,9 +216,14 @@ impl Daemon {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(e.into()),
         }
-        let l = UnixListener::bind(sock).context("binding socket")?;
+        let listener = ipc::transport::bind(sock).context("binding socket")?;
         std::fs::set_permissions(sock, std::fs::Permissions::from_mode(0o600))?;
-        Ok(l)
+        Ok(listener)
+    }
+
+    #[cfg(windows)]
+    pub fn bind(&self) -> Result<ipc::transport::Listener> {
+        ipc::transport::bind(&self.paths.socket).context("binding local named pipe")
     }
 
     pub async fn run(self) -> Result<()> {
@@ -242,6 +231,9 @@ impl Daemon {
         // bound BEFORE the job system starts. `JobSystem::start` only does bounded local work (DB
         // setup, durable enqueue of one catch-up discovery and the recurring ticks), never
         // provider calls or backfill, and `control` calls answer DAEMON_NOT_READY until it is up.
+        #[cfg(windows)]
+        let shutdown = ipc::transport::shutdown_signal(&self.paths)?;
+
         let search = Arc::new(SearchService::new(
             self.index.clone(),
             self.cfg.clone(),
@@ -315,6 +307,7 @@ impl Daemon {
             Liveness::default(),
         )
         .await?;
+        tighten_database_files(&self.paths)?;
         let _ = control.set(Arc::new(ControlService::new(ControlDeps {
             index: self.index.clone(),
             jobs: jobs.clone(),
@@ -327,15 +320,31 @@ impl Daemon {
             clock: self.clock.clone(),
         })));
         tracing::info!("job system started");
-        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = term.recv() => {}
+        #[cfg(unix)]
+        {
+            let mut term =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = term.recv() => {}
+            }
+        }
+        #[cfg(windows)]
+        {
+            if has_console_window() {
+                tokio::select! {
+                    result = tokio::signal::ctrl_c() => result?,
+                    result = shutdown => result?,
+                }
+            } else {
+                shutdown.await?;
+            }
         }
         // Graceful shutdown (spec 17.2): stop accepting, stop workers within the target.
         let _ = tx.send(true);
         let _ = tokio::time::timeout(Duration::from_secs(15), srv).await;
         jobs.shutdown(Duration::from_secs(15)).await;
+        #[cfg(unix)]
         let _ = std::fs::remove_file(&self.paths.socket);
         Ok(())
     }

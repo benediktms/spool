@@ -2,8 +2,24 @@
 
 use std::path::{Path, PathBuf};
 
-/// Max bytes of a `sockaddr_un` path on the platforms we target (macOS is the smallest: 104 incl. NUL).
+/// Max bytes of a `sockaddr_un` path on Unix targets (macOS is the smallest: 104 incl. NUL).
+#[cfg(unix)]
 pub const SOCKET_PATH_LIMIT: usize = 100;
+
+fn home_dir() -> anyhow::Result<PathBuf> {
+    #[cfg(windows)]
+    {
+        std::env::var_os("USERPROFILE")
+            .map(PathBuf::from)
+            .ok_or_else(|| anyhow::anyhow!("USERPROFILE is not set"))
+    }
+    #[cfg(unix)]
+    {
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .ok_or_else(|| anyhow::anyhow!("HOME is not set"))
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Paths {
@@ -21,15 +37,23 @@ pub struct Paths {
 impl Paths {
     /// `SPOOL_HOME` overrides the platform default (tests, isolated runs).
     pub fn discover() -> anyhow::Result<Self> {
-        if let Some(h) = std::env::var_os("SPOOL_HOME") {
-            return Self::from_root(PathBuf::from(h));
+        if let Some(home) = std::env::var_os("SPOOL_HOME") {
+            return Self::from_root(PathBuf::from(home));
         }
-        let home = std::env::var_os("HOME")
+        #[cfg(windows)]
+        let root = std::env::var_os("LOCALAPPDATA")
             .map(PathBuf::from)
-            .ok_or_else(|| anyhow::anyhow!("HOME is not set"))?;
-        let root = if cfg!(target_os = "macos") {
-            home.join("Library/Application Support/Spool")
-        } else {
+            .or_else(|| {
+                std::env::var_os("USERPROFILE")
+                    .map(|path| PathBuf::from(path).join("AppData/Local"))
+            })
+            .ok_or_else(|| anyhow::anyhow!("LOCALAPPDATA or USERPROFILE is not set"))?
+            .join("Spool");
+        #[cfg(target_os = "macos")]
+        let root = home_dir()?.join("Library/Application Support/Spool");
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let root = {
+            let home = home_dir()?;
             std::env::var_os("XDG_STATE_HOME")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| home.join(".local/state"))
@@ -55,18 +79,21 @@ impl Paths {
         p.validate()?;
         Ok(p)
     }
-
     pub fn validate(&self) -> anyhow::Result<()> {
-        let n = self.socket.as_os_str().len();
-        anyhow::ensure!(
-            n <= SOCKET_PATH_LIMIT,
-            "socket path {} is {n} bytes; the platform limit is {SOCKET_PATH_LIMIT}. Set SPOOL_HOME to a shorter directory",
-            self.socket.display()
-        );
+        #[cfg(unix)]
+        {
+            let n = self.socket.as_os_str().len();
+            anyhow::ensure!(
+                n <= SOCKET_PATH_LIMIT,
+                "socket path {} is {n} bytes; the platform limit is {SOCKET_PATH_LIMIT}. Set SPOOL_HOME to a shorter directory",
+                self.socket.display()
+            );
+        }
         Ok(())
     }
 }
 
+#[cfg(unix)]
 pub fn mode_of(p: &Path) -> std::io::Result<u32> {
     use std::os::unix::fs::PermissionsExt;
     Ok(std::fs::metadata(p)?.permissions().mode() & 0o777)
@@ -437,9 +464,7 @@ pub fn expand_path(raw: &str, base: &Path) -> anyhow::Result<PathBuf> {
         .strip_prefix("~/")
         .or(if raw == "~" { Some("") } else { None })
     {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .ok_or_else(|| anyhow::anyhow!("HOME is not set"))?;
+        let home = home_dir()?;
         return Ok(home.join(rest));
     }
     let p = Path::new(raw);

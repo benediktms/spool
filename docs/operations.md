@@ -3,11 +3,23 @@
 ## First run
 
 ```text
-cargo build --release                       # target/release/spool; use an absolute path for services
-spool init                                  # config, 0700 dirs, handle-signing key (0600); reads no transcripts
-spool service install && spool service start
+cargo build --release                       # Unix: target/release/spool; Windows: target\release\spool.exe
+spool init                                  # private state; reads no transcripts
+spool service install
+spool service start
 spool doctor
 ```
+
+On Windows PowerShell, after `cargo install --path . --locked`, invoke
+`& "$env:USERPROFILE\.cargo\bin\spool.exe" init` (and the same path for later commands).
+The default home is `%LOCALAPPDATA%\Spool`; set `SPOOL_HOME` before every command to use a different
+root (the Windows service captures that absolute root at installation). If `LOCALAPPDATA` is absent,
+Windows uses `%USERPROFILE%\AppData\Local\Spool`.
+
+Before upgrading Windows binaries, stop the service and disconnect running Spool MCP clients:
+Windows can refuse to replace a loaded `spool.exe`. After installing both binaries, run
+`spool service install` again to refresh the task action, then `spool service start` and reconnect
+MCP clients. Keep `spool-service.exe` beside `spool.exe`.
 
 `spool init` reports the recognized source roots and what is enabled. Choose explicitly:
 
@@ -17,13 +29,14 @@ spool doctor
   says so. An existing `config.toml` is left alone; flags against an existing config are refused
   unless `--force` is given.
 
-Hosted embeddings additionally need the provider key in `secrets/provider.key` (mode 0600, only the
-key). Without it Spool is lexical-only; `doctor` and `status` report the two causes (not approved
-vs. no credential) distinctly.
+Hosted embeddings additionally need the provider key in `secrets/provider.key` (Unix mode 0600;
+Windows protected current-user + SYSTEM ACL, only the key). Without it Spool is lexical-only;
+`doctor` and `status` report the two causes (not approved vs. no credential) distinctly.
 
 ## Running the daemon
 
-* Foreground: `spool daemon run` (Ctrl-C / SIGTERM stops it; graceful target 15 s).
+* Foreground: `spool daemon run` (Ctrl-C / SIGTERM stops it; graceful target 15 s). On Windows,
+  Ctrl-C from its console is the foreground equivalent.
 * macOS service: `spool service install` writes `~/Library/LaunchAgents/com.spool.daemon.plist`
   (`ProgramArguments = [ABS_BIN, daemon, run]`, `RunAtLoad`, `KeepAlive` on non-zero exit,
   `ThrottleInterval` 30 s, stdout/stderr in `~/Library/Logs/Spool/daemon.*.log`, fixed minimal
@@ -36,10 +49,21 @@ vs. no credential) distinctly.
   (`Restart=on-failure`, `TimeoutStopSec=20`) and runs `systemctl --user daemon-reload` and
   `enable`; `spool service start` starts it. Lingering is **not** enabled: the service runs while you
   are logged in. To keep it running after logout, run `loginctl enable-linger $USER` yourself.
-* Install never needs root, never overwrites a definition spool did not write (it errors), and
-  `uninstall` keeps your configuration, index, keys and credential.
-* `packaging/` contains illustrative copies of the rendered definitions. Do not install those by
-  hand.
+* Windows: `spool service install` registers a marked per-user Task Scheduler logon task with
+  `InteractiveToken` and `LeastPrivilege`. Its action is the native `spool-service.exe` beside
+  `spool.exe`; `cargo install --path . --locked` installs both. The helper starts the absolute
+  executable with captured absolute `SPOOL_HOME`, suppresses console-window creation, waits for
+  the daemon, and preserves its exit status. No PowerShell startup script is used. Captured service
+  queries also suppress console windows. Task Scheduler retries native failure at most three
+  times at one-minute intervals (the Task Scheduler minimum); this is bounded platform supervision, not a permanent custom retry
+  loop. `start` runs the task; `stop` signals the daemon's protected global shutdown event and waits
+  for the daemon lock to be released. It ends the task only when startup has not yet created that
+  event or graceful shutdown exceeds its deadline. `restart` stops then runs it, and
+  `uninstall` removes the managed task, not either installed executable. It is a login-session task, not a service while
+  logged out. A foreign task is refused.
+* Install never needs root or elevation, never overwrites a definition Spool did not write, and
+  `uninstall` keeps your configuration, index, keys and credential. `packaging/` contains
+  illustrative Unix definitions only; do not install them by hand.
 
 ## Backfill and maintenance
 
@@ -67,21 +91,21 @@ spool handles rotate-key              # revokes every issued handle and cursor
 ## Status, doctor, logs
 
 * `spool status [--json]` asks the daemon for state, queues, workers, coverage and budgets.
-* `spool doctor [--json] [--probe-provider]` checks: configuration validity; directory/socket/file
-  permissions (0700/0600) including the signing key, credential file, databases and WAL files;
-  signing key loadability; databases; SQLite + FTS5 capability (an offline in-memory probe; live
-  databases are never opened by `doctor`); each source's roots and adapter registration; embedding
-  profile and consent state; daemon/queue/worker health through the daemon's status; service
-  registration; log directory. Exit code 1 if any check fails; warnings (e.g. daemon not running,
-  service not installed) do not fail. `--probe-provider` is the only check that contacts a provider
-  and only when hosted processing is approved and a credential exists.
+* `spool doctor [--json] [--probe-provider]` checks: configuration validity; private directory/file
+  permissions (Unix 0700/0600; Windows protected owner ACLs) including the signing key, credential
+  file, databases and WAL files; signing key loadability; databases; SQLite + FTS5 capability (an
+  offline in-memory probe; live databases are never opened by `doctor`); each source's roots and
+  adapter registration; embedding profile and consent state; daemon/queue/worker health through the
+  daemon's status; service registration; log directory. Exit code 1 if any check fails; warnings
+  (e.g. daemon not running, service not installed) do not fail. `--probe-provider` is the only check
+  that contacts a provider and only when hosted processing is approved and a credential exists.
 * `spool logs [--lines N] [--follow]` tails `spool.log` (`~/Library/Logs/Spool` on macOS,
-  `<state>/logs` on Linux). Files rotate at `logging.max_file_bytes`, keeping
+  `<state>/logs` on Linux, `<root>/logs` on Windows). Files rotate at `logging.max_file_bytes`, keeping
   `logging.retained_files` older files. Logs never contain conversation or query text.
 
 Exit codes: 0 success; 1 failure or invalid arguments (rejected before any daemon call); 2 command
-line usage error (clap); 3 daemon unreachable (the message names the socket and the start commands
-`spool service start` / `spool daemon run`).
+line usage error (clap); 3 daemon unreachable (the message names the local endpoint and the start
+commands `spool service start` / `spool daemon run`).
 
 ## Backup and restore
 
@@ -89,21 +113,30 @@ Back up with SQLite's backup facility, **not** by copying the `.sqlite` file: th
 WAL mode, so a plain copy of the main file can miss committed data held in `-wal`, and a copy taken
 mid-write can be inconsistent.
 
+Unix shell example:
+
 ```text
 sqlite3 "$SPOOL_HOME/state/index.sqlite" ".backup '/path/to/index-backup.sqlite'"
 chmod 600 /path/to/index-backup.sqlite
 ```
 
+On Windows, use PowerShell's `$env:SPOOL_HOME` in place of `$SPOOL_HOME` and a Windows backup path.
+`chmod` does not apply: create the backup in a directory whose ACL permits only your user and SYSTEM,
+and preserve that private ACL when restoring. Do not leave a transcript backup in a broadly readable
+directory.
+
 `.backup` uses the online backup API and is safe while the daemon runs (the default home is
-`~/Library/Application Support/Spool` on macOS). Alternatively stop the service first
-(`spool service stop`) and take the backup offline. `jobs.sqlite` holds only Apalis execution state
-and can be skipped (a restored index re-discovers sources). The backup contains conversation text
-and vectors; protect it like the live index. Secrets (`secrets/`) are not part of this procedure;
-back them up separately if you want to preserve issued handles and the credential, otherwise run
-`spool init` again after restoring (new signing key = old handles invalid).
+`~/Library/Application Support/Spool` on macOS, `~/.local/state/spool` on Linux, and
+`%LOCALAPPDATA%\Spool` on Windows). Alternatively stop the service first (`spool service stop`) and
+take the backup offline. `jobs.sqlite` holds only Apalis execution state and can be skipped (a
+restored index re-discovers sources). The backup contains conversation text and vectors; protect it
+like the live index. Secrets (`secrets/`) are not part of this procedure; back them up separately if
+you want to preserve issued handles and the credential, otherwise run `spool init` again after
+restoring (new signing key = old handles invalid).
 
 Restore: `spool service stop`, replace `state/index.sqlite` with the backup (remove stale
-`index.sqlite-wal`/`-shm`), keep mode 0600, `spool service start`, `spool doctor`.
+`index.sqlite-wal`/`-shm`), keep its platform-private permissions, `spool service start`,
+`spool doctor`.
 
 ## Upgrades and failures
 
@@ -119,8 +152,9 @@ Restore: `spool service stop`, replace `state/index.sqlite` with the backup (rem
 * To reclaim database free pages manually, take Spool fully offline:
   1. Run `spool service stop`.
   2. Close every client that may have the database open, including `sqlite3`, DBeaver and backup
-     clients. Run `lsof "$SPOOL_HOME/state/index.sqlite"*`; it must show no process using the
-     database or its WAL/SHM files before continuing.
+     clients. On Unix, `lsof "$SPOOL_HOME/state/index.sqlite"*` must show no process using the
+     database or its WAL/SHM files before continuing; on Windows, confirm the same with your process
+     inspection tool.
   3. Run `sqlite3 "$SPOOL_HOME/state/index.sqlite" "VACUUM"`.
   4. Run `spool service start`.
 

@@ -277,9 +277,16 @@ The server must separately enforce local I/O/scan/time budgets. Exceeding one re
 
 ## 9. Handle lifetime and local safety
 
-Handles are versioned, signed opaque tokens. The signature protects integrity: it detects forged or altered handles. It does not authenticate a client and it does not authorize access. Spool has no client credentials. The access boundary is the owner-only filesystem permissions on the state directory (0700) and on the daemon socket and other sensitive files (0600). Those permissions give no isolation from a hostile process that runs as the same operating-system user. Validate current local enablement, enabled source roots, and exclusions on every call. Raw view needs local enablement (`mcp.allow_raw_records`).
+Handles are versioned, signed opaque tokens. The signature protects integrity: it detects forged or
+altered handles. It does not authenticate a client and it does not authorize access. Spool has no
+client credentials. The access boundary is platform-private state: Unix state directories 0700 and
+sensitive files/socket 0600; Windows protected current-user + SYSTEM ACLs and local named-pipe
+ownership checks. These controls give no isolation from a hostile process that runs as the same
+operating-system user. Validate current local enablement, enabled source roots, and exclusions on
+every call. Raw view needs local enablement (`mcp.allow_raw_records`).
 
-The daemon signs handles with a persistent signing key. It stores the key in a file with mode 0600. Explicit key rotation revokes the handles that the old key signed.
+The daemon signs handles with a persistent signing key. It stores the key in a platform-private file
+(Unix mode 0600). Explicit key rotation revokes the handles that the old key signed.
 
 Retain the manifest and indexed material that issued live handles need, for a bounded lease. Expose the actual expiry. A suggested initial TTL is thirty minutes. The TTL is configurable. A search match handle uses the same lease mechanism as a read handle, and the search output exposes its expiry. Bound the number of active leases and the bytes of retained state. Both bounds are configurable. Reject new reads under resource pressure with `RESOURCE_LIMIT`. Do not promise unbounded retention.
 
@@ -289,7 +296,10 @@ Persist manifests and the signing key. A normal daemon restart MUST NOT invalida
 
 Exclusion or deletion takes precedence over a lease. Cached content must not bypass an exclusion or removal.
 
-Source reads and external blobs must obey configured root containment and safe open and identity validation. No selector accepts arbitrary local paths, URLs, SQL, or shell commands.
+Source reads and external blobs must obey configured root containment and safe handle-relative,
+no-follow opening with identity validation. Windows validates ownership and volume/file identity;
+all platforms reject root escapes and reparse points/symlinks. No selector accepts arbitrary local
+paths, URLs, SQL, or shell commands.
 
 ## 10. Errors
 

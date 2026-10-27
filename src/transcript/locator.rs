@@ -10,7 +10,6 @@ use crate::ipc::AppError;
 use crate::source::SourceError;
 use crate::sources::SourceRegistry;
 use std::fs::File;
-use std::os::unix::fs::FileExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -21,6 +20,27 @@ const MAX_RELOCATE_ENTRIES: usize = 20_000;
 const RELOCATE_PAGE: usize = 1_000;
 /// Largest unparsed tail the freshness check will scan for a newline.
 const TAIL_SCAN_CAP: u64 = 1 << 20;
+
+fn read_exact_at(file: &File, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileExt;
+        return file.read_exact_at(buf, offset);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::FileExt;
+        let mut done = 0;
+        while done < buf.len() {
+            let read = file.seek_read(&mut buf[done..], offset + done as u64)?;
+            if read == 0 {
+                return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
+            }
+            done += read;
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug)]
 pub enum ResolveFail {
@@ -299,8 +319,7 @@ impl SourceCtx {
             }
             let res = tokio::task::spawn_blocking(move || {
                 let mut buf = vec![0u8; tail as usize];
-                file.read_exact_at(&mut buf, prefix_end)
-                    .map(|_| buf.contains(&b'\n'))
+                read_exact_at(&file, &mut buf, prefix_end).map(|_| buf.contains(&b'\n'))
             })
             .await;
             return match res {

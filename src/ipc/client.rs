@@ -1,7 +1,6 @@
-use super::{AppError, MAX_RESPONSE_FRAME, Outcome, Request, Response, framing};
+use super::{AppError, MAX_RESPONSE_FRAME, Outcome, Request, Response, framing, transport};
 use serde_json::Value;
 use std::path::Path;
-use tokio::net::UnixStream;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
@@ -22,12 +21,16 @@ pub enum ClientError {
 
 /// One short-lived request per connection keeps bridges disposable and cancellation trivial.
 pub async fn call(socket: &Path, req: Request, max_request: usize) -> Result<Value, ClientError> {
-    let mut s = UnixStream::connect(socket)
-        .await
-        .map_err(|source| ClientError::Unavailable {
-            path: socket.display().to_string(),
-            source,
-        })?;
+    let mut s = transport::connect(socket).await.map_err(|source| {
+        if source.kind() == std::io::ErrorKind::PermissionDenied {
+            ClientError::Io(source)
+        } else {
+            ClientError::Unavailable {
+                path: socket.display().to_string(),
+                source,
+            }
+        }
+    })?;
     let id = req.id();
     let body = serde_json::to_vec(&req).map_err(|e| ClientError::Protocol(e.to_string()))?;
     framing::write_frame(&mut s, &body, max_request).await?;

@@ -15,10 +15,7 @@ pub fn new_id(prefix: &str) -> String {
     h.update(&std::process::id().to_le_bytes());
     h.update(&COUNTER.fetch_add(1, Ordering::Relaxed).to_le_bytes());
     let mut rnd = [0u8; 16];
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        use std::io::Read;
-        let _ = f.read_exact(&mut rnd);
-    }
+    let _ = getrandom::fill(&mut rnd);
     h.update(&rnd);
     format!("{prefix}_{}", &h.finalize().to_hex()[..24])
 }

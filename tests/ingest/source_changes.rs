@@ -241,6 +241,8 @@ async fn replaced_file_identity_is_detected() {
     *env.engine.fail.after_parse.lock() = Some(Arc::new(move || {
         let tmp = p2.with_extension("new");
         std::fs::write(&tmp, join(&linear(6))).unwrap();
+        #[cfg(windows)]
+        std::fs::remove_file(&p2).unwrap();
         std::fs::rename(&tmp, &p2).unwrap();
     }));
     assert_eq!(

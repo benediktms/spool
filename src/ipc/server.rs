@@ -1,29 +1,30 @@
-use super::{AppError, MAX_RESPONSE_FRAME, Outcome, Request, Response, framing};
+use super::{AppError, MAX_RESPONSE_FRAME, Outcome, Request, Response, framing, transport};
 use futures::future::BoxFuture;
 use serde_json::Value;
 use std::sync::Arc;
-use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Semaphore;
 
 pub type Handler =
     Arc<dyn Fn(Request) -> BoxFuture<'static, Result<Value, AppError>> + Send + Sync>;
 
 /// Accept loop. `concurrency` bounds simultaneously served requests; connections beyond that wait.
-/// Peers whose uid differs from ours are rejected (spec 15.1).
+/// Unix peers are checked against our uid; Windows enforces the same boundary in the pipe DACL.
 pub async fn serve(
-    listener: UnixListener,
+    mut listener: transport::Listener,
     handler: Handler,
     concurrency: usize,
     max_request: usize,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
     let sem = Arc::new(Semaphore::new(concurrency));
+    #[cfg(unix)]
     let my_uid = rustix::process::geteuid().as_raw();
     loop {
         tokio::select! {
             _ = shutdown.changed() => return,
-            acc = listener.accept() => {
-                let Ok((stream, _)) = acc else { continue };
+            acc = transport::accept(&mut listener) => {
+                let Ok(stream) = acc else { continue };
+                #[cfg(unix)]
                 match stream.peer_cred() {
                     Ok(c) if c.uid() == my_uid => {}
                     _ => { tracing::warn!("rejected ipc peer with different or unknown uid"); continue }
@@ -41,7 +42,11 @@ pub async fn serve(
     }
 }
 
-async fn handle(mut s: UnixStream, handler: Handler, max_request: usize) -> std::io::Result<()> {
+async fn handle(
+    mut s: transport::Stream,
+    handler: Handler,
+    max_request: usize,
+) -> std::io::Result<()> {
     let Some(frame) = framing::read_frame(&mut s, max_request).await? else {
         return Ok(());
     };

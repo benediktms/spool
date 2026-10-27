@@ -18,6 +18,12 @@ struct Env {
 impl Drop for Env {
     fn drop(&mut self) {
         if let Some(mut d) = self.daemon.take() {
+            #[cfg(windows)]
+            {
+                let paths = spool::config::Paths::from_root(self.home.clone()).unwrap();
+                let _ = spool::ipc::transport::request_shutdown(&paths);
+            }
+            #[cfg(unix)]
             let _ = d.kill();
             let _ = d.wait();
         }
@@ -54,10 +60,7 @@ fn wait_control_ready(home: &Path) {
 }
 
 fn setup() -> Env {
-    let tmp = tempfile::Builder::new()
-        .prefix("sp")
-        .tempdir_in("/tmp")
-        .unwrap();
+    let tmp = tempfile::Builder::new().prefix("sp").tempdir().unwrap();
     let home = tmp.path().join("h");
     let (codex, claude) = (tmp.path().join("codex"), tmp.path().join("claude/proj-a"));
     std::fs::create_dir_all(&codex).unwrap();
@@ -90,10 +93,16 @@ fn setup() -> Env {
     assert!(ok, "{out}");
     let cfg = std::fs::read_to_string(home.join("config.toml")).unwrap();
     let cfg = cfg
-        .replace("~/.codex/sessions", codex.to_str().unwrap())
+        .replace(
+            "~/.codex/sessions",
+            &codex.to_string_lossy().replace('\\', "/"),
+        )
         .replace(
             "~/.claude/projects",
-            tmp.path().join("claude").to_str().unwrap(),
+            &tmp.path()
+                .join("claude")
+                .to_string_lossy()
+                .replace('\\', "/"),
         );
     let parsed: toml::Table = cfg.parse().unwrap();
     for src in parsed["sources"].as_array().unwrap() {
@@ -102,7 +111,7 @@ fn setup() -> Env {
                 assert!(
                     r.as_str()
                         .unwrap()
-                        .starts_with(tmp.path().to_str().unwrap()),
+                        .starts_with(&tmp.path().to_string_lossy().replace('\\', "/")),
                     "enabled source root {r} must be inside the temp dir: a default root would index real transcripts"
                 );
             }
@@ -116,11 +125,6 @@ fn setup() -> Env {
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    let t = Instant::now();
-    while !home.join("state/spool.sock").exists() {
-        assert!(t.elapsed() < Duration::from_secs(30));
-        std::thread::sleep(Duration::from_millis(50));
-    }
     wait_control_ready(&home);
     Env {
         _tmp: tmp,
