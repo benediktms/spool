@@ -2,19 +2,22 @@
 
 ## Access model (the exact statement)
 
-**Filesystem permissions are the only access control.** Directories are mode 0700; the socket and
-every sensitive file (handle-signing key, provider credential file, `index.sqlite`, `jobs.sqlite`,
-their WAL/SHM files, `daemon.lock`, `config.toml`, log files) are mode 0600. There are no client
-credentials, scopes or authentication step: anything that can open the Unix socket can use every
-enabled MCP tool. The daemon also rejects a peer whose user ID differs from its own.
+**Filesystem permissions are the only access control.** On Unix, directories are mode 0700 and the
+socket plus sensitive files (handle-signing key, provider credential file, `index.sqlite`,
+`jobs.sqlite`, their WAL/SHM files, `daemon.lock`, `config.toml`, log files) are mode 0600. On
+Windows, Spool uses protected DACLs that grant full access only to the current user and LocalSystem,
+rejects reparse points, and checks current-user ownership; files may inherit only approved ACEs.
+The IPC endpoint is a local named pipe, whose server is first-instance protected and whose clients
+validate the server owner before sending a request. There are no client credentials, scopes or
+authentication step: anything allowed to open the local endpoint can use every enabled MCP tool.
 
-**This gives no isolation from a hostile process running as the same operating-system user.** Such
-a process can read the databases, the signing key and the credential file directly. Spool does not
-claim otherwise.
+**This gives no isolation from a hostile process running as the same operating-system user.** Such a
+process can read the databases, signing key and credential file directly. Spool does not claim
+otherwise.
 
 **There is no application-layer encryption.** The SQLite databases and logs are plain files.
 Protection at rest relies on your OS account permissions and, optionally, full-disk encryption
-(FileVault / LUKS) that you enable yourself.
+(FileVault / LUKS / BitLocker) that you enable yourself.
 
 Handle signing (match, message, item, branch references and cursors) protects the integrity of
 handles. It is not client authentication. `spool handles rotate-key` replaces the key and revokes
@@ -44,7 +47,8 @@ By default nothing leaves the machine. Semantic and hybrid search need a hosted 
 provider, and sending anything to it requires **both**:
 
 1. `embedding.hosted_processing_approved = true` in `config.toml` (default `false`), and
-2. a credential in the provider credential file (default `secrets/provider.key`, mode 0600).
+2. a credential in the provider credential file (default `secrets/provider.key`, Unix mode 0600 or
+   its protected Windows ACL equivalent).
 
 `spool init` asks for this explicitly (interactive prompt on a TTY, otherwise the
 `--hosted-processing yes|no` flag; with neither it keeps `false` and says so). Nothing converts
@@ -63,21 +67,23 @@ Tests use a local fake server on 127.0.0.1 and never the network.
 ## Logs, diagnostics, telemetry
 
 * Logs are local, structured, size-rotated files (`~/Library/Logs/Spool/spool.log` on macOS,
-  `<state>/logs/spool.log` on Linux; `SPOOL_HOME` keeps them under that home). Configured by
-  `logging.max_file_bytes` and `logging.retained_files`.
+  `<state>/logs/spool.log` on Linux, `<root>/logs/spool.log` on Windows; `SPOOL_HOME` keeps them under
+  that home). Windows uses the same path whether the CLI discovers its default home or the task captures it explicitly.
+  Configured by `logging.max_file_bytes` and `logging.retained_files`.
 * Logs carry identifiers, counts and timings. They never contain query text, conversation text,
   tool payloads, provider credentials or headers, the signing key, or provider error bodies.
   `logging.include_content` is reserved and ignored.
 * There is no telemetry upload, no update check and no external metrics collector.
 * `spool config show` redacts secret-named fields and URL credentials. The config file itself holds
   only the *path* of the credential file.
-* `spool doctor` verifies the modes listed above (including the signing key, credential file,
-  databases and WAL files) and never prints key material. It contacts the provider only with
+* `spool doctor` verifies the private modes/ACLs listed above (including the signing key, credential
+  file, databases and WAL files) and never prints key material. It contacts the provider only with
   `--probe-provider`, using a fixed harmless string.
 
 ## Service environment
 
 The LaunchAgent / systemd user unit does not inherit your shell environment: launchd gets a fixed
-`PATH` and `HOME` (plus `SPOOL_HOME` only when you installed with one). Credentials come from the
-mode-0600 file, not from environment variables. Services are per-user, never root, and
+`PATH` and `HOME` (plus `SPOOL_HOME` only when you installed with one). The Windows Task Scheduler
+launcher captures only an absolute `SPOOL_HOME` and executable path. Credentials come from the
+private file, not from environment variables. Services are per-user, never root or elevated, and
 `spool service install` refuses to overwrite a definition it did not write.

@@ -4,12 +4,17 @@ use super::*;
 use parking_lot::Mutex;
 use spool::clock::ManualClock;
 use spool::config::{Config, EmbeddingConfig, Paths};
-use spool::embeddings::openai::{CredentialProblem, endpoint_identity, read_credential};
+#[cfg(unix)]
+use spool::embeddings::openai::CredentialProblem;
+use spool::embeddings::openai::endpoint_identity;
+#[cfg(unix)]
+use spool::embeddings::openai::read_credential;
 use spool::embeddings::vectors::dot;
 use spool::embeddings::{
     EmbedErrorKind as K, EmbeddingProvider, EmbeddingService, EmbeddingState, OpenAiProvider,
     Purpose, probe_provider,
 };
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -548,6 +553,7 @@ async fn response_size_is_capped() {
     assert!(e.to_string().contains("size limit"));
 }
 
+#[cfg(unix)]
 #[test]
 fn credential_file_must_be_private() {
     let dir = tempfile::tempdir().unwrap();
@@ -613,10 +619,11 @@ impl Lair {
             _dir: dir,
         }
     }
-    fn write_credential(&self, mode: u32) {
+    fn write_credential(&self, _mode: u32) {
         let p = self.cfg.credential_path(&self.paths.root).unwrap();
         std::fs::write(&p, "sk-test-key\n").unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(_mode)).unwrap();
     }
     fn connections(&self) -> usize {
         let mut n = 0;
@@ -630,12 +637,18 @@ impl Lair {
 #[tokio::test]
 async fn closed_consent_gate_never_opens_a_socket() {
     use EmbeddingState as S;
-    // (approved, enabled, write credential with mode, expected state, expected error kind)
+    #[cfg(unix)]
     let cases = [
         (false, true, Some(0o600), S::NotApproved, K::NotApproved),
         (true, false, Some(0o600), S::Disabled, K::Disabled),
         (true, true, None, S::NoCredential, K::NoCredential),
         (true, true, Some(0o644), S::NoCredential, K::NoCredential),
+    ];
+    #[cfg(windows)]
+    let cases = [
+        (false, true, Some(0o600), S::NotApproved, K::NotApproved),
+        (true, false, Some(0o600), S::Disabled, K::Disabled),
+        (true, true, None, S::NoCredential, K::NoCredential),
     ];
     for (approved, enabled, mode, state, kind) in cases {
         let lair = Lair::new(approved, enabled);

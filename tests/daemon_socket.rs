@@ -1,15 +1,18 @@
-//! Socket-path safety: only a stale Unix socket we own is replaced; arbitrary files are never removed.
+//! Unix socket-path safety and Windows duplicate-daemon rejection.
 
 use spool::config::{Config, Paths};
 use spool::daemon::Daemon;
 use spool::transcript::handle::HandleKey;
+
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
 use std::os::unix::net::UnixListener as StdListener;
 
 async fn daemon_in(root: &std::path::Path, socket: &str) -> anyhow::Result<Daemon> {
+    spool::daemon::ensure_private_dir(root)?;
     let paths = Paths::from_root(root.to_path_buf())?;
-    std::fs::create_dir_all(&paths.secrets_dir)?;
-    std::fs::set_permissions(&paths.secrets_dir, std::fs::Permissions::from_mode(0o700))?;
+    spool::daemon::ensure_private_dir(&paths.secrets_dir)?;
     if !paths.signing_key.exists() {
         HandleKey::create(&paths.signing_key)?;
     }
@@ -19,16 +22,19 @@ async fn daemon_in(root: &std::path::Path, socket: &str) -> anyhow::Result<Daemo
 }
 
 fn root() -> tempfile::TempDir {
-    tempfile::Builder::new()
-        .prefix("sp")
-        .tempdir_in("/tmp")
-        .unwrap()
+    tempfile::Builder::new().prefix("sp").tempdir().unwrap()
+}
+fn private_root(t: &tempfile::TempDir) -> std::path::PathBuf {
+    let root = t.path().join("h");
+    spool::daemon::ensure_private_dir(&root).unwrap();
+    root
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn stale_owned_socket_is_replaced_and_new_socket_is_0600() {
     let t = root();
-    let root = t.path().join("h");
+    let root = private_root(&t);
     std::fs::create_dir_all(root.join("state")).unwrap();
     let sock = root.join("state/spool.sock");
     drop(StdListener::bind(&sock).unwrap()); // listener gone, socket file stays: stale
@@ -41,10 +47,11 @@ async fn stale_owned_socket_is_replaced_and_new_socket_is_0600() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn regular_file_directory_and_symlink_at_socket_path_are_never_removed() {
     let t = root();
-    let root = t.path().join("h");
+    let root = private_root(&t);
     std::fs::create_dir_all(root.join("state")).unwrap();
     let victim = root.join("state/victim.txt");
     std::fs::write(&victim, b"precious").unwrap();
@@ -78,10 +85,11 @@ async fn regular_file_directory_and_symlink_at_socket_path_are_never_removed() {
     assert!(d.bind().is_err());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn reserved_paths_and_unsafe_parents_are_rejected() {
     let t = root();
-    let root = t.path().join("h");
+    let root = private_root(&t);
     std::fs::create_dir_all(&root).unwrap();
     // socket path pointing at the signing key
     assert!(
@@ -108,4 +116,17 @@ async fn reserved_paths_and_unsafe_parents_are_rejected() {
         0o755,
         "target of a symlink must not be chmodded"
     );
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn duplicate_daemon_is_rejected_after_binding_the_private_pipe() {
+    let t = root();
+    let root = private_root(&t);
+    let first = daemon_in(&root, "state/spool.sock").await.unwrap();
+    let _listener = first.bind().unwrap();
+    match daemon_in(&root, "state/spool.sock").await {
+        Ok(_) => panic!("second daemon acquired the state lock"),
+        Err(error) => assert!(error.to_string().contains("another spool daemon")),
+    }
 }

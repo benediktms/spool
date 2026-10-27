@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.94"
 description = "Local search engine for agent-session conversation history"
 license = "MIT"
+default-run = "spool"
 
 [lib]
 name = "spool"
@@ -14,6 +15,9 @@ path = "src/lib.rs"
 name = "spool"
 path = "src/main.rs"
 
+[[bin]]
+name = "spool-service"
+path = "src/bin/spool-service.rs"
 [dependencies]
 anyhow = "1"
 apalis = { version = "1.0.0", default-features = false, features = ["tracing", "retry", "limit", "timeout", "catch-panic"] }
@@ -23,11 +27,11 @@ base64 = "0.22"
 blake3 = "1"
 clap = { version = "4", features = ["derive"] }
 futures = "0.3"
+getrandom = { version = "0.3", features = ["std"] }
 memchr = "2"
 parking_lot = "0.12"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 rmcp = { version = "3.5.1", features = ["server", "client", "macros", "schemars", "transport-io", "transport-child-process"] }
-rustix = { version = "1", features = ["fs", "std", "process"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sqlx = { version = "0.9.0", default-features = false, features = ["sqlite", "runtime-tokio", "migrate", "macros"] }
@@ -40,6 +44,11 @@ tracing = "0.1"
 zstd = "0.13"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["fs", "std", "process"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Threading"] }
 [dev-dependencies]
 jsonschema = { version = "0.58.6", default-features = false }
 tempfile = "3"

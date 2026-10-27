@@ -5,7 +5,6 @@ use crate::config::EmbeddingConfig;
 use futures::future::BoxFuture;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue, RETRY_AFTER};
 use serde::Deserialize;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::Duration;
 
@@ -15,7 +14,7 @@ const MAX_RETRY_AFTER: Duration = Duration::from_secs(3600);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CredentialProblem {
     Missing,
-    /// Group/other permission bits set; the file must be 0600.
+    /// The file is not private (0600 on Unix, current-user ACL on Windows).
     TooPermissive,
     Empty,
 }
@@ -24,7 +23,7 @@ impl CredentialProblem {
     pub fn describe(self) -> &'static str {
         match self {
             Self::Missing => "credential file is missing or unreadable",
-            Self::TooPermissive => "credential file permissions are too open (must be 0600)",
+            Self::TooPermissive => "credential file permissions are too open (must be private)",
             Self::Empty => "credential file is empty or malformed",
         }
     }
@@ -35,10 +34,10 @@ pub fn read_credential(path: &Path) -> Result<String, CredentialProblem> {
     use std::io::Read;
     let mut f = std::fs::File::open(path).map_err(|_| CredentialProblem::Missing)?;
     let md = f.metadata().map_err(|_| CredentialProblem::Missing)?;
-    if !md.is_file() {
-        return Err(CredentialProblem::Missing);
-    }
-    if md.permissions().mode() & 0o077 != 0 {
+    if !md.is_file()
+        || crate::perms::check_private(path, 0o600).is_err()
+        || !crate::perms::is_current_user(&f).map_err(|_| CredentialProblem::Missing)?
+    {
         return Err(CredentialProblem::TooPermissive);
     }
     let mut s = String::new();

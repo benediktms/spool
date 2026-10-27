@@ -2336,6 +2336,7 @@ dependencies = [
  "blake3",
  "clap",
  "futures",
+ "getrandom 0.3.4",
  "jsonschema",
  "memchr",
  "parking_lot",
@@ -2353,6 +2354,7 @@ dependencies = [
  "toml_edit",
  "tracing",
  "tracing-subscriber",
+ "windows-sys 0.61.2",
  "zstd",
 ]
 

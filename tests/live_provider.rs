@@ -3,6 +3,7 @@
 //! run with `cargo test --test live_provider -- --ignored`. Never part of default CI.
 
 use spool::config::EmbeddingConfig;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
 #[tokio::test]
@@ -15,6 +16,7 @@ async fn live_openai_probe_returns_the_configured_dimensions() {
     let tmp = tempfile::tempdir().unwrap();
     let f = tmp.path().join("provider.key");
     std::fs::write(&f, key).unwrap();
+    #[cfg(unix)]
     std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o600)).unwrap();
     let cfg = EmbeddingConfig {
         hosted_processing_approved: true,

@@ -15,7 +15,6 @@ use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use std::collections::{HashMap, HashSet};
 use std::io::{BufReader, Read};
-use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
@@ -556,6 +555,27 @@ async fn consume(
     }
 }
 
+fn read_exact_at(file: &std::fs::File, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileExt;
+        return file.read_exact_at(buf, offset);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::FileExt;
+        let mut done = 0;
+        while done < buf.len() {
+            let read = file.seek_read(&mut buf[done..], offset + done as u64)?;
+            if read == 0 {
+                return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
+            }
+            done += read;
+        }
+        Ok(())
+    }
+}
+
 /// Verify a sample of the observed records (first, middle, last) still hash to their digests.
 fn samples_verify(file: &std::fs::File, records: &[RecordMeta]) -> bool {
     if records.is_empty() {
@@ -565,7 +585,7 @@ fn samples_verify(file: &std::fs::File, records: &[RecordMeta]) -> bool {
     picks.iter().all(|&i| {
         let r = &records[i];
         let mut buf = vec![0u8; r.locator.len as usize];
-        file.read_exact_at(&mut buf, r.locator.offset).is_ok() && digest(&buf) == r.digest
+        read_exact_at(file, &mut buf, r.locator.offset).is_ok() && digest(&buf) == r.digest
     })
 }
 

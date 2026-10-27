@@ -8,7 +8,6 @@ use crate::config::{Config, Paths};
 use crate::transcript::handle::HandleKey;
 use anyhow::{Context, Result, bail};
 use std::io::{BufRead, Write};
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 
 pub trait Prompter {
@@ -94,8 +93,7 @@ pub fn run_init(
     }
 
     for d in [&paths.root, &paths.state_dir, &paths.secrets_dir] {
-        crate::daemon::ensure_private_dir(d)
-            .with_context(|| format!("creating {}", d.display()))?;
+        crate::perms::ensure_private_dir(d).with_context(|| format!("creating {}", d.display()))?;
     }
 
     let mut notes = Vec::new();
@@ -140,16 +138,13 @@ pub fn run_init(
         let text = format!("{HEADER}{}", toml::to_string_pretty(&cfg)?);
         Config::parse(&text, &paths.root).context("generated config failed validation")?;
         let tmp = paths.root.join(".config.toml.tmp");
+        let _ = std::fs::remove_file(&tmp);
         {
-            let _ = std::fs::remove_file(&tmp);
-            let mut f = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&tmp)?;
+            let mut f = crate::perms::create_private_file(&tmp)?;
             f.write_all(text.as_bytes())?;
+            f.sync_all()?;
         }
-        std::fs::rename(&tmp, &paths.config_file)?;
+        crate::perms::replace_private(&tmp, &paths.config_file)?;
         config_written = true;
     } else {
         notes.push(format!("kept existing {}", paths.config_file.display()));
