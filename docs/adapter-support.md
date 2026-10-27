@@ -4,7 +4,7 @@ Support is limited to the fixture-backed line schemas below; these are not decla
 
 Discovery admits only regular files with the `.jsonl` extension, including nested subagent transcripts. Tool-output logs, other session artifacts, and compressed rollouts are not scanned. Explicit-path readers can still open artifacts. Previously cataloged artifacts follow normal missing reconciliation: one complete scan tombstones them, and a second retires their snapshots.
 
-Subagents remain cataloged when their source has `include_subagents = false`, but do not count as pending work in status, search coverage, discovery capacity, or operation settlement. Source totals still include them; enabling `include_subagents` makes pending subagents schedulable without a state transition.
+Subagents remain cataloged when their source has `include_subagents = false`, but do not count as pending work or `backfill_known` in status, search coverage, discovery capacity, or operation settlement. Source totals still include them; enabling `include_subagents` makes pending subagents schedulable without a state transition.
 
 | Adapter | Fixture/schema supported | Explicitly unsupported or partial |
 |---|---|---|

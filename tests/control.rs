@@ -165,6 +165,94 @@ async fn skipped_subagents_are_not_pending_work() {
     r.shutdown().await;
 }
 
+/// Subagent policy is per source: only the enabled source's subagent is queued, indexed and counted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn only_policy_enabled_subagents_are_queued_and_reported() {
+    let env = Env::with(|c| {
+        let dir2 = std::path::PathBuf::from(&c.sources[0].roots[0]).with_file_name("omp2");
+        std::fs::create_dir_all(&dir2).unwrap();
+        let mut second = c.sources[0].clone();
+        second.id = "omp2".into();
+        second.roots = vec![dir2.to_string_lossy().into_owned()];
+        second.include_subagents = true;
+        c.sources.push(second);
+    })
+    .await;
+    let dir2 = env.dir.with_file_name("omp2");
+    let subagent = |dir: &std::path::Path, name: &str, mtime: i64| {
+        let p = write_omp(
+            dir,
+            &format!("{name}.jsonl"),
+            name,
+            &["hello", "reply"],
+            mtime,
+        );
+        let body = std::fs::read_to_string(&p).unwrap().replacen(
+            "\"type\":\"session\"",
+            "\"parentSession\":\"main\",\"type\":\"session\"",
+            1,
+        );
+        std::fs::write(&p, body).unwrap();
+        set_mtime(&p, mtime);
+    };
+    env.omp("main.jsonl", "main", &["hello", "reply"], T0 - DAY);
+    subagent(&env.dir, "sub", T0 - DAY);
+    write_omp(&dir2, "main2.jsonl", "main2", &["hello", "reply"], T0 - DAY);
+    subagent(&dir2, "sub2", T0 - DAY);
+    let r = rig_with(env, None).await;
+    for native in ["main", "main2", "sub2"] {
+        r.env.wait_state(native, "indexed", 30).await;
+    }
+    wait_until(20, "queue settled", || async {
+        r.status().await["status"] == "ready"
+    })
+    .await;
+    for (native, kind) in [("old", "interactive"), ("old_sub", "subagent")] {
+        sqlx::query(
+            "INSERT INTO sessions(id, source_id, native_id, discovered_at, index_state, eligibility, session_kind) \
+             VALUES (?1, 'omp', ?2, ?3, 'pending', 'backfill', ?4)",
+        )
+        .bind(format!("ss_{native}"))
+        .bind(native)
+        .bind(T0)
+        .bind(kind)
+        .execute(&r.env.index.writer)
+        .await
+        .unwrap();
+    }
+
+    let status = r.status().await;
+    assert_eq!(status["queue"]["queued"], 0, "{status}");
+    assert_eq!(status["queue"]["pending_sessions"], 0, "{status}");
+    assert_eq!(status["queue"]["backfill_known"], 1, "{status}");
+    assert_eq!(status["sources"][0]["sessions_total"], 4);
+    assert_eq!(
+        status["sources"][0]["sessions_by_state"],
+        json!({"indexed": 1})
+    );
+    assert_eq!(
+        status["sources"][1]["sessions_by_state"],
+        json!({"indexed": 2})
+    );
+    for native in ["sub", "old_sub", "old"] {
+        let s = r.env.session_by_native(native).await.unwrap();
+        assert_eq!(s.index_state, "pending", "{native}");
+        let jobs = r
+            .env
+            .jobs_count(&format!(
+                "SELECT count(*) FROM Jobs WHERE idempotency_key LIKE 'idx:{}:%'",
+                s.id
+            ))
+            .await;
+        assert_eq!(jobs, 0, "{native} must never be queued");
+    }
+    assert_eq!(
+        r.env.session_by_native("sub2").await.unwrap().session_kind,
+        "subagent"
+    );
+    r.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn status_reports_coverage_queue_workers_provider_and_storage_without_secrets_or_text() {
     let env = Env::new().await;

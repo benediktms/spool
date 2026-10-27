@@ -169,9 +169,10 @@ impl ControlService {
             count("failed"),
             count("unsupported"),
         );
-        let (backfill_known, excluded, missing): (i64, i64, i64) = sqlx::query_as(
-            "SELECT COALESCE(SUM(eligibility = 'backfill' AND excluded = 0), 0), COALESCE(SUM(excluded), 0), COALESCE(SUM(source_status = 'missing'), 0) FROM sessions",
-        )
+        let (backfill_known, excluded, missing): (i64, i64, i64) = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT COALESCE(SUM(eligibility = 'backfill' AND excluded = 0 AND {} ), 0), COALESCE(SUM(excluded), 0), COALESCE(SUM(source_status = 'missing'), 0) FROM sessions s",
+            catalog::INDEXABLE_KIND
+        )))
         .fetch_one(&idx.reader)
         .await
         .map_err(storage_err)?;
