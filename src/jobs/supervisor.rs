@@ -137,6 +137,62 @@ async fn registration_wait(pool: &SqlitePool, name: &str, heartbeat: Duration) -
         .map(Duration::from_secs)
 }
 
+async fn stale_heartbeat(pool: &SqlitePool, name: &str, liveness: Liveness, status: &Status) {
+    let Some(limit) = u32::try_from(liveness.missed_heartbeats)
+        .ok()
+        .and_then(|missed| liveness.heartbeat_interval.checked_mul(missed))
+        .and_then(|duration| duration.checked_add(Duration::from_secs(1)))
+        .and_then(|duration| i64::try_from(duration.as_secs()).ok())
+    else {
+        return std::future::pending().await;
+    };
+    loop {
+        tokio::time::sleep(liveness.heartbeat_interval).await;
+        let running =
+            status.lock().unwrap_or_else(|e| e.into_inner()).state == WorkerState::Running;
+        if !running {
+            continue;
+        }
+        let read = sqlx::query_scalar::<_, i64>(
+            "SELECT strftime('%s', 'now') - last_seen FROM Workers WHERE id = ?1",
+        )
+        .bind(name)
+        .fetch_optional(pool);
+        if matches!(tokio::time::timeout(liveness.heartbeat_interval, read).await, Ok(Ok(Some(age))) if age > limit)
+        {
+            return;
+        }
+    }
+}
+
+async fn watch_worker(
+    mut worker: JoinHandle<Option<Result<(), WorkerError>>>,
+    pool: &SqlitePool,
+    name: &str,
+    liveness: Liveness,
+    status: &Status,
+    abort_slot: &KillSlot,
+) -> (
+    Result<Option<Result<(), WorkerError>>, tokio::task::JoinError>,
+    bool,
+) {
+    let result = tokio::select! {
+        result = &mut worker => Some(result),
+        () = stale_heartbeat(pool, name, liveness, status) => None,
+    };
+    if let Some(result) = result {
+        return (result, false);
+    }
+    update(status, |s| {
+        s.state = WorkerState::Restarting;
+        s.last_error = Some("heartbeat_stale".into());
+    });
+    if let Some(kill) = abort_slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        let _ = kill.send(());
+    }
+    (worker.await, true)
+}
+
 async fn stop_signal(mut rx: watch::Receiver<bool>) -> Result<(), WorkerError> {
     let _ = rx.wait_for(|v| *v).await;
     Ok(())
@@ -226,12 +282,20 @@ fn supervise(
             *abort_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(kill_tx);
             let (m, c, s, st) = (make.clone(), ctx.clone(), status.clone(), stop.clone());
             let rt = tokio::runtime::Handle::current();
-            let res = tokio::task::spawn_blocking(move || {
+            let worker = tokio::task::spawn_blocking(move || {
                 rt.block_on(async move {
                     let mut w = m(c, s, st);
                     tokio::select! { r = &mut w => Some(r), _ = kill_rx => None }
                 })
-            })
+            });
+            let (res, heartbeat_stale) = watch_worker(
+                worker,
+                &ctx.sub.pool,
+                &name,
+                ctx.sub.liveness,
+                &status,
+                &abort_slot,
+            )
             .await;
             *abort_slot.lock().unwrap_or_else(|e| e.into_inner()) = None;
             if *stop.borrow() {
@@ -240,18 +304,22 @@ fn supervise(
             if started.elapsed() >= STABLE_AFTER {
                 consecutive = 0;
             }
-            let (why, already_registered) = match &res {
-                Ok(Some(Ok(()))) => ("worker_stopped", false),
-                Ok(Some(Err(e))) => (
-                    if e.to_string().contains("WORKER_ALREADY_EXISTS") {
-                        "register_refused"
-                    } else {
-                        "worker_error"
-                    },
-                    e.to_string().contains("WORKER_ALREADY_EXISTS"),
-                ),
-                Ok(None) => ("worker_killed", false),
-                Err(_) => ("worker_panicked", false),
+            let (why, already_registered) = if heartbeat_stale {
+                ("heartbeat_stale", false)
+            } else {
+                match &res {
+                    Ok(Some(Ok(()))) => ("worker_stopped", false),
+                    Ok(Some(Err(e))) => (
+                        if e.to_string().contains("WORKER_ALREADY_EXISTS") {
+                            "register_refused"
+                        } else {
+                            "worker_error"
+                        },
+                        e.to_string().contains("WORKER_ALREADY_EXISTS"),
+                    ),
+                    Ok(None) => ("worker_killed", false),
+                    Err(_) => ("worker_panicked", false),
+                }
             };
             if already_registered {
                 update(&status, |s| {
@@ -992,6 +1060,170 @@ mod tests {
                 .last_started_ms,
             Some(123)
         );
+    }
+
+    #[tokio::test]
+    async fn stale_pending_worker_is_cancelled_and_healthy_heartbeats_survive() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        backend::setup(&pool).await.unwrap();
+        let liveness = Liveness {
+            heartbeat_interval: Duration::from_millis(100),
+            missed_heartbeats: 2,
+            poll_interval: Duration::from_millis(100),
+        };
+        sqlx::query("INSERT INTO Workers (id, worker_type, storage_name, last_seen) VALUES ('w', 't', 's', strftime('%s', 'now'))")
+            .execute(&pool).await.unwrap();
+        let status = new_status("w");
+        let (kill, killed) = tokio::sync::oneshot::channel();
+        let slot: KillSlot = Arc::new(Mutex::new(Some(kill)));
+        let worker = tokio::spawn(async move {
+            tokio::select! {
+                result = std::future::pending() => result,
+                _ = killed => None,
+            }
+        });
+        let watched = watch_worker(worker, &pool, "w", liveness, &status, &slot);
+        tokio::pin!(watched);
+        sqlx::query("UPDATE Workers SET last_seen = strftime('%s', 'now') - 100 WHERE id = 'w'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), &mut watched)
+                .await
+                .is_err()
+        );
+        sqlx::query("UPDATE Workers SET last_seen = strftime('%s', 'now') WHERE id = 'w'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        update(&status, |s| s.state = WorkerState::Running);
+        let held = pool.acquire().await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), &mut watched)
+                .await
+                .is_err()
+        );
+        drop(held);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), &mut watched)
+                .await
+                .is_err()
+        );
+        sqlx::query("UPDATE Workers SET last_seen = strftime('%s', 'now') WHERE id = 'w'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let heartbeat_pool = pool.clone();
+        let heartbeat = tokio::spawn(async move {
+            loop {
+                sqlx::query("UPDATE Workers SET last_seen = strftime('%s', 'now') WHERE id = 'w'")
+                    .execute(&heartbeat_pool)
+                    .await
+                    .unwrap();
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_secs(3), &mut watched)
+                .await
+                .is_err()
+        );
+        heartbeat.abort();
+        let _ = heartbeat.await;
+        sqlx::query("UPDATE Workers SET last_seen = strftime('%s', 'now') - 100 WHERE id = 'w'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (result, stale) = tokio::time::timeout(Duration::from_secs(2), watched)
+            .await
+            .unwrap();
+        assert!(stale);
+        assert!(result.unwrap().is_none());
+        let status = status.lock().unwrap();
+        assert_eq!(status.state, WorkerState::Restarting);
+        assert_eq!(status.last_error.as_deref(), Some("heartbeat_stale"));
+    }
+
+    #[tokio::test]
+    async fn supervisor_restarts_a_pending_stale_generation() {
+        use crate::embeddings::{EmbeddingService, FakeProvider};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let index = Index::open_for_test(tmp.path()).await.unwrap();
+        let pool =
+            crate::storage::connect(&tmp.path().join("jobs.sqlite"), 4, Duration::from_secs(5))
+                .await
+                .unwrap();
+        let cfg = Arc::new(Config::default());
+        let clock: SharedClock = Arc::new(ManualClock::new(123));
+        let sources = Arc::new(SourceRegistry::new(&cfg).unwrap());
+        let embeddings = Arc::new(EmbeddingService::new(
+            index.clone(),
+            cfg.embedding.clone(),
+            cfg.search.clone(),
+            clock.clone(),
+            Arc::new(FakeProvider::new(32)),
+        ));
+        embeddings.ensure_profile().await.unwrap();
+        let engine = Arc::new(IngestEngine::new(
+            index.clone(),
+            cfg.clone(),
+            sources.clone(),
+            embeddings,
+            clock.clone(),
+        ));
+        let liveness = Liveness {
+            heartbeat_interval: Duration::from_millis(100),
+            missed_heartbeats: 2,
+            poll_interval: Duration::from_millis(100),
+        };
+        let system = JobSystem::start(index, pool.clone(), cfg, sources, engine, clock, liveness)
+            .await
+            .unwrap();
+        let generation = Arc::new(AtomicUsize::new(0));
+        let count = generation.clone();
+        let make: Make = Arc::new(move |ctx, status, stop| {
+            let number = count.fetch_add(1, Ordering::SeqCst);
+            async move {
+                sqlx::query("INSERT OR REPLACE INTO Workers (id, worker_type, storage_name, last_seen) VALUES ('probe', 't', 's', strftime('%s', 'now') - 100)")
+                    .execute(&ctx.sub.pool).await.unwrap();
+                update(&status, |s| s.state = WorkerState::Running);
+                if number == 0 {
+                    std::future::pending().await
+                } else {
+                    stop_signal(stop).await
+                }
+            }.boxed_local()
+        });
+        let status = new_status("probe");
+        let slot = Arc::default();
+        let (stop, rx) = watch::channel(false);
+        let task = supervise(system.ctx.clone(), status.clone(), slot, rx, make);
+        tokio::time::timeout(Duration::from_secs(6), async {
+            loop {
+                if generation.load(Ordering::SeqCst) >= 2 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let current = status.lock().unwrap().clone();
+        assert_eq!(current.restarts, 1);
+        assert_eq!(current.last_error.as_deref(), Some("heartbeat_stale"));
+        stop.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+        system.shutdown(Duration::from_secs(2)).await;
     }
 
     #[tokio::test]
