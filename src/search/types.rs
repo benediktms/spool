@@ -110,6 +110,7 @@ pub struct Coverage {
     pub active_chunks: i64,
     /// Active chunks that have a vector for the active embedding profile.
     pub embedded_chunks: i64,
+    /// Present, policy-eligible sessions awaiting indexing or retry; excludes manual-backfill candidates.
     pub pending_sessions: i64,
     pub last_successful_discovery_at: Option<String>,
     pub scope: String,

@@ -725,7 +725,7 @@ Keep default ordering relevance-first, with deterministic ID tie-breaks. An expl
 
 Default: ten sessions, maximum fifty, at most three matches each. Bound excerpts and the entire response; do not return the complete transcript as part of search. If limits truncate a response, report it and preserve valid read references.
 
-Return lexical/vector coverage counts, index epoch, scan freshness, and any provider fallback. Do not claim "no such conversation exists" when the index contains only the configured recent/backfilled subset.
+Return lexical/vector coverage counts, index epoch, scan freshness, and any provider fallback. `coverage.pending_sessions` counts present, policy-eligible sessions in pending or deferred state; it excludes missing sources, excluded sessions, disabled subagent kinds, and inert manual-backfill candidates. Do not claim "no such conversation exists" when the index contains only the configured recent/backfilled subset.
 
 A nearest-neighbor result is not proof of relevance. Do not invent a universal cosine cutoff or display an uncalibrated score as a confidence percentage. The agent verifies the excerpt and original context.
 

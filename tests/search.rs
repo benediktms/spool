@@ -1142,6 +1142,54 @@ async fn lease_budget_exhaustion_is_resource_limit() {
 }
 
 #[tokio::test]
+async fn coverage_pending_counts_only_present_eligible_work() {
+    let env = Env::new().await;
+    for (id, state, eligibility, source_status, excluded, kind) in [
+        ("pending", "pending", "active", "present", 0, "interactive"),
+        (
+            "deferred",
+            "deferred",
+            "manual",
+            "present",
+            0,
+            "interactive",
+        ),
+        (
+            "backfill",
+            "pending",
+            "backfill",
+            "present",
+            0,
+            "interactive",
+        ),
+        ("missing", "pending", "active", "missing", 0, "interactive"),
+        ("excluded", "pending", "active", "present", 1, "interactive"),
+        ("subagent", "pending", "active", "present", 0, "subagent"),
+    ] {
+        env.session(id, "omp", "/w", kind, T0).await;
+        sqlx::query("UPDATE sessions SET index_state = ?, eligibility = ?, source_status = ?, excluded = ? WHERE id = ?")
+            .bind(state)
+            .bind(eligibility)
+            .bind(source_status)
+            .bind(excluded)
+            .bind(id)
+            .execute(&env.index.writer)
+            .await
+            .unwrap();
+    }
+
+    let r = env.ok(json!({"query": "nomatch", "mode": "lexical"})).await;
+    assert_eq!(r["coverage"]["pending_sessions"], 2);
+
+    sqlx::query("UPDATE sources SET include_subagents = 1 WHERE id = 'omp'")
+        .execute(&env.index.writer)
+        .await
+        .unwrap();
+    let r = env.ok(json!({"query": "nomatch", "mode": "lexical"})).await;
+    assert_eq!(r["coverage"]["pending_sessions"], 3);
+}
+
+#[tokio::test]
 async fn match_refs_round_trip_with_one_lease() {
     let env = Env::new().await;
     env.simple(

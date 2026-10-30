@@ -733,7 +733,7 @@ pub async fn coverage(
         }
     };
     let pending_sessions = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(format!(
-        "SELECT count(*) FROM sessions s WHERE s.excluded = 0 AND s.index_state IN ('pending','deferred') AND {}",
+        "SELECT count(*) FROM sessions s WHERE s.excluded = 0 AND s.source_status = 'present' AND s.eligibility != 'backfill' AND s.index_state IN ('pending','deferred') AND {}",
         crate::storage::catalog::INDEXABLE_KIND
     )))
     .fetch_one(&mut *conn)
