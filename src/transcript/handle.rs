@@ -1,11 +1,10 @@
 //! Versioned, signed, opaque handles (spec 14.2.8). The signature protects integrity only; it
-//! does not authenticate a client. Key file: mode 0600, `v1 <epoch> <64 hex>`.
+//! does not authenticate a client. Key file: private (0600 on Unix).
 
 use crate::ids::hex;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
-use std::io::{Read, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::io::Write;
 use std::path::Path;
 
 pub const HANDLE_VERSION: u8 = 1;
@@ -59,7 +58,7 @@ impl std::fmt::Debug for HandleKey {
 
 fn random32() -> std::io::Result<[u8; 32]> {
     let mut b = [0u8; 32];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut b)?;
+    getrandom::fill(&mut b).map_err(std::io::Error::other)?;
     Ok(b)
 }
 
@@ -81,36 +80,26 @@ impl HandleKey {
 
     fn write(path: &Path, epoch: u32, create_new: bool) -> std::io::Result<Self> {
         let key = random32()?;
+        if create_new {
+            let mut file = crate::perms::create_private_file(path)?;
+            writeln!(file, "v1 {epoch} {}", hex(&key))?;
+            file.sync_all()?;
+            return Ok(Self { key, epoch });
+        }
+
         let tmp = path.with_extension("tmp");
         let _ = std::fs::remove_file(&tmp);
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&tmp)?;
-        writeln!(f, "v1 {epoch} {}", hex(&key))?;
-        f.sync_all()?;
-        drop(f);
-        if create_new && path.exists() {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::AlreadyExists,
-                "signing key already exists",
-            ));
+        {
+            let mut file = crate::perms::create_private_file(&tmp)?;
+            writeln!(file, "v1 {epoch} {}", hex(&key))?;
+            file.sync_all()?;
         }
-        std::fs::rename(&tmp, path)?;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        crate::perms::replace_private(&tmp, path)?;
         Ok(Self { key, epoch })
     }
 
     pub fn load(path: &Path) -> std::io::Result<Self> {
-        let mode = std::fs::metadata(path)?.permissions().mode() & 0o777;
-        if mode & 0o077 != 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                format!("signing key mode is {mode:o}, expected 600"),
-            ));
-        }
+        crate::perms::check_private(path, 0o600)?;
         let text = std::fs::read_to_string(path)?;
         let bad = || {
             std::io::Error::new(

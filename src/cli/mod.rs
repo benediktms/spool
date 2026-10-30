@@ -1,4 +1,4 @@
-//! The `spool` command line (spec 16.2). Daemon-dependent commands go through the Unix socket
+//! The `spool` command line (spec 16.2). Daemon-dependent commands go through local IPC
 //! (`ipc::client::call`); `init`, `doctor`, `config show`, `service`, `logs` and `mcp config`
 //! work from files alone.
 
@@ -82,7 +82,10 @@ fn load_config(paths: &Paths) -> Result<Config, CliError> {
 
 fn remote_for(paths: &Paths) -> Result<Remote, CliError> {
     let cfg = load_config(paths)?;
-    Ok(Remote::new(paths.socket.clone(), cfg.ipc.max_request_bytes))
+    let socket = cfg
+        .socket_path(&paths.root)
+        .map_err(|e| CliError::new(format!("{e:#}")))?;
+    Ok(Remote::new(socket, cfg.ipc.max_request_bytes))
 }
 
 fn service_manager(paths: &Paths) -> Result<ServiceManager, CliError> {
@@ -200,10 +203,11 @@ pub async fn execute(cli: Cli, paths: Paths, clock: SharedClock) -> Result<(), C
         }
         Cmd::Mcp { sub: None } => {
             stderr_logging("info");
-            let max = Config::load(&paths)
-                .map(|c| c.ipc.max_request_bytes)
-                .unwrap_or(1 << 20);
-            crate::mcp::bridge::run_stdio(paths.socket.clone(), max).await?;
+            let (socket, max) = match Config::load(&paths) {
+                Ok(cfg) => (cfg.socket_path(&paths.root)?, cfg.ipc.max_request_bytes),
+                Err(_) => (paths.socket.clone(), 1 << 20),
+            };
+            crate::mcp::bridge::run_stdio(socket, max).await?;
         }
         Cmd::Mcp {
             sub: Some(McpCmd::Config { client, bin }),

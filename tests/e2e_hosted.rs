@@ -5,6 +5,7 @@
 
 use serde_json::{Value, json};
 use std::collections::HashMap;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -97,15 +98,21 @@ async fn fake_provider() -> (u16, Log) {
     });
     (port, log)
 }
-
 struct Env {
     _tmp: tempfile::TempDir,
     home: PathBuf,
+    source: PathBuf,
     daemon: Option<Child>,
 }
 impl Drop for Env {
     fn drop(&mut self) {
         if let Some(mut d) = self.daemon.take() {
+            #[cfg(windows)]
+            {
+                let paths = spool::config::Paths::from_root(self.home.clone()).unwrap();
+                let _ = spool::ipc::transport::request_shutdown(&paths);
+            }
+            #[cfg(unix)]
             let _ = d.kill();
             let _ = d.wait();
         }
@@ -142,10 +149,7 @@ fn wait_control_ready(home: &Path) {
 }
 
 fn setup(port: u16, approved: bool) -> Env {
-    let tmp = tempfile::Builder::new()
-        .prefix("sp")
-        .tempdir_in("/tmp")
-        .unwrap();
+    let tmp = tempfile::Builder::new().prefix("sp").tempdir().unwrap();
     let home = tmp.path().join("h");
     let src = tmp.path().join("src");
     std::fs::create_dir_all(&src).unwrap();
@@ -163,7 +167,10 @@ fn setup(port: u16, approved: bool) -> Env {
     assert!(ok, "{out}");
     let mut cfg = std::fs::read_to_string(home.join("config.toml")).unwrap();
     cfg = cfg
-        .replace("~/.omp/agent/sessions", src.to_str().unwrap())
+        .replace(
+            "~/.omp/agent/sessions",
+            &src.to_string_lossy().replace('\\', "/"),
+        )
         .replace("dimensions = 768", &format!("dimensions = {DIMS}"))
         .replace(
             "https://api.openai.com/v1/embeddings",
@@ -172,6 +179,7 @@ fn setup(port: u16, approved: bool) -> Env {
     std::fs::write(home.join("config.toml"), cfg).unwrap();
     let key = home.join("secrets/provider.key");
     std::fs::write(&key, "sk-test-fake-key\n").unwrap();
+    #[cfg(unix)]
     std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
     let daemon = Command::new(BIN)
         .args(["daemon", "run"])
@@ -180,15 +188,11 @@ fn setup(port: u16, approved: bool) -> Env {
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    let t = Instant::now();
-    while !home.join("state/spool.sock").exists() {
-        assert!(t.elapsed() < Duration::from_secs(30));
-        std::thread::sleep(Duration::from_millis(50));
-    }
     wait_control_ready(&home);
     Env {
         _tmp: tmp,
         home,
+        source: src,
         daemon: Some(daemon),
     }
 }
@@ -301,7 +305,7 @@ async fn with_consent_only_conversation_text_and_query_reach_the_provider() {
             "tool payloads must never reach the provider: {all}"
         );
         assert!(
-            !all.contains("/tmp/"),
+            !all.contains(&env.source.to_string_lossy().replace('\\', "/")),
             "source paths must never reach the provider"
         );
     }

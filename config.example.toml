@@ -1,13 +1,15 @@
-# Spool example configuration. `spool init` writes a file like this to
+# Spool example configuration. `spool init` writes a file like this to:
 #   macOS: ~/Library/Application Support/Spool/config.toml   Linux: ~/.local/state/spool/config.toml
-# (or $SPOOL_HOME/config.toml). Every value shown is the built-in default; delete what you do
-# not change. Unknown keys are rejected. Relative paths resolve against this file's directory,
-# `~/` expands to your home directory, nothing is passed through a shell.
+#   Windows: %LOCALAPPDATA%\Spool\config.toml
+# `SPOOL_HOME` overrides that root (Windows falls back to %USERPROFILE%\AppData\Local\Spool when
+# LOCALAPPDATA is unset). Every value shown is the built-in default; delete what you do not change.
+# Unknown keys are rejected. Relative paths resolve against this file's directory, `~/` expands to
+# your home directory, nothing is passed through a shell.
 
 config_version = 1
 
 [ipc]
-socket_path = "state/spool.sock"      # must stay short enough for a Unix socket path (~100 bytes)
+socket_path = "state/spool.sock"      # Unix socket path; on Windows this configured path is endpoint identity, hashed to a local named-pipe name (no spool.sock file; long paths are supported)
 request_concurrency = 16
 max_request_bytes = 1048576
 
@@ -47,7 +49,7 @@ provider = "openai"
 model = "text-embedding-3-small"
 dimensions = 768
 profile_generation = 1
-credential_file = "secrets/provider.key"   # mode 0600; holds only the API key
+credential_file = "secrets/provider.key"   # Unix mode 0600; protected current-user + SYSTEM ACL on Windows; holds only the API key
 endpoint = "https://api.openai.com/v1/embeddings"
 batch_max_inputs = 32
 batch_max_tokens = 24000

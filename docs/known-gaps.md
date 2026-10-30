@@ -5,17 +5,21 @@ verified, or implemented with a documented deviation. It is not an exhaustive co
 suite and run actually covered, read `docs/smoke-results.md`, `docs/dependency-baseline.md`,
 `docs/adapter-verification.md`, `docs/performance-results.md` and `docs/retrieval-eval.md`. It is deliberately blunt.
 
-## Verification that could not be done on this machine
+## Verification limits
 
 | Item | Why | What exists instead |
 |---|---|---|
-| Real Linux systemd user-service lifecycle (spec 17.4) | The host is macOS; no systemd | Unit text is generated and compared in tests; the command sequences are checked with a recording runner. Not run against a real `systemctl --user`. |
+| Fresh macOS LaunchAgent and Linux systemd user-service runtime lifecycle | This Windows session did not run either OS service manager | Existing generated-definition and recording-runner tests remain; historical records are preserved in the linked evidence files. |
+| Windows automatic logon startup and uninstall lifecycle | User-requested installation verified registration, start, stop, restart, and OMP connection, but did not log the user out or remove the installed task | Native `TASK_VALIDATE_ONLY`, the native windowless helper, foreign-task protection, and CLI/service regressions run without registering persistent test tasks. |
+| Windows 10 and ARM variants | Native smoke was on Windows 11 x64 only | Windows 10/11 x64 is the support target; Windows 10 and ARM variants have not been verified. |
 | Live OpenAI provider contract and retrieval evaluation with a real model | Needs a provider key and the user's hosted-processing consent; none was given | Local fake HTTP provider on 127.0.0.1 (tests/e2e_hosted.rs, tests/embeddings), opt-in `tests/live_provider.rs` (ignored unless `SPOOL_LIVE_PROVIDER_KEY` is set) that has never been run. |
 | Retrieval evaluation on a real corpus; the spec 20.1 goal of 90% Recall@5 | Needs real transcripts and a real embedding model | `docs/retrieval-eval.md`: 50 synthetic queries, fake concept-table embeddings; no claim about the goal. |
 | Search latency during ingestion within 2x idle p95 (spec 20) | Not met: measured 2.22x to 2.63x on a synthetic 300-session, 24,600-chunk corpus (absolute p95 about 60 ms); cause not isolated, no code changed for it | `docs/performance-results.md`: startup on a populated index, ten-minute idle CPU, ingestion time, RSS, WAL and parse cost of excluded tool payloads are measured. |
 | Reference hardware (Apple Silicon, 16 GiB) | Benchmarks ran on an M3 Max, 36 GiB | Hardware is stated with the results. |
 | Per-client cancellation and reconnection with the real Claude Code / Codex / OMP binaries | Those clients do not expose a scripted cancel/reconnect | Both negotiation paths those clients use (initialize 2025-06-18 and 2025-11-25, stateless 2026-07-28) are driven with raw recorded-shape JSON-RPC frames in `tests/e2e_mcp_edge.rs`, including daemon down, daemon restart between calls, cancellation, and stdout cleanliness. Real clients were verified for handshake, `tools/list` and one `tools/call` each. |
 | Real-launchd lifecycle for the production label `com.spool.daemon` | Never installed (the user did not ask for a persistent service) | Isolated label `com.spool.test.*` lifecycle test (opt-in `SPOOL_TEST_LAUNCHD=1`), passed. |
+| Real Claude Code / Codex / OMP binaries on Windows | The native Windows smoke drove recorded-shape stdio JSON-RPC, not installed client binaries | Historical client checks remain documented in the dependency proof; Windows-native compatibility is not yet verified with those binaries. |
+
 
 ## Functional limits and deviations
 
@@ -48,3 +52,5 @@ suite and run actually covered, read `docs/smoke-results.md`, `docs/dependency-b
   per-source consent.
 * **Encryption.** The index is plain SQLite protected only by owner-only filesystem permissions; there is no
   application-layer encryption and no isolation from a hostile process of the same user (spec 15.2).
+* **`scripts/perf_daemon.py` is Unix-only.** It is a benchmark/isolation helper, not a Windows
+  support requirement or a claim that Windows lacks daemon, indexing, MCP, or source-read support.

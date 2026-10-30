@@ -6,6 +6,7 @@
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use std::collections::HashMap;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -131,12 +132,17 @@ impl Drop for Env {
 impl Env {
     fn stop(&mut self) {
         if let Some(mut d) = self.daemon.take() {
+            #[cfg(windows)]
+            {
+                let paths = spool::config::Paths::from_root(self.home.clone()).unwrap();
+                let _ = spool::ipc::transport::request_shutdown(&paths);
+            }
+            #[cfg(unix)]
             let _ = d.kill();
             let _ = d.wait();
         }
     }
     fn start(&mut self) {
-        let _ = std::fs::remove_file(self.home.join("state/spool.sock"));
         self.daemon = Some(
             Command::new(BIN)
                 .args(["daemon", "run"])
@@ -147,10 +153,6 @@ impl Env {
                 .unwrap(),
         );
         let t = Instant::now();
-        while !self.home.join("state/spool.sock").exists() {
-            assert!(t.elapsed() < Duration::from_secs(30));
-            std::thread::sleep(Duration::from_millis(50));
-        }
         loop {
             let (ok, out) = cli(&self.home, &["status", "--json"]);
             if ok {
@@ -210,10 +212,7 @@ fn session_jsonl(id: &str, texts: &[&str]) -> String {
 }
 
 fn setup(port: u16) -> Env {
-    let tmp = tempfile::Builder::new()
-        .prefix("sp")
-        .tempdir_in("/tmp")
-        .unwrap();
+    let tmp = tempfile::Builder::new().prefix("sp").tempdir().unwrap();
     let home = tmp.path().join("h");
     let src = tmp.path().join("src");
     std::fs::create_dir_all(&src).unwrap();
@@ -252,7 +251,10 @@ fn setup(port: u16) -> Env {
     assert!(ok, "{out}");
     let cfg = std::fs::read_to_string(home.join("config.toml")).unwrap();
     let cfg = cfg
-        .replace("~/.omp/agent/sessions", src.to_str().unwrap())
+        .replace(
+            "~/.omp/agent/sessions",
+            &src.to_string_lossy().replace('\\', "/"),
+        )
         .replace("dimensions = 768", &format!("dimensions = {DIMS_A}"))
         .replace(
             "https://api.openai.com/v1/embeddings",
@@ -266,7 +268,7 @@ fn setup(port: u16) -> Env {
                 assert!(
                     r.as_str()
                         .unwrap()
-                        .starts_with(tmp.path().to_str().unwrap()),
+                        .starts_with(&tmp.path().to_string_lossy().replace('\\', "/")),
                     "root {r} escapes the sandbox"
                 );
             }
@@ -275,6 +277,7 @@ fn setup(port: u16) -> Env {
     std::fs::write(home.join("config.toml"), cfg).unwrap();
     let key = home.join("secrets/provider.key");
     std::fs::write(&key, "sk-test-fake-key\n").unwrap();
+    #[cfg(unix)]
     std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
     Env {
         _tmp: tmp,

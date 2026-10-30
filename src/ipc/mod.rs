@@ -1,8 +1,9 @@
-//! Local IPC over an owner-only Unix-domain socket (spec 15.1). No HTTP, no credentials.
+//! Local IPC over an owner-only platform-local endpoint (Unix socket or Windows named pipe).
 
 pub mod client;
 pub mod framing;
 pub mod server;
+pub mod transport;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

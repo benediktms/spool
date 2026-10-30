@@ -27,6 +27,12 @@ struct Env {
 impl Drop for Env {
     fn drop(&mut self) {
         if let Some(mut d) = self.daemon.take() {
+            #[cfg(windows)]
+            {
+                let paths = spool::config::Paths::from_root(self.home.clone()).unwrap();
+                let _ = spool::ipc::transport::request_shutdown(&paths);
+            }
+            #[cfg(unix)]
             let _ = d.kill();
             let _ = d.wait();
         }
@@ -63,10 +69,7 @@ fn wait_control_ready(home: &Path) {
 }
 
 fn setup() -> Env {
-    let tmp = tempfile::Builder::new()
-        .prefix("sp")
-        .tempdir_in("/tmp")
-        .unwrap();
+    let tmp = tempfile::Builder::new().prefix("sp").tempdir().unwrap();
     let home = tmp.path().join("h");
     let src = tmp.path().join("src");
     std::fs::create_dir_all(&src).unwrap();
@@ -85,7 +88,10 @@ fn setup() -> Env {
     let cfg = std::fs::read_to_string(home.join("config.toml")).unwrap();
     std::fs::write(
         home.join("config.toml"),
-        cfg.replace("~/.omp/agent/sessions", src.to_str().unwrap()),
+        cfg.replace(
+            "~/.omp/agent/sessions",
+            &src.to_string_lossy().replace('\\', "/"),
+        ),
     )
     .unwrap();
     let daemon = Command::new(BIN)
@@ -95,14 +101,6 @@ fn setup() -> Env {
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    let t = Instant::now();
-    while !home.join("state/spool.sock").exists() {
-        assert!(
-            t.elapsed() < Duration::from_secs(30),
-            "daemon did not start"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
     wait_control_ready(&home);
     Env {
         _tmp: tmp,

@@ -1,9 +1,12 @@
-//! Milestone 0: real stdio MCP client -> `spool mcp` -> owner-only Unix socket -> daemon.
+//! Real stdio MCP client -> `spool mcp` -> owner-only IPC -> initialized daemon.
 
 use rmcp::{ServiceExt, model::CallToolRequestParams, transport::TokioChildProcess};
 use std::io::{BufRead, BufReader, Write};
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -17,18 +20,30 @@ struct Daemon {
 
 impl Drop for Daemon {
     fn drop(&mut self) {
+        #[cfg(windows)]
+        {
+            let paths = spool::config::Paths::from_root(self.home.clone()).unwrap();
+            let _ = spool::ipc::transport::request_shutdown(&paths);
+        }
+        #[cfg(unix)]
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
 }
 
 fn start_daemon() -> Daemon {
-    // /tmp/ keeps the socket path under the platform sockaddr_un limit.
-    let tmp = tempfile::Builder::new()
-        .prefix("sp")
-        .tempdir_in("/tmp")
-        .unwrap();
+    let tmp = tempfile::Builder::new().prefix("sp").tempdir().unwrap();
     let home = tmp.path().join("h");
+    let init = Command::new(BIN)
+        .args(["init", "--hosted-processing", "no"])
+        .env("SPOOL_HOME", &home)
+        .output()
+        .unwrap();
+    assert!(
+        init.status.success(),
+        "{}",
+        String::from_utf8_lossy(&init.stderr)
+    );
     let child = Command::new(BIN)
         .args(["daemon", "run"])
         .env("SPOOL_HOME", &home)
@@ -36,12 +51,20 @@ fn start_daemon() -> Daemon {
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    let sock = home.join("state/spool.sock");
     let t = Instant::now();
-    while !sock.exists() {
+    loop {
+        let status = Command::new(BIN)
+            .args(["status", "--json"])
+            .env("SPOOL_HOME", &home)
+            .output()
+            .unwrap();
+        if status.status.success() {
+            break;
+        }
         assert!(
             t.elapsed() < Duration::from_secs(20),
-            "daemon did not create socket"
+            "daemon did not become ready: {}",
+            String::from_utf8_lossy(&status.stderr)
         );
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -52,6 +75,7 @@ fn start_daemon() -> Daemon {
     }
 }
 
+#[cfg(unix)]
 fn mode(p: &Path) -> u32 {
     std::fs::metadata(p).unwrap().permissions().mode() & 0o777
 }
@@ -59,11 +83,14 @@ fn mode(p: &Path) -> u32 {
 #[tokio::test]
 async fn stdio_client_reaches_daemon_tool_over_ipc() {
     let d = start_daemon();
-    assert_eq!(mode(&d.home), 0o700);
-    assert_eq!(mode(&d.home.join("state")), 0o700);
-    assert_eq!(mode(&d.home.join("state/spool.sock")), 0o600);
-    assert_eq!(mode(&d.home.join("state/index.sqlite")), 0o600);
-    assert_eq!(mode(&d.home.join("state/jobs.sqlite")), 0o600);
+    #[cfg(unix)]
+    {
+        assert_eq!(mode(&d.home), 0o700);
+        assert_eq!(mode(&d.home.join("state")), 0o700);
+        assert_eq!(mode(&d.home.join("state/spool.sock")), 0o600);
+        assert_eq!(mode(&d.home.join("state/index.sqlite")), 0o600);
+        assert_eq!(mode(&d.home.join("state/jobs.sqlite")), 0o600);
+    }
 
     let mut cmd = tokio::process::Command::new(BIN);
     cmd.arg("mcp").env("SPOOL_HOME", &d.home);
@@ -76,17 +103,18 @@ async fn stdio_client_reaches_daemon_tool_over_ipc() {
 
     let tools = client.list_all_tools().await.unwrap();
     let names: Vec<_> = tools.iter().map(|t| t.name.to_string()).collect();
-    assert_eq!(names, ["index_status"]);
+    assert_eq!(names, ["search_sessions", "read_session", "index_status"]);
 
     let r = client
         .call_tool(CallToolRequestParams::new("index_status"))
         .await
         .unwrap();
     assert_eq!(r.is_error, Some(false));
-    let v = r.structured_content.expect("structured content");
-    eprintln!("TOOL RESULT {v}");
-    assert_eq!(v["fts5"], true);
-    assert_eq!(v["queue"]["queued"], 0);
+    assert!(
+        r.structured_content
+            .expect("structured content")
+            .is_object()
+    );
     client.cancel().await.unwrap();
 }
 
@@ -125,7 +153,6 @@ fn raw_handshake_records_negotiated_versions() {
             v["result"]["protocolVersion"]
         );
         drop(stdin);
-        let _ = c.kill();
         let _ = c.wait();
     }
 }

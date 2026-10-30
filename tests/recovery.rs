@@ -1,5 +1,5 @@
-//! Milestone 0: a durable Apalis SQLite job survives a SIGKILLed worker and is recovered.
-//! The worker runs in a child process (this test binary re-executed) so a real kill is possible.
+//! Milestone 0: a durable Apalis SQLite job survives a force-killed worker and is recovered.
+//! The worker runs in a child process (this test binary re-executed) so a real process kill is possible.
 
 mod jobs_common;
 
@@ -174,7 +174,7 @@ async fn kill_and_recover(second_name: &str) {
         status == "Running"
     })
     .await;
-    c1.kill().unwrap(); // SIGKILL on unix
+    c1.kill().unwrap(); // force-terminate the worker without graceful cleanup
     c1.wait().unwrap();
     let killed_at = Instant::now();
     let status: String = sqlx::query_scalar("SELECT status FROM Jobs")

@@ -198,19 +198,16 @@ pub fn set_enabled_in_file(config_file: &Path, id: &str, enabled: bool) -> anyho
     write_private(config_file, doc.to_string().as_bytes())
 }
 
-/// Atomic replace keeping mode 0600 (the config may name credential paths).
+/// Atomic replace keeping the private ACL (the config may name credential paths).
 fn write_private(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
     let tmp = path.with_extension("toml.tmp");
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .mode(0o600)
-        .open(&tmp)?;
-    f.write_all(bytes)?;
-    f.sync_all()?;
-    std::fs::rename(&tmp, path)?;
+    let _ = std::fs::remove_file(&tmp);
+    {
+        let mut file = crate::perms::create_private_file(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+    }
+    crate::perms::replace_private(&tmp, path)?;
     Ok(())
 }
