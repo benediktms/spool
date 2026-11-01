@@ -1099,7 +1099,7 @@ async fn purge_requires_the_unreferenced_flag_and_removes_only_unreferenced_vect
 async fn sources_enable_and_disable_edit_config_toml_preserving_comments_and_mirror_to_the_catalog()
 {
     let env = Env::new().await;
-    let dir = env.dir.to_string_lossy().into_owned();
+    let dir = env.dir.to_string_lossy().replace('\\', "/");
     let r = rig_with(env, None).await;
     let original = format!(
         "# Spool configuration -- hand written\nconfig_version = 1\n\n[discovery]\nbootstrap_days = 7 # keep a week\n\n# sources I care about\n[[sources]]\nid = \"omp\"\nkind = \"omp\"\n# flip me with `spool sources disable`\nenabled = true\nroots = [\"{dir}\"]\n\n[[sources]]\nid = \"claude\"\nkind = \"claude\"\nenabled = false\nroots = [\"{dir}/claude\"]\n"
@@ -1127,6 +1127,7 @@ async fn sources_enable_and_disable_edit_config_toml_preserving_comments_and_mir
         0,
         "mirrored to the sources table"
     );
+    #[cfg(unix)]
     assert_eq!(
         std::os::unix::fs::PermissionsExt::mode(
             &std::fs::metadata(&r.paths.config_file)

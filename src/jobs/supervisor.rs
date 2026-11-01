@@ -1086,8 +1086,20 @@ mod tests {
                 _ = killed => None,
             }
         });
-        let watched = watch_worker(worker, &pool, "w", liveness, &status, &slot);
-        tokio::pin!(watched);
+        let watch_pool = pool.clone();
+        let watch_status = status.clone();
+        let watch_slot = slot.clone();
+        let mut watched = tokio::spawn(async move {
+            watch_worker(
+                worker,
+                &watch_pool,
+                "w",
+                liveness,
+                &watch_status,
+                &watch_slot,
+            )
+            .await
+        });
         sqlx::query("UPDATE Workers SET last_seen = strftime('%s', 'now') - 100 WHERE id = 'w'")
             .execute(&pool)
             .await
@@ -1141,6 +1153,7 @@ mod tests {
             .unwrap();
         let (result, stale) = tokio::time::timeout(Duration::from_secs(2), watched)
             .await
+            .unwrap()
             .unwrap();
         assert!(stale);
         assert!(result.unwrap().is_none());

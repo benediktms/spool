@@ -36,7 +36,9 @@ fn schema_files_match_the_rust_types() {
             std::fs::create_dir_all(&dir).unwrap();
             let tmp = path.with_extension("tmp");
             std::fs::write(&tmp, serde_json::to_string_pretty(&schema).unwrap() + "\n").unwrap();
-            std::fs::rename(&tmp, &path).unwrap(); // atomic: sibling tests may be reading
+            #[cfg(windows)]
+            std::fs::remove_file(&path).unwrap();
+            std::fs::rename(&tmp, &path).unwrap(); // replace only after writing the complete schema
         }
         let on_disk: Value = serde_json::from_slice(
             &std::fs::read(&path)

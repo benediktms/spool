@@ -25,12 +25,17 @@ impl Drop for Home {
 impl Home {
     fn kill_daemon(&mut self) {
         if let Some(mut d) = self.daemon.take() {
+            #[cfg(windows)]
+            {
+                let paths = spool::config::Paths::from_root(self.home.clone()).unwrap();
+                let _ = spool::ipc::transport::request_shutdown(&paths);
+            }
+            #[cfg(unix)]
             let _ = d.kill();
             let _ = d.wait();
         }
     }
     fn start_daemon(&mut self) {
-        let _ = std::fs::remove_file(self.home.join("state/spool.sock"));
         let d = Command::new(BIN)
             .args(["daemon", "run"])
             .env("SPOOL_HOME", &self.home)
@@ -41,14 +46,8 @@ impl Home {
         self.daemon = Some(d);
         let t = Instant::now();
         loop {
-            if self.home.join("state/spool.sock").exists()
-                && std::os::unix::net::UnixStream::connect(self.home.join("state/spool.sock"))
-                    .is_ok()
-            {
-                // control calls answer DAEMON_NOT_READY until the job system is up: wait for it too
-                if cli(&self.home, &["status", "--json"]).0 {
-                    return;
-                }
+            if cli(&self.home, &["status", "--json"]).0 {
+                return;
             }
             assert!(
                 t.elapsed() < Duration::from_secs(30),
@@ -83,10 +82,7 @@ fn big_session(text: &str) -> String {
 }
 
 fn setup(with_big: bool) -> (Home, String) {
-    let tmp = tempfile::Builder::new()
-        .prefix("sp")
-        .tempdir_in("/tmp")
-        .unwrap();
+    let tmp = tempfile::Builder::new().prefix("sp").tempdir().unwrap();
     let home = tmp.path().join("h");
     let src = tmp.path().join("src");
     std::fs::create_dir_all(&src).unwrap();
@@ -109,7 +105,10 @@ fn setup(with_big: bool) -> (Home, String) {
     let cfg = std::fs::read_to_string(home.join("config.toml")).unwrap();
     std::fs::write(
         home.join("config.toml"),
-        cfg.replace("~/.omp/agent/sessions", src.to_str().unwrap()),
+        cfg.replace(
+            "~/.omp/agent/sessions",
+            &src.to_string_lossy().replace('\\', "/"),
+        ),
     )
     .unwrap();
     let mut h = Home {

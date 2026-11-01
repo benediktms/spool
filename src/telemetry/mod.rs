@@ -4,17 +4,16 @@
 
 use crate::config::{LoggingConfig, Paths};
 use parking_lot::Mutex;
-use std::fs::{File, OpenOptions};
-use std::io::{self, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::fs::File;
+use std::io::{self, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing_subscriber::{EnvFilter, fmt::MakeWriter};
 
 pub const LOG_FILE: &str = "spool.log";
 
-/// `~/Library/Logs/Spool` on macOS, `<state>/logs` elsewhere. An explicit `SPOOL_HOME`
-/// (isolated runs, tests) keeps logs inside that home.
+/// `~/Library/Logs/Spool` on macOS, `<home>/logs` on Windows, `<state>/logs` on Linux.
+/// An explicit `SPOOL_HOME` keeps logs inside that home on every platform.
 pub fn log_dir(paths: &Paths) -> PathBuf {
     if std::env::var_os("SPOOL_HOME").is_none()
         && cfg!(target_os = "macos")
@@ -22,7 +21,7 @@ pub fn log_dir(paths: &Paths) -> PathBuf {
     {
         return PathBuf::from(h).join("Library/Logs/Spool");
     }
-    if std::env::var_os("SPOOL_HOME").is_some() {
+    if cfg!(windows) || std::env::var_os("SPOOL_HOME").is_some() {
         return paths.root.join("logs");
     }
     paths.state_dir.join("logs")
@@ -37,23 +36,17 @@ pub struct RotatingFile {
     file: File,
     size: u64,
 }
-
 fn open_log(path: &Path) -> io::Result<File> {
-    OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
-        .open(path)
+    let mut file = crate::perms::open_private_file(path)?;
+    file.seek(std::io::SeekFrom::End(0))?;
+    Ok(file)
 }
 
 impl RotatingFile {
     pub fn open(dir: &Path, name: &str, max_bytes: u64, retained: usize) -> io::Result<Self> {
-        std::fs::create_dir_all(dir)?;
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        crate::perms::ensure_private_dir(dir)?;
         let path = dir.join(name);
         let file = open_log(&path)?;
-        // A pre-existing file keeps its mode only if it is already private; tighten otherwise.
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
         let size = file.metadata()?.len();
         Ok(Self {
             dir: dir.to_path_buf(),
@@ -74,6 +67,10 @@ impl RotatingFile {
         if self.retained == 0 {
             std::fs::remove_file(&current)?;
         } else {
+            let oldest = self.numbered(self.retained);
+            if oldest.exists() {
+                std::fs::remove_file(oldest)?;
+            }
             for i in (1..self.retained).rev() {
                 if self.numbered(i).exists() {
                     std::fs::rename(self.numbered(i), self.numbered(i + 1))?;

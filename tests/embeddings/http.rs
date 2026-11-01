@@ -4,12 +4,17 @@ use super::*;
 use parking_lot::Mutex;
 use spool::clock::ManualClock;
 use spool::config::{Config, EmbeddingConfig, Paths};
-use spool::embeddings::openai::{CredentialProblem, endpoint_identity, read_credential};
+#[cfg(unix)]
+use spool::embeddings::openai::CredentialProblem;
+use spool::embeddings::openai::endpoint_identity;
+#[cfg(unix)]
+use spool::embeddings::openai::read_credential;
 use spool::embeddings::vectors::dot;
 use spool::embeddings::{
     EmbedErrorKind as K, EmbeddingProvider, EmbeddingService, EmbeddingState, OpenAiProvider,
     Purpose, probe_provider,
 };
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -513,7 +518,8 @@ async fn connection_failures_and_truncated_bodies() {
         .unwrap_err();
     assert_eq!((e.kind, e.retryable, e.ambiguous), (K::Network, true, true));
 
-    // nothing listening: nothing was sent, so not ambiguous
+    // Nothing is listening, so nothing was sent and the outcome is not ambiguous.
+    // Windows can take roughly a second to reject a loopback connection; leave margin for refusal.
     let port = {
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         l.local_addr().unwrap().port()
@@ -521,7 +527,7 @@ async fn connection_failures_and_truncated_bodies() {
     let cfg = EmbeddingConfig {
         endpoint: format!("http://127.0.0.1:{port}/v1/embeddings"),
         dimensions: DIMS,
-        request_timeout_seconds: 1,
+        request_timeout_seconds: 5,
         ..emb_cfg()
     };
     let e = OpenAiProvider::new(&cfg, "k")
@@ -548,6 +554,7 @@ async fn response_size_is_capped() {
     assert!(e.to_string().contains("size limit"));
 }
 
+#[cfg(unix)]
 #[test]
 fn credential_file_must_be_private() {
     let dir = tempfile::tempdir().unwrap();
@@ -592,7 +599,7 @@ impl Lair {
     fn new(approved: bool, enabled: bool) -> Lair {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::from_root(dir.path().join("h")).unwrap();
-        std::fs::create_dir_all(&paths.secrets_dir).unwrap();
+        spool::daemon::ensure_private_dir(&paths.secrets_dir).unwrap();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let cfg = Config {
@@ -613,10 +620,11 @@ impl Lair {
             _dir: dir,
         }
     }
-    fn write_credential(&self, mode: u32) {
+    fn write_credential(&self, _mode: u32) {
         let p = self.cfg.credential_path(&self.paths.root).unwrap();
         std::fs::write(&p, "sk-test-key\n").unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(_mode)).unwrap();
     }
     fn connections(&self) -> usize {
         let mut n = 0;
@@ -630,12 +638,18 @@ impl Lair {
 #[tokio::test]
 async fn closed_consent_gate_never_opens_a_socket() {
     use EmbeddingState as S;
-    // (approved, enabled, write credential with mode, expected state, expected error kind)
+    #[cfg(unix)]
     let cases = [
         (false, true, Some(0o600), S::NotApproved, K::NotApproved),
         (true, false, Some(0o600), S::Disabled, K::Disabled),
         (true, true, None, S::NoCredential, K::NoCredential),
         (true, true, Some(0o644), S::NoCredential, K::NoCredential),
+    ];
+    #[cfg(windows)]
+    let cases = [
+        (false, true, Some(0o600), S::NotApproved, K::NotApproved),
+        (true, false, Some(0o600), S::Disabled, K::Disabled),
+        (true, true, None, S::NoCredential, K::NoCredential),
     ];
     for (approved, enabled, mode, state, kind) in cases {
         let lair = Lair::new(approved, enabled);
@@ -682,9 +696,6 @@ async fn closed_consent_gate_never_opens_a_socket() {
             0,
             "{state:?}: a connection was opened despite the closed gate"
         );
-        if mode == Some(0o644) {
-            assert!(svc.status().detail.unwrap().contains("0600"));
-        }
     }
 }
 

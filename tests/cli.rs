@@ -13,6 +13,7 @@ use spool::cli::timeparse::{format_rfc3339, parse_when};
 use spool::clock::{Tz, UTC};
 use spool::config::Paths;
 use spool::ipc::{AppError, Request, server::Handler};
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -23,16 +24,13 @@ const BIN: &str = env!("CARGO_BIN_EXE_spool");
 /// 2026-10-12T12:00:00Z
 const NOW: i64 = 1_791_806_400_000;
 
+#[cfg(unix)]
 fn mode(p: &Path) -> u32 {
     std::fs::metadata(p).unwrap().permissions().mode() & 0o777
 }
 
-/// Short path under /tmp keeps the socket under the sockaddr_un limit.
 fn temp_home() -> (tempfile::TempDir, PathBuf) {
-    let t = tempfile::Builder::new()
-        .prefix("sp")
-        .tempdir_in("/tmp")
-        .unwrap();
+    let t = tempfile::Builder::new().prefix("sp").tempdir().unwrap();
     let h = t.path().join("h");
     (t, h)
 }
@@ -517,21 +515,19 @@ fn index_modes_are_explicit_and_exclusive() {
 
 // ---------------------------------------------------------------- mcp config
 
+#[cfg(unix)]
+const SAMPLE_BIN: &str = "/opt/spool/bin/spool";
+#[cfg(windows)]
+const SAMPLE_BIN: &str = "C:/opt/spool/bin/spool.exe";
+
 #[test]
 fn mcp_config_claude_and_omp_use_the_verified_json_shape() {
-    let want = json!({"mcpServers":{"spool":{"type":"stdio","command":"/opt/spool/bin/spool","args":["mcp"]}}});
+    let want = json!({"mcpServers":{"spool":{"type":"stdio","command":SAMPLE_BIN,"args":["mcp"]}}});
     for client in ["claude", "omp"] {
         let (_t, home) = temp_home();
         let o = run(
             &home,
-            &[
-                "mcp",
-                "config",
-                "--client",
-                client,
-                "--bin",
-                "/opt/spool/bin/spool",
-            ],
+            &["mcp", "config", "--client", client, "--bin", SAMPLE_BIN],
         );
         assert!(o.status.success(), "{}", err(&o));
         assert_eq!(serde_json::from_str::<Value>(&out(&o)).unwrap(), want);
@@ -543,20 +539,13 @@ fn mcp_config_codex_is_toml_and_carries_no_secrets_or_databases() {
     let (_t, home) = temp_home();
     let o = run(
         &home,
-        &[
-            "mcp",
-            "config",
-            "--client",
-            "codex",
-            "--bin",
-            "/opt/spool/bin/spool",
-        ],
+        &["mcp", "config", "--client", "codex", "--bin", SAMPLE_BIN],
     );
     assert!(o.status.success(), "{}", err(&o));
     let text = out(&o);
     let v: toml::Table = toml::from_str(&text).unwrap();
     let s = &v["mcp_servers"]["spool"];
-    assert_eq!(s["command"].as_str(), Some("/opt/spool/bin/spool"));
+    assert_eq!(s["command"].as_str(), Some(SAMPLE_BIN));
     assert_eq!(
         s["args"].as_array().unwrap(),
         &vec![toml::Value::String("mcp".into())]
@@ -565,14 +554,7 @@ fn mcp_config_codex_is_toml_and_carries_no_secrets_or_databases() {
     for client in ["claude", "codex", "omp"] {
         let o = run(
             &home,
-            &[
-                "mcp",
-                "config",
-                "--client",
-                client,
-                "--bin",
-                "/opt/spool/bin/spool",
-            ],
+            &["mcp", "config", "--client", client, "--bin", SAMPLE_BIN],
         );
         let t = out(&o).to_lowercase();
         for forbidden in ["key", "token", "sqlite", "credential", "spool_home", "env"] {
@@ -628,11 +610,14 @@ fn init_creates_private_layout_and_keeps_consent_off() {
     let paths = Paths::from_root(home.clone()).unwrap();
     let r = run_init(&paths, &Default::default(), None).unwrap();
     assert!(r.config_written && r.key_created && !r.hosted_processing_approved);
-    assert_eq!(mode(&home), 0o700);
-    assert_eq!(mode(&paths.state_dir), 0o700);
-    assert_eq!(mode(&paths.secrets_dir), 0o700);
-    assert_eq!(mode(&paths.signing_key), 0o600);
-    assert_eq!(mode(&paths.config_file), 0o600);
+    #[cfg(unix)]
+    {
+        assert_eq!(mode(&home), 0o700);
+        assert_eq!(mode(&paths.state_dir), 0o700);
+        assert_eq!(mode(&paths.secrets_dir), 0o700);
+        assert_eq!(mode(&paths.signing_key), 0o600);
+        assert_eq!(mode(&paths.config_file), 0o600);
+    }
     spool::transcript::handle::HandleKey::load(&paths.signing_key).unwrap();
     let cfg = load(&home);
     assert!(!cfg.embedding.hosted_processing_approved);
@@ -760,9 +745,65 @@ fn init_binary_without_a_tty_keeps_safe_defaults_and_says_so() {
     assert!(o.status.success(), "{}", err(&o));
     let t = out(&o);
     assert!(t.contains("safe defaults"), "{t}");
+
     assert!(t.contains("not approved"), "{t}");
     assert!(t.contains("nothing has been read or indexed"), "{t}");
+    #[cfg(unix)]
     assert_eq!(mode(&home.join("secrets/handle-signing.key")), 0o600);
+}
+#[cfg(windows)]
+#[test]
+fn init_without_home_uses_local_app_data_and_resolves_source_roots_from_user_profile() {
+    let t = tempfile::tempdir().unwrap();
+    let local = t.path().join("local");
+    let profile = t.path().join("profile");
+    std::fs::create_dir_all(&profile).unwrap();
+
+    let init = Command::new(BIN)
+        .args(["init", "--hosted-processing", "no"])
+        .env_remove("SPOOL_HOME")
+        .env_remove("HOME")
+        .env("LOCALAPPDATA", &local)
+        .env("USERPROFILE", &profile)
+        .output()
+        .unwrap();
+    assert!(init.status.success(), "{}", err(&init));
+    let home = local.join("Spool");
+    assert!(home.join("config.toml").is_file());
+
+    let shown = Command::new(BIN)
+        .args(["config", "show"])
+        .env_remove("SPOOL_HOME")
+        .env_remove("HOME")
+        .env("LOCALAPPDATA", &local)
+        .env("USERPROFILE", &profile)
+        .output()
+        .unwrap();
+    assert!(shown.status.success(), "{}", err(&shown));
+    let config: toml::Table = toml::from_str(&out(&shown)).unwrap();
+    for source in config["sources"].as_array().unwrap() {
+        for root in source["roots"].as_array().unwrap() {
+            assert!(Path::new(root.as_str().unwrap()).starts_with(&profile));
+        }
+    }
+
+    // Task Scheduler captures SPOOL_HOME even for a default install.
+    let logs = home.join("logs");
+    spool::daemon::ensure_private_dir(&logs).unwrap();
+    std::fs::write(logs.join("spool.log"), "scheduled-daemon-log\n").unwrap();
+    let captured = run(&home, &["logs"]);
+    assert!(captured.status.success(), "{}", err(&captured));
+    assert_eq!(out(&captured), "scheduled-daemon-log\n");
+    let default_logs = Command::new(BIN)
+        .arg("logs")
+        .env_remove("SPOOL_HOME")
+        .env_remove("HOME")
+        .env("LOCALAPPDATA", &local)
+        .env("USERPROFILE", &profile)
+        .output()
+        .unwrap();
+    assert!(default_logs.status.success(), "{}", err(&default_logs));
+    assert_eq!(out(&default_logs), "scheduled-daemon-log\n");
 }
 
 // ---------------------------------------------------------------- config show
@@ -869,7 +910,7 @@ type Seen = Arc<Mutex<Vec<(String, Value)>>>;
 
 fn fake_daemon(home: &Path) -> (Seen, tokio::sync::watch::Sender<bool>) {
     std::fs::create_dir_all(home.join("state")).unwrap();
-    let listener = tokio::net::UnixListener::bind(home.join("state/spool.sock")).unwrap();
+    let listener = spool::ipc::transport::bind(&home.join("state/spool.sock")).unwrap();
     let seen: Seen = Default::default();
     let polls = Arc::new(AtomicUsize::new(0));
     let seen2 = seen.clone();
@@ -1163,21 +1204,25 @@ fn doctor_reports_missing_init_then_passes_and_catches_loose_modes() {
             .contains("not probed")
     );
 
-    // Loose permissions on the key and on the state directory are failures.
-    std::fs::set_permissions(
-        home.join("secrets/handle-signing.key"),
-        std::fs::Permissions::from_mode(0o644),
-    )
-    .unwrap();
-    std::fs::set_permissions(home.join("state"), std::fs::Permissions::from_mode(0o755)).unwrap();
-    let o = run(&home, &["doctor"]);
-    assert_eq!(o.status.code(), Some(1));
-    let t = out(&o);
-    assert!(
-        t.contains("[FAIL] permissions") && t.contains("handle-signing.key"),
-        "{t}"
-    );
-    assert!(t.contains("state"), "{t}");
+    #[cfg(unix)]
+    {
+        // Loose permissions on the key and on the state directory are failures.
+        std::fs::set_permissions(
+            home.join("secrets/handle-signing.key"),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        std::fs::set_permissions(home.join("state"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        let o = run(&home, &["doctor"]);
+        assert_eq!(o.status.code(), Some(1));
+        let t = out(&o);
+        assert!(
+            t.contains("[FAIL] permissions") && t.contains("handle-signing.key"),
+            "{t}"
+        );
+        assert!(t.contains("state"), "{t}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1232,15 +1277,18 @@ fn log_files_rotate_by_size_and_stay_private() {
     use std::io::Write;
     let t = tempfile::tempdir().unwrap();
     let dir = t.path().join("logs");
+    spool::daemon::ensure_private_dir(&dir).unwrap();
     let mut f = RotatingFile::open(&dir, "t.log", 100, 2).unwrap();
     for i in 0..50 {
         f.write_all(format!("line {i:013}\n").as_bytes()).unwrap(); // 19 bytes
     }
+    #[cfg(unix)]
     assert_eq!(mode(&dir), 0o700);
     for n in ["t.log", "t.log.1", "t.log.2"] {
         let p = dir.join(n);
         assert!(p.exists(), "{n}");
         assert!(std::fs::metadata(&p).unwrap().len() <= 100, "{n} too big");
+        #[cfg(unix)]
         assert_eq!(mode(&p), 0o600);
     }
     assert!(!dir.join("t.log.3").exists());
@@ -1254,8 +1302,10 @@ fn log_files_rotate_by_size_and_stay_private() {
 fn tracing_events_land_in_the_rotating_file() {
     use spool::telemetry::{RotatingFile, SharedLog};
     let t = tempfile::tempdir().unwrap();
+    let dir = t.path().join("logs");
+    spool::daemon::ensure_private_dir(&dir).unwrap();
     let w = SharedLog::new(
-        RotatingFile::open(t.path(), "spool.log", 1 << 20, 1).unwrap(),
+        RotatingFile::open(&dir, "spool.log", 1 << 20, 1).unwrap(),
         false,
     );
     let sub = tracing_subscriber::fmt()
@@ -1265,7 +1315,7 @@ fn tracing_events_land_in_the_rotating_file() {
     tracing::subscriber::with_default(sub, || {
         tracing::info!(operation = "op_1", sessions = 3, "discovery finished")
     });
-    let text = std::fs::read_to_string(t.path().join("spool.log")).unwrap();
+    let text = std::fs::read_to_string(dir.join("spool.log")).unwrap();
     assert!(
         text.contains("discovery finished")
             && text.contains("operation=\"op_1\"")
@@ -1295,7 +1345,8 @@ fn logs_command_prints_the_tail() {
 
 #[test]
 fn config_example_is_valid_and_equals_the_built_in_defaults() {
-    let root = Path::new("/tmp/spool-example-root");
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
     let example =
         spool::config::Config::parse(include_str!("../config.example.toml"), root).unwrap();
     let defaults = spool::config::Config::parse(
@@ -1341,7 +1392,7 @@ fn init_enable_source_enables_only_the_named_source() {
 async fn retryable_daemon_not_ready_is_retried_then_succeeds() {
     let (_t, home) = temp_home();
     std::fs::create_dir_all(home.join("state")).unwrap();
-    let listener = tokio::net::UnixListener::bind(home.join("state/spool.sock")).unwrap();
+    let listener = spool::ipc::transport::bind(&home.join("state/spool.sock")).unwrap();
     let n = Arc::new(AtomicUsize::new(0));
     let n2 = n.clone();
     let handler: Handler = Arc::new(

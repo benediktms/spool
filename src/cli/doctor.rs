@@ -4,7 +4,9 @@
 //! Provider connectivity is tested only with `--probe-provider`, using a fixed harmless string.
 
 use super::remote::Remote;
-use crate::config::{Config, Paths, mode_of};
+#[cfg(unix)]
+use crate::config::mode_of;
+use crate::config::{Config, Paths};
 use crate::service::{Definition, ServiceManager};
 use crate::transcript::handle::HandleKey;
 use serde::Serialize;
@@ -119,7 +121,7 @@ pub async fn run(
         }
     };
 
-    // Permissions: directories 0700; socket, key, credential, databases and WAL/SHM 0600.
+    // Verify the platform's private-state access boundary.
     let cred = cfg
         .as_ref()
         .and_then(|c| c.credential_path(&paths.root).ok());
@@ -128,7 +130,11 @@ pub async fn run(
     if issues.is_empty() {
         a.ok(
             "permissions",
-            "directories 0700; existing socket, key, credential, database and WAL files 0600",
+            if cfg!(windows) {
+                "existing state paths have private current-user/SYSTEM ACLs"
+            } else {
+                "directories 0700; existing socket, key, credential, database and WAL files 0600"
+            },
         );
     }
     for i in &issues {
@@ -151,14 +157,17 @@ pub async fn run(
     }
 
     match HandleKey::load(&paths.signing_key) {
-        Ok(k) => a.ok(
-            "signing_key",
-            format!(
+        Ok(k) => {
+            #[cfg(unix)]
+            let detail = format!(
                 "present, mode {:o}, epoch {}",
                 mode_of(&paths.signing_key).unwrap_or(0),
                 k.epoch()
-            ),
-        ),
+            );
+            #[cfg(windows)]
+            let detail = format!("present, private ACL, epoch {}", k.epoch());
+            a.ok("signing_key", detail);
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             a.fail("signing_key", "missing: run `spool init`")
         }
@@ -332,10 +341,17 @@ async fn embedding_checks(a: &mut Acc, cfg: &Config, cred: Option<&std::path::Pa
 }
 
 async fn daemon_check(a: &mut Acc, paths: &Paths, cfg: Option<&Config>) {
-    let remote = Remote::new(
-        paths.socket.clone(),
-        cfg.map(|c| c.ipc.max_request_bytes).unwrap_or(1 << 20),
-    );
+    let (socket, max_request) = match cfg {
+        Some(cfg) => match cfg.socket_path(&paths.root) {
+            Ok(socket) => (socket, cfg.ipc.max_request_bytes),
+            Err(e) => {
+                a.fail("daemon", format!("invalid IPC socket path: {e:#}"));
+                return;
+            }
+        },
+        None => (paths.socket.clone(), 1 << 20),
+    };
+    let remote = Remote::new(socket, max_request);
     let res =
         tokio::time::timeout(Duration::from_secs(5), remote.control("status", json!({}))).await;
     match res {
