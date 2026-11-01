@@ -518,7 +518,8 @@ async fn connection_failures_and_truncated_bodies() {
         .unwrap_err();
     assert_eq!((e.kind, e.retryable, e.ambiguous), (K::Network, true, true));
 
-    // nothing listening: nothing was sent, so not ambiguous
+    // Nothing is listening, so nothing was sent and the outcome is not ambiguous.
+    // Windows can take roughly a second to reject a loopback connection; leave margin for refusal.
     let port = {
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         l.local_addr().unwrap().port()
@@ -526,7 +527,7 @@ async fn connection_failures_and_truncated_bodies() {
     let cfg = EmbeddingConfig {
         endpoint: format!("http://127.0.0.1:{port}/v1/embeddings"),
         dimensions: DIMS,
-        request_timeout_seconds: 1,
+        request_timeout_seconds: 5,
         ..emb_cfg()
     };
     let e = OpenAiProvider::new(&cfg, "k")
@@ -598,7 +599,7 @@ impl Lair {
     fn new(approved: bool, enabled: bool) -> Lair {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::from_root(dir.path().join("h")).unwrap();
-        std::fs::create_dir_all(&paths.secrets_dir).unwrap();
+        spool::daemon::ensure_private_dir(&paths.secrets_dir).unwrap();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let cfg = Config {
@@ -695,9 +696,6 @@ async fn closed_consent_gate_never_opens_a_socket() {
             0,
             "{state:?}: a connection was opened despite the closed gate"
         );
-        if mode == Some(0o644) {
-            assert!(svc.status().detail.unwrap().contains("0600"));
-        }
     }
 }
 

@@ -69,7 +69,7 @@ pub(crate) fn set_private(path: &Path, mode: u32) -> io::Result<()> {
                 "not current-user owned",
             ));
         }
-        return std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
     }
     #[cfg(windows)]
     {
@@ -113,7 +113,7 @@ pub(crate) fn is_current_user(file: &File) -> io::Result<bool> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        return Ok(file.metadata()?.uid() == rustix::process::geteuid().as_raw());
+        Ok(file.metadata()?.uid() == rustix::process::geteuid().as_raw())
     }
     #[cfg(windows)]
     {
@@ -132,12 +132,13 @@ pub(crate) fn open_private_file(path: &Path) -> io::Result<File> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        return std::fs::OpenOptions::new()
+        std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .mode(0o600)
-            .open(path);
+            .open(path)
     }
     #[cfg(windows)]
     {
@@ -157,12 +158,12 @@ pub(crate) fn create_private_file(path: &Path) -> io::Result<File> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        return std::fs::OpenOptions::new()
+        std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create_new(true)
             .mode(0o600)
-            .open(path);
+            .open(path)
     }
     #[cfg(windows)]
     {

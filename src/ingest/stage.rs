@@ -559,7 +559,7 @@ fn read_exact_at(file: &std::fs::File, buf: &mut [u8], offset: u64) -> std::io::
     #[cfg(unix)]
     {
         use std::os::unix::fs::FileExt;
-        return file.read_exact_at(buf, offset);
+        file.read_exact_at(buf, offset)
     }
     #[cfg(windows)]
     {

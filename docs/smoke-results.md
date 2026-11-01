@@ -206,3 +206,37 @@ uncommitted Windows changes without conflicts.
   `ready`, no pending vectors, and healthy workers.
 
 The earlier review findings remain unchanged; this was not a full-suite or macOS/Linux runtime run.
+
+## Draft-PR rebase verification (2026-11-01)
+
+Rebased `windows-support` onto `b72f83b` without conflicts, incorporating stale-worker restart
+and inert-session pending-coverage fixes.
+
+* Formatting and all-target/all-feature Clippy with warnings denied passed on Windows.
+* All 127 tests across `cli`, `control`, `daemon_socket`, `e2e`, `embeddings`, `mcp_roundtrip`,
+  `search`, `service`, and `source` passed. The four supervisor unit tests also passed, including
+  both new stale-worker regressions and the new pending-coverage search regression.
+* Verification fixed Unix-only Clippy errors, restored the macOS service-test binary binding,
+  and made embedding credential fixtures inherit a protected Windows secrets-directory ACL.
+  The obsolete Unix credential-diagnostic wording assertion was removed. The refused-connection
+  fixture now allows five seconds for the OS refusal rather than racing a one-second request
+  timeout; its exact error classification and ambiguity assertions are unchanged.
+* The stale-worker regression initially deadlocked: timing out a borrowed watcher future could
+  leave its SQL query suspended while holding the only pool connection. Running the watcher
+  continuously in a joined task preserves the starvation, healthy-heartbeat, and stale-worker
+  checks without changing production supervision.
+* Rebuilt release binaries passed an isolated native-helper smoke with synthetic OMP data and
+  hosted processing disabled. The helper used its explicit absolute home despite an incorrect
+  parent `SPOOL_HOME`. Indexing completed with one indexed session and zero pending sessions;
+  literal `foo::bar_baz` search returned one result, and its match-reference read contained the
+  expected conversation and port 8787 without tool payloads.
+* Both smoke processes reported `MainWindowHandle = 0`. Protected-event shutdown returned zero
+  from the helper and left the endpoint unreachable. The smoke wrapper did not preserve the
+  native exit code of that final unreachable-status command. All temporary smoke files were
+  removed; the installed service, configuration, credentials, and binaries were untouched.
+
+No full-suite or fresh macOS/Linux runtime pass is claimed. Upstream `main` at `b72f83b` itself
+fails the unchanged chunking regression's 20-second wall-clock limit in CI
+([run 41060080928](https://github.com/benediktms/spool/actions/runs/41060080928)); this rebase does
+not relax that guard or change the chunking algorithm. Other outstanding review findings remain
+listed in draft PR #1.

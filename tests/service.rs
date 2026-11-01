@@ -19,6 +19,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(any(target_os = "macos", windows))]
 use std::time::{Duration, Instant};
+#[cfg(target_os = "macos")]
+const BIN: &str = env!("CARGO_BIN_EXE_spool");
 
 /// Records every command; emulates "loaded" state for `launchctl print`.
 #[derive(Default)]
