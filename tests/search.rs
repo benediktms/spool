@@ -9,7 +9,7 @@ use spool::embeddings::provider::Purpose;
 use spool::mcp::budget::tool_result_bytes;
 use spool::search::{SearchService, format_rfc3339, parse_rfc3339_utc};
 use spool::transcript::lease::LeaseState;
-use spool::transcript::refs::{BranchRef, MatchRef, short_digest};
+use spool::transcript::refs::{BranchRef, short_digest};
 use std::time::Duration;
 
 fn matches_of<'a>(v: &'a Value, sid: &str) -> &'a Vec<Value> {
@@ -112,7 +112,7 @@ async fn punctuation_distinct_literal_matches() {
     let r = env.ok(lit("foo.bar()")).await;
     let m = &matches_of(&r, "l1")[0];
     assert_eq!(m["matched_by"], json!(["literal"]));
-    let mr = MatchRef::decode(&env.keys.current(), m["match_ref"].as_str().unwrap()).unwrap();
+    let (_, mr) = env.decode_match(m["match_ref"].as_str().unwrap()).await;
     assert_eq!(
         (
             mr.spans[0].r.as_str(),
@@ -605,17 +605,11 @@ async fn duplicate_spans_are_merged_and_context_not_duplicated() {
         3,
         "adjacent chunks merge, the cap is 3 distinct spans"
     );
-    let mut shapes: Vec<Vec<String>> = ms
-        .iter()
-        .map(|m| {
-            MatchRef::decode(&env.keys.current(), m["match_ref"].as_str().unwrap())
-                .unwrap()
-                .spans
-                .into_iter()
-                .map(|s| s.r)
-                .collect()
-        })
-        .collect();
+    let mut shapes: Vec<Vec<String>> = Vec::new();
+    for m in ms {
+        let (_, mr) = env.decode_match(m["match_ref"].as_str().unwrap()).await;
+        shapes.push(mr.spans.into_iter().map(|s| s.r).collect());
+    }
     shapes.sort();
     assert!(
         shapes.iter().any(|s| s == &["m0", "m1"]),
@@ -990,7 +984,7 @@ async fn output_is_bounded_including_text_copy() {
             assert!(m["excerpt"].as_str().unwrap().len() <= 1200);
             assert_eq!(m["truncated"], true);
             // refs of the kept matches stay valid
-            MatchRef::decode(&env.keys.current(), m["match_ref"].as_str().unwrap()).unwrap();
+            env.decode_match(m["match_ref"].as_str().unwrap()).await;
         }
     }
     // Default budget: 10 sessions x 3 matches of long excerpts still fit 64 KiB.
@@ -1228,19 +1222,20 @@ async fn match_refs_round_trip_with_one_lease() {
     );
     assert!(!r["coverage"]["scope"].as_str().unwrap().is_empty());
 
-    let key = env.keys.current();
     let mut lease_ids = std::collections::BTreeSet::new();
     let mut manifests = std::collections::BTreeSet::new();
     for s in r["results"].as_array().unwrap() {
         for m in s["matches"].as_array().unwrap() {
-            let mr = MatchRef::decode(&key, m["match_ref"].as_str().unwrap()).unwrap();
-            assert_eq!(mr.anchor.session, s["session_id"]);
+            assert!(m["match_ref"].as_str().unwrap().len() < 150);
+            let (h, mr) = env.decode_match(m["match_ref"].as_str().unwrap()).await;
+            let (session, snapshot) = env.manifest_target(&mr.manifest).await;
+            assert_eq!(session, s["session_id"]);
             assert_eq!(
-                mr.anchor.snapshot,
+                snapshot,
                 format!("sn_{}", s["session_id"].as_str().unwrap())
             );
-            lease_ids.insert(mr.anchor.lease.clone());
-            manifests.insert(mr.anchor.manifest.clone());
+            lease_ids.insert(h.lease.clone());
+            manifests.insert(mr.manifest.clone());
             let expect_len = if s["session_id"] == "s1" {
                 "alpha omega".len()
             } else {
@@ -1261,16 +1256,11 @@ async fn match_refs_round_trip_with_one_lease() {
                 b"omega again"
             };
             assert_eq!(mr.content, frames(&[text]));
-            assert!(
-                env.leases
-                    .covers(&mr.anchor.lease, &mr.anchor.manifest)
-                    .await
-                    .unwrap()
-            );
+            assert!(env.leases.covers(&h.lease, &mr.manifest).await.unwrap());
             let want_exp = T0 + env.leases.ttl_ms();
             assert_eq!(m["match_ref_expires_at"], format_rfc3339(want_exp));
             assert_eq!(
-                env.leases.state(&mr.anchor.lease).await.unwrap(),
+                env.leases.state(&h.lease).await.unwrap(),
                 LeaseState::Live {
                     expires_at_ms: want_exp
                 }
@@ -1288,7 +1278,7 @@ async fn match_refs_round_trip_with_one_lease() {
         .as_str()
         .unwrap()
         .to_string();
-    assert!(MatchRef::decode(&key, &tok).is_ok());
+    assert!(!env.decode_match(&tok).await.1.spans.is_empty());
 }
 
 #[tokio::test]
@@ -1388,7 +1378,7 @@ async fn branch_ref_is_issued_only_when_needed() {
     )
     .unwrap();
     assert_eq!(br.leaf, "m2a");
-    assert_eq!(br.anchor.snapshot, "sn_fork");
+    assert_eq!(env.manifest_target(&br.anchor.manifest).await.1, "sn_fork");
     assert!(matches_of(&r, "s_lin")[0].get("branch_ref").is_none());
     // Before the fork the match belongs to two branches: omitted, the reader answers BRANCH_REQUIRED.
     let r = env

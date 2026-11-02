@@ -69,6 +69,36 @@ impl Default for Seed<'_> {
 }
 
 impl Env {
+    pub async fn decode_match(
+        &self,
+        token: &str,
+    ) -> (
+        spool::transcript::refs::RefHandle,
+        spool::transcript::refs::MatchRef,
+    ) {
+        let h = spool::transcript::refs::RefHandle::decode(
+            &self.keys.current(),
+            spool::transcript::handle::HandleKind::Match,
+            token,
+        )
+        .expect("match handle decodes");
+        let payload = self
+            .leases
+            .get_ref(&h.lease, h.ref_id, "match")
+            .await
+            .expect("match payload is stored");
+        let m = serde_json::from_slice(&payload).expect("match payload decodes");
+        (h, m)
+    }
+
+    pub async fn manifest_target(&self, manifest: &str) -> (String, String) {
+        sqlx::query_as("SELECT session_id, snapshot_id FROM read_manifests WHERE id = ?")
+            .bind(manifest)
+            .fetch_one(&self.index.reader)
+            .await
+            .unwrap()
+    }
+
     pub async fn new() -> Self {
         Self::with(|_| {}).await
     }

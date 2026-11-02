@@ -15,9 +15,10 @@ use crate::embeddings::{EmbedError, EmbedErrorKind, EmbeddingService};
 use crate::ipc::AppError;
 use crate::mcp::budget::tool_result_bytes;
 use crate::storage::index::Index;
+use crate::transcript::handle::HandleKind;
 use crate::transcript::handle::KeyStore;
-use crate::transcript::lease::{LeaseManager, PinTarget};
-use crate::transcript::refs::{Anchor, BranchRef, MatchRef, SpanRef, short_digest};
+use crate::transcript::lease::{LeaseManager, NewRef, PinTarget};
+use crate::transcript::refs::{Anchor, BranchRef, MatchRef, RefHandle, SpanRef, short_digest};
 use retrieve::{ChunkMeta, Filters, LiteralHit, Scored, SessionRow, SpanRow};
 use rmcp::handler::server::tool::schema_for_type;
 use rmcp::model::{Tool, ToolAnnotations};
@@ -875,39 +876,55 @@ impl SearchService {
 
         let projects = self.session_projects(&ret.sessions).await?;
         let mut results: Vec<SessionResult> = Vec::new();
+        let mut pending: HashMap<String, NewRef> = HashMap::new();
         if let Some(lease) = &lease {
             let expires = format_rfc3339(lease.expires_at_ms);
             for (i, s) in ret.sessions.into_iter().enumerate() {
                 let anchor = Anchor {
                     lease: lease.lease_id.clone(),
                     manifest: lease.manifest_ids[i].clone(),
-                    session: s.row.id.clone(),
-                    snapshot: s.snapshot_id.clone(),
                 };
                 let matches = s
                     .matches
                     .into_iter()
-                    .map(|m| MatchResult {
-                        match_ref: MatchRef {
-                            anchor: anchor.clone(),
+                    .map(|m| {
+                        let ref_id = pending.len() as i64 + 1;
+                        let match_ref = RefHandle {
+                            lease: lease.lease_id.clone(),
+                            ref_id,
+                        }
+                        .encode(&key, HandleKind::Match);
+                        let payload = serde_json::to_vec(&MatchRef {
+                            manifest: anchor.manifest.clone(),
                             spans: m.spans,
                             content: m.content,
+                        })
+                        .expect("match ref serializes");
+                        pending.insert(
+                            match_ref.clone(),
+                            NewRef {
+                                ref_id,
+                                kind: "match",
+                                payload,
+                            },
+                        );
+                        MatchResult {
+                            match_ref,
+                            match_ref_expires_at: expires.clone(),
+                            branch_ref: m.branch_leaf.map(|leaf| {
+                                BranchRef {
+                                    anchor: anchor.clone(),
+                                    leaf,
+                                }
+                                .encode(&key)
+                            }),
+                            matched_at: m.matched_at.map(format_rfc3339),
+                            excerpt: m.excerpt,
+                            matched_by: m.matched_by,
+                            context_outside_time_filter: m.ctx_outside,
+                            truncated: m.truncated,
+                            debug: m.debug,
                         }
-                        .encode(&key),
-                        match_ref_expires_at: expires.clone(),
-                        branch_ref: m.branch_leaf.map(|leaf| {
-                            BranchRef {
-                                anchor: anchor.clone(),
-                                leaf,
-                            }
-                            .encode(&key)
-                        }),
-                        matched_at: m.matched_at.map(format_rfc3339),
-                        excerpt: m.excerpt,
-                        matched_by: m.matched_by,
-                        context_outside_time_filter: m.ctx_outside,
-                        truncated: m.truncated,
-                        debug: m.debug,
                     })
                     .collect();
                 let project = projects.get(s.row.project_id.as_deref().unwrap_or_default());
@@ -930,6 +947,15 @@ impl SearchService {
             suggest_literal: ret.suggest_literal,
         };
         self.fit_budget(&mut out);
+        if let Some(lease) = &lease {
+            let rows: Vec<NewRef> = out
+                .results
+                .iter()
+                .flat_map(|r| &r.matches)
+                .filter_map(|m| pending.remove(&m.match_ref))
+                .collect();
+            self.leases.put_refs(&lease.lease_id, &rows).await?;
+        }
         serde_json::to_value(&out)
             .map_err(|_| AppError::new("STORAGE_ERROR", "the search response could not be encoded"))
     }

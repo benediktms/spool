@@ -14,9 +14,10 @@ use spool::mcp::budget::tool_result_bytes;
 use spool::sources::SourceRegistry;
 use spool::storage::index::Index;
 use spool::transcript::ReadService;
+use spool::transcript::handle::HandleKind;
 use spool::transcript::handle::{HandleKey, KeyStore};
 use spool::transcript::lease::LeaseManager;
-use spool::transcript::refs::{Anchor, MatchRef, MessageRef, SpanRef, short_digest};
+use spool::transcript::refs::{Anchor, MatchRef, MessageRef, RefHandle, SpanRef, short_digest};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock};
@@ -337,7 +338,7 @@ impl Env {
     }
 
     /// A search-style match reference over whole blocks (same payload shape the search service issues).
-    pub fn match_ref(&self, anchor: &Anchor, spans: &[(&str, u32, &str)]) -> String {
+    pub async fn match_ref(&self, anchor: &Anchor, spans: &[(&str, u32, &str)]) -> String {
         let mut frames = Vec::new();
         let mut refs = Vec::new();
         for (rec, block, text) in spans {
@@ -350,12 +351,22 @@ impl Env {
                 e: text.len() as u32,
             });
         }
-        MatchRef {
-            anchor: anchor.clone(),
+        let payload = serde_json::to_vec(&MatchRef {
+            manifest: anchor.manifest.clone(),
             spans: refs,
             content: short_digest(&frames),
+        })
+        .unwrap();
+        let ref_id = self
+            .leases
+            .add_ref(&anchor.lease, "match", &payload)
+            .await
+            .unwrap();
+        RefHandle {
+            lease: anchor.lease.clone(),
+            ref_id,
         }
-        .encode(&self.keys.current())
+        .encode(&self.keys.current(), HandleKind::Match)
     }
 
     /// Anchor of the latest lease/snapshot for a session, taken from a navigation/selection ref.

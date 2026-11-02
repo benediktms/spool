@@ -116,9 +116,9 @@ To change views or context, issue a new initial read using the original match/me
 
 `session_id` identifies a catalogued session. Message, item, branch, block, record, and match references additionally identify a particular observed snapshot or verified source identity. Native IDs are metadata; native tool-call IDs alone are not safe unique selectors.
 
-A **match reference is view-independent**. It binds source identity, anchored original spans, and the expected content, but not a representation.
+A **match reference is view-independent**. It binds source identity, anchored original spans, and the expected content, but not a representation. The signed handle holds only the lease and a lease-scoped reference id (under 150 bytes); the spans and content digest live in lease-retained storage and expire with the lease.
 
-A **cursor is read-dependent**. It binds the resolved selection, frozen snapshot, branch, view, source policy, next item/block/byte offset, token format version, and expiry.
+A **cursor is read-dependent**. It binds the resolved selection, frozen snapshot, branch, view, source policy, next item/block/byte offset, token format version, and expiry. The signed handle holds the lease, a reference id naming the lease-retained resolved selection, the verbose flag, the next position, and the token format version (under 150 bytes). Message, item and branch references carry only the lease and manifest as anchor; session and snapshot derive from the manifest. A reference whose lease expired or was swept fails with `CURSOR_EXPIRED`; one whose stored payload is gone from a live lease fails with `STALE_REFERENCE`.
 
 A branch reference selects a persisted path through a frozen record graph; it is not a physical file-order interval. Parent/control records participate in ancestry even when excluded from the conversation view. Adapters must not use an indexing run ID as though it were automatically a complete branch path.
 

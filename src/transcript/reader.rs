@@ -7,9 +7,10 @@
 //!   a block, the item limit stops at an item boundary.
 //! * A page that cannot make progress is `RESOURCE_LIMIT`, never an unchanged cursor.
 
-use super::cursor::{CURSOR_FORMAT, CursorPayload, short_hash};
+use super::cursor::{CursorPayload, CursorSel, short_hash};
 use super::fragment::{BlockData, longest_fit};
 use super::handle::HandleKey;
+use super::lease::LeaseManager;
 use super::locator::{ResolveFail, SourceCtx, resource_limit, source_unavailable};
 use super::refs::{Anchor, BranchRef, ItemKind, ItemRef, MessageRef};
 use super::selection::{Class, Extra, Plan, PlanItem, ResolvedSel, Snap, app_err};
@@ -31,12 +32,23 @@ pub struct PageEnv<'a> {
     pub policy: SourcePolicy,
     pub verbose: bool,
     pub sel: &'a ResolvedSel,
+    pub sel_ref: SelRef<'a>,
     pub plan: &'a Plan,
     pub max_bytes: usize,
     pub max_items: usize,
     /// (plan item, block ordinal, byte offset)
     pub pos: (u32, u32, u64),
     pub pre_warnings: Vec<Warning>,
+}
+
+/// Where the cursor's resolved selection lives: already stored by an earlier page, or stored when
+/// the first cursor of this read is issued.
+pub enum SelRef<'a> {
+    Stored(i64),
+    Pending {
+        leases: &'a LeaseManager,
+        stored: CursorSel,
+    },
 }
 
 /// Signs the references a response hands out; all anchored to the read's lease + manifest.
@@ -422,13 +434,9 @@ pub async fn assemble(
         },
     };
     let template = CursorPayload {
-        f: CURSOR_FORMAT,
-        a: env.anchor.clone(),
-        x: env.lease_expires_ms,
-        v: env.view,
-        p: env.policy,
+        lease: env.anchor.lease.clone(),
+        ref_id: 0,
         d: env.verbose,
-        s: env.sel.clone(),
         i: 0,
         b: 0,
         o: 0,
@@ -603,7 +611,19 @@ pub async fn assemble(
                 .get(i as usize)
                 .map(|p| short_hash(&p.key(snap)))
                 .unwrap_or_else(|| short_hash(""));
+            let ref_id = match &env.sel_ref {
+                SelRef::Stored(id) => *id,
+                SelRef::Pending { leases, stored } => {
+                    let payload = serde_json::to_vec(stored).map_err(|_| {
+                        AppError::new("STORAGE_ERROR", "response cannot be serialized")
+                    })?;
+                    leases
+                        .add_ref(&env.anchor.lease, "cursor", &payload)
+                        .await?
+                }
+            };
             let c = CursorPayload {
+                ref_id,
                 i,
                 b,
                 o,

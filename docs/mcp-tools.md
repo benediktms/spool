@@ -131,7 +131,8 @@ policy and position. The local I/O and time budgets (`reader.max_source_read_byt
 
 **Handles and leases.** Every reference/cursor is signed (integrity only, not authentication) and
 anchored to a lease (`reader.lease_ttl_seconds`); the expiry is exposed as
-`snapshot.lease_expires_at`. Expired or swept leases give `CURSOR_EXPIRED`; a rotated signing key
+`snapshot.lease_expires_at`. `match_ref` and cursor tokens are short (under 150 bytes): they name a
+lease and a stored payload (`lease_refs`) that is released with the lease. Expired or swept leases give `CURSOR_EXPIRED`; a rotated signing key
 gives `STALE_REFERENCE` (references) or `CURSOR_EXPIRED` (cursors); an altered signature is
 `INVALID_ARGUMENT`. Retired snapshots stay readable while a live lease pins them. Exclusion, session
 removal and source disablement are re-checked on every call, including continuations, and beat any
