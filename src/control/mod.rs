@@ -171,7 +171,6 @@ impl ControlService {
             Arc::new(JsonObject::new()),
         )
         .with_input_schema::<IndexStatusInput>()
-        .with_output_schema::<IndexStatusOutput>()
         .annotate(ToolAnnotations::new().read_only(true).idempotent(true).open_world(false).destructive(false))
     }
 

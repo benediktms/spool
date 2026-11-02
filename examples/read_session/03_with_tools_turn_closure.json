@@ -8,7 +8,8 @@
       "message_ref": "v1.g.1.eyJleGFtcGxlIjoicmVmIn0.ZXhhbXBsZS1tYWM",
       "before": 0,
       "after": 0
-    }
+    },
+    "verbose": true
   },
   "response": {
     "session": {

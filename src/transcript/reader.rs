@@ -29,6 +29,7 @@ pub struct PageEnv<'a> {
     pub key: HandleKey,
     pub view: View,
     pub policy: SourcePolicy,
+    pub verbose: bool,
     pub sel: &'a ResolvedSel,
     pub plan: &'a Plan,
     pub max_bytes: usize,
@@ -426,6 +427,7 @@ pub async fn assemble(
         x: env.lease_expires_ms,
         v: env.view,
         p: env.policy,
+        d: env.verbose,
         s: env.sel.clone(),
         i: 0,
         b: 0,
@@ -509,7 +511,7 @@ pub async fn assemble(
                 ));
             }
             let end = if total == 0 {
-                let f = blk.fragment(0, 0);
+                let f = blk.fragment(0, 0, env.verbose);
                 items.last_mut().unwrap().common_mut().blocks.push(f);
                 if fits(
                     &fixed,
@@ -531,7 +533,7 @@ pub async fn assemble(
                         .unwrap()
                         .common_mut()
                         .blocks
-                        .push(blk.fragment(cur_o, e));
+                        .push(blk.fragment(cur_o, e, env.verbose));
                     let ok = fits(&fixed, &mut items, warnings, &placeholder, env.max_bytes);
                     items.last_mut().unwrap().common_mut().blocks.pop();
                     ok
@@ -542,7 +544,7 @@ pub async fn assemble(
                         .unwrap()
                         .common_mut()
                         .blocks
-                        .push(blk.fragment(cur_o, e));
+                        .push(blk.fragment(cur_o, e, env.verbose));
                 }
                 r
             };
@@ -684,13 +686,15 @@ fn envelope(
         item_end: false,
         provenance: Provenance {
             origin,
-            source_ref: source_ref.to_string(),
-            record_ref: format!("rec_{}", short_hash(&format!("{}\0{}", snap.id, rec.key))),
-            record_digest: record_digest_hex(&rec.digest),
-            native_record_id: rec.native_id.clone(),
-            locator: Some(Locator {
-                offset: rec.offset,
-                len: rec.len,
+            details: env.verbose.then(|| ProvenanceDetails {
+                source_ref: source_ref.to_string(),
+                record_ref: format!("rec_{}", short_hash(&format!("{}\0{}", snap.id, rec.key))),
+                record_digest: record_digest_hex(&rec.digest),
+                native_record_id: rec.native_id.clone(),
+                locator: Some(Locator {
+                    offset: rec.offset,
+                    len: rec.len,
+                }),
             }),
         },
     };

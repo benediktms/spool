@@ -1445,7 +1445,8 @@ async fn tool_definition_is_honest_about_hosted_modes() {
             .iter()
             .any(|r| r == "query")
     );
-    let out = serde_json::to_value(t.output_schema.as_ref().unwrap().as_ref()).unwrap();
+    assert!(t.output_schema.is_none(), "results are one JSON text copy");
+    let out = output_schema();
     for f in [
         "schema_version",
         "mode_requested",
@@ -1463,10 +1464,18 @@ async fn tool_definition_is_honest_about_hosted_modes() {
     }
 }
 
+fn output_schema() -> Value {
+    serde_json::to_value(
+        rmcp::schemars::generate::SchemaSettings::draft2020_12()
+            .into_generator()
+            .into_root_schema_for::<spool::search::SearchOutput>(),
+    )
+    .unwrap()
+}
+
 #[tokio::test]
 async fn real_outputs_validate_against_the_output_schema() {
-    let t = SearchService::tool_definition();
-    let schema = serde_json::to_value(t.output_schema.as_ref().unwrap().as_ref()).unwrap();
+    let schema = output_schema();
     let v = jsonschema::validator_for(&schema).unwrap();
     let env = Env::new().await;
     env.simple(

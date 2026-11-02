@@ -78,9 +78,15 @@ sources). Normative contract: `docs/read-session-contract.md`; machine-readable 
 valid exchanges: `examples/read_session/*.json`.
 
 **Two call shapes.** An initial read (`session_id` plus optional `selection`, `view`,
-`source_policy`, `max_bytes` 4096..=262144 default 32768, `max_items` 1..=200 default 50) or a
+`source_policy`, `verbose` default false, `max_bytes` 4096..=262144 default 32768, `max_items` 1..=200 default 50) or a
 cursor-only continuation (`cursor` plus optional `max_bytes`/`max_items`). Unknown fields and
 mixed forms are `INVALID_ARGUMENT`.
+
+**Result shape.** Every tool result is one compact JSON text block (`content[0].text`); there is no
+`structuredContent` and no declared `outputSchema`. `schemas/read_session/*.schema.json` remain the
+written contract for that JSON. By default (`verbose: false`) `provenance` carries only `origin`,
+fragments omit `block_ref`, a `utf8` `encoding`, and the range fields when they cover the whole
+block; `verbose: true` returns everything. A cursor continuation keeps the initial read's choice.
 
 **Selections.** `session` (+ optional `branch_ref`: root to the branch leaf), `match`, `message`
 (both with `before`/`after` context messages, 0..=20, default 2), inclusive `range`, and `item`.
@@ -112,8 +118,8 @@ snapshot (nothing is published, no embedding request is made); `indexed_only` on
 file (size, mtime, identity, record digests) and stages a fresh observation when the file moved on.
 
 **Pagination.** Pages are measured with the same budget function as the MCP bridge
-(`mcp::budget::tool_result_bytes`: structured value + the JSON-escaped compatibility text copy +
-wrapper), so effective payload capacity is roughly half of `max_bytes`; each reference is a few
+(`mcp::budget::tool_result_bytes`: the single JSON-escaped text copy + wrapper), so payload capacity
+is close to `max_bytes` minus JSON escaping; each reference is a few
 hundred bytes, so very small budgets (near 4096) can be too small for even one item and return
 `RESOURCE_LIMIT` (recovery `increase_max_bytes`) rather than an unchanged cursor. Oversized
 conversational text, tool arguments/results and raw records are fragmented as half-open

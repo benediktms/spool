@@ -9,7 +9,7 @@ use super::types::{SourcePolicy, View};
 use serde::{Deserialize, Serialize};
 
 /// Token payload format; bump on any incompatible change (old cursors then fail explicitly).
-pub const CURSOR_FORMAT: u8 = 1;
+pub const CURSOR_FORMAT: u8 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CursorPayload {
@@ -19,6 +19,8 @@ pub struct CursorPayload {
     pub x: i64,
     pub v: View,
     pub p: SourcePolicy,
+    /// `verbose` output of the initial read.
+    pub d: bool,
     pub s: ResolvedSel,
     /// Next plan item index, block ordinal within the item, byte offset within that block.
     pub i: u32,
@@ -49,6 +51,7 @@ impl CursorPayload {
     /// this read, so budgeting with it can only be conservative.
     pub fn worst_case(&self) -> Self {
         Self {
+            d: true,
             i: u32::MAX,
             b: u32::MAX,
             o: u64::MAX,
@@ -79,6 +82,7 @@ mod tests {
             x: 5,
             v: View::Conversation,
             p: SourcePolicy::PreferSource,
+            d: false,
             s: ResolvedSel {
                 kind: super::super::types::SelKind::Session,
                 leaf: None,

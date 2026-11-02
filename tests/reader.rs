@@ -756,7 +756,6 @@ async fn max_items_counts_logical_items_including_a_continued_one() {
 #[tokio::test]
 async fn escaping_is_budgeted_and_a_nonprogressing_budget_is_rejected() {
     let env = Env::new().await;
-    // 3000 quotes: 6000 bytes once escaped, twice with the text copy
     let quotes = "\"".repeat(3000);
     let (sid, _) = env
         .indexed(
@@ -765,14 +764,14 @@ async fn escaping_is_budgeted_and_a_nonprogressing_budget_is_rejected() {
         )
         .await;
     let pages = env
-        .pages(json!({"session_id": sid, "max_bytes": 12288}), 12288)
+        .pages(json!({"session_id": sid, "max_bytes": 8192}), 8192)
         .await;
     assert!(pages.len() >= 3, "{} pages", pages.len());
     assert!(
         items(&pages[0])[0]["blocks"][0]["end_byte"]
             .as_u64()
             .unwrap()
-            < 12288 / 3,
+            < 8192 / 2,
         "decoded bytes per page are far below max_bytes because of escaping"
     );
     assert_eq!(reassemble(&pages)[0].1, quotes.as_bytes());
@@ -1196,7 +1195,7 @@ fn tool_definition_has_object_schemas_and_is_read_only() {
         t.input_schema.get("type").and_then(|v| v.as_str()),
         Some("object")
     );
-    assert!(t.output_schema.is_some());
+    assert!(t.output_schema.is_none());
     assert_eq!(
         t.annotations.as_ref().and_then(|a| a.read_only_hint),
         Some(true)
@@ -1708,4 +1707,82 @@ async fn codex_turn_window_excludes_the_next_turn_and_reused_call_id_links_withi
             .iter()
             .any(|w| w["code"] == "ORPHAN_TOOL_RESULT")
     );
+}
+
+#[tokio::test]
+async fn default_budget_holds_a_message_window_of_typical_messages() {
+    let env = Env::new().await;
+    let body = "lorem ipsum dolor sit amet \"quoted\" ".repeat(100);
+    let mut lines = vec![omp_header()];
+    for i in 0..5 {
+        let parent = (i > 0).then(|| format!("m{}", i - 1));
+        let role = if i % 2 == 0 { "user" } else { "assistant" };
+        lines.push(omp_msg(&format!("m{i}"), parent.as_deref(), role, &body));
+    }
+    let (sid, _) = env.indexed("typical.jsonl", &lines).await;
+    let first = env.ok(json!({"session_id": sid, "verbose": false})).await;
+    let m2 = items(&first)[2]["message_ref"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let r = env
+        .ok(json!({"session_id": sid, "verbose": false, "selection": {"kind": "message", "message_ref": m2, "before": 2, "after": 2}}))
+        .await;
+    assert_eq!(items(&r).len(), 5);
+    assert_eq!(
+        r["page"]["selection_exhausted"],
+        true,
+        "one page holds the window: {} bytes, {}",
+        tool_result_bytes(&r, false),
+        r["page"]
+    );
+    assert!(r["page"]["next_cursor"].is_null());
+}
+
+#[tokio::test]
+async fn verbose_false_omits_provenance_details_and_a_cursor_keeps_the_choice() {
+    let env = Env::new().await;
+    let (sid, _) = env.indexed("verbose.jsonl", &linear(6)).await;
+    let slim = env.ok(json!({"session_id": sid, "verbose": false})).await;
+    let it = &items(&slim)[0];
+    assert_eq!(it["provenance"], json!({"origin": "verified_source"}));
+    let b = &it["blocks"][0];
+    for k in [
+        "block_ref",
+        "encoding",
+        "start_byte",
+        "end_byte",
+        "total_bytes",
+        "is_last",
+    ] {
+        assert!(b.get(k).is_none(), "{k} is omitted for a whole block");
+    }
+    assert!(it["item_ref"].is_string() && it["message_ref"].is_string());
+    let dflt = env.svc.call(json!({"session_id": sid})).await.unwrap();
+    assert_eq!(items(&dflt)[0]["provenance"], it["provenance"]);
+
+    let full = env.ok(json!({"session_id": sid, "verbose": true})).await;
+    let p = &items(&full)[0]["provenance"];
+    for k in [
+        "source_ref",
+        "record_ref",
+        "record_digest",
+        "native_record_id",
+        "locator",
+    ] {
+        assert!(p.get(k).is_some(), "{k} is kept when verbose");
+    }
+    assert!(items(&full)[0]["blocks"][0]["block_ref"].is_string());
+
+    let paged = env
+        .ok(json!({"session_id": sid, "verbose": false, "max_items": 2}))
+        .await;
+    let c = paged["page"]["next_cursor"].as_str().unwrap().to_string();
+    let next = env.ok(json!({"cursor": c})).await;
+    assert_eq!(
+        items(&next)[0]["provenance"],
+        json!({"origin": "verified_source"})
+    );
+    let e = env.err(json!({"cursor": c, "verbose": true})).await;
+    assert_eq!(e.code, "INVALID_ARGUMENT");
 }

@@ -66,23 +66,25 @@ impl BlockData {
         }
     }
 
-    pub fn fragment(&self, start: usize, end: usize) -> Fragment {
+    pub fn fragment(&self, start: usize, end: usize, verbose: bool) -> Fragment {
         let slice = &self.bytes[start..end];
         let data = match self.encoding {
             // `cut` guarantees code-point boundaries and the whole block was validated as UTF-8.
             Encoding::Utf8 => String::from_utf8_lossy(slice).into_owned(),
             Encoding::Base64 => base64::engine::general_purpose::STANDARD.encode(slice),
         };
+        let whole = start == 0 && end == self.bytes.len();
+        let ranged = verbose || !whole;
         Fragment {
-            block_ref: self.block_ref.clone(),
+            block_ref: verbose.then(|| self.block_ref.clone()),
             kind: self.kind,
-            encoding: self.encoding,
+            encoding: (verbose || self.encoding != Encoding::Utf8).then_some(self.encoding),
             fidelity: self.fidelity,
             data,
-            start_byte: start as u64,
-            end_byte: end as u64,
-            total_bytes: self.bytes.len() as u64,
-            is_last: end == self.bytes.len(),
+            start_byte: ranged.then_some(start as u64),
+            end_byte: ranged.then_some(end as u64),
+            total_bytes: ranged.then_some(self.bytes.len() as u64),
+            is_last: ranged.then_some(end == self.bytes.len()),
         }
     }
 }
@@ -152,8 +154,8 @@ mod tests {
         let mut out = Vec::new();
         while pos < b.total() {
             let end = longest_fit(&b, pos, usize::MAX, |e| e - pos <= 5).expect("progress");
-            let f = b.fragment(pos, end);
-            assert_eq!(f.start_byte as usize, pos);
+            let f = b.fragment(pos, end, true);
+            assert_eq!(f.start_byte, Some(pos as u64));
             out.extend_from_slice(f.data.as_bytes());
             pos = end;
         }
@@ -164,7 +166,7 @@ mod tests {
     fn invalid_utf8_is_base64_and_unaligned() {
         let b = blk(&[0xff, 0xfe, 0x00, 0x41]);
         assert_eq!(b.encoding, Encoding::Base64);
-        assert_eq!(b.fragment(1, 3).data, "/gA=");
+        assert_eq!(b.fragment(1, 3, true).data, "/gA=");
         assert!(longest_fit(&b, 0, usize::MAX, |_| false).is_none());
     }
 }

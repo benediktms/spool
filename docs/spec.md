@@ -733,7 +733,7 @@ A nearest-neighbor result is not proof of relevance. Do not invent a universal c
 
 ## 14. MCP API contract
 
-Use `rmcp` for protocol handling, schema generation, the stdio transport, and protocol-version negotiation. Do not hand-implement version-specific behavior. Expose structured tool outputs with JSON schemas and concise tool descriptions. Only advertise capabilities actually implemented. Do not enable sampling, roots-based arbitrary access, prompts, elicitation, or remote task extensions merely because the SDK supports them. [S3]
+Use `rmcp` for protocol handling, schema generation, the stdio transport, and protocol-version negotiation. Do not hand-implement version-specific behavior. Return each tool result as one compact JSON text copy (no structured duplicate, no declared output schema) and keep the JSON Schemas as the written contract; keep tool descriptions concise. Only advertise capabilities actually implemented. Do not enable sampling, roots-based arbitrary access, prompts, elicitation, or remote task extensions merely because the SDK supports them. [S3]
 
 The MCP surface contains exactly three tools: `search_sessions`, `read_session`, and `index_status`. Administration is CLI-only (section 14.4). The surface is read-oriented, but semantic and hybrid `search_sessions` calls send the query text to the hosted provider and spend the approved interactive query budget. Tool descriptions and annotations MUST NOT present those modes as purely local. Routine agents receive no deletion, key-management, indexing, or daemon-control tools. Clients reach the tools through `spool mcp` (stdio), which forwards to the daemon over local IPC (section 15).
 
@@ -851,6 +851,7 @@ The tool accepts either an initial read or a cursor-only continuation. Reject un
 | `source_policy` | No | Default `prefer_source` for conversation, `require_source` for other views. |
 | `max_bytes` | No | Default 32,768; permitted 4,096 through 262,144. |
 | `max_items` | No | Default 50; permitted 1 through 200. |
+| `verbose` | No | Default `false`. When `false`, provenance keeps only `origin`; fragments omit `block_ref`, `encoding` when `utf8`, and the range fields (`start_byte`, `end_byte`, `total_bytes`, `is_last`) when the fragment is the whole block. When `true`, every field is returned. A cursor keeps the initial read's choice; a continuation does not accept `verbose`. |
 
 All references must belong to `session_id`. References from other sessions or incompatible snapshots are errors. Do not merge or relocate a read to make them work.
 
@@ -1085,7 +1086,7 @@ Example success (illustrative IDs; shortened; the formal shape is a required fut
 
 All variants contain `item_ref`, a timestamp or null, a turn reference or null, `blocks`, `item_end`, and provenance. A null metadata value means unknown or unavailable. It is not a guessed value.
 
-Every content-bearing item contains `provenance.origin`, either `verified_source` or `indexed_snapshot`. It also contains opaque source and record references, the expected record digest, an optional native record ID, and an optional raw source-byte locator. Offsets are validated hints. They are not sufficient identity on their own.
+Every content-bearing item contains `provenance.origin`, either `verified_source` or `indexed_snapshot`. When `verbose` is true it also contains opaque source and record references, the expected record digest, an optional native record ID, and an optional raw source-byte locator. Offsets are validated hints. They are not sufficient identity on their own.
 
 Conversation source fallback can produce items from different origins in the same page. Their individual provenance must make that explicit. Do not label cached text as a fresh source read.
 
@@ -1131,7 +1132,7 @@ Ranges are half-open `[start_byte, end_byte)`. They refer to the full decoded bl
 
 For UTF-8, never split inside a code point. For base64, decode `data` before you compare its length to the byte range. The response remains valid JSON even when its string holds only part of an original JSON tool payload.
 
-`is_last` means the fragment ends at `total_bytes`. It does not mean the full block is present on this page. `item_end` means this page reaches the final block's end for that item.
+Unless `verbose` is true, a fragment that is the whole block omits the four range fields, `block_ref` and a `utf8` `encoding`; partial fragments always carry the range fields. `is_last` means the fragment ends at `total_bytes`. It does not mean the full block is present on this page. `item_end` means this page reaches the final block's end for that item.
 
 One logical item can therefore appear on consecutive pages with the same `item_ref`, while its emitted content fragments advance without overlap. Metadata repetition is allowed. Following the returned cursors MUST NOT skip or repeat decoded content bytes.
 
@@ -1139,7 +1140,7 @@ One logical item can therefore appear on consecutive pages with the same `item_r
 
 ##### 14.2.7.2 Budget and progress
 
-`max_bytes` caps the final serialized tool result, including wrapping, escaping, metadata, cursors, branch options, and any compatibility text copy. The MCP bridge and the IPC layer MUST share the budget calculation with the reader. Do not budget only plaintext.
+`max_bytes` caps the final serialized tool result, including wrapping, escaping, metadata, cursors and branch options. Every tool result is one compact JSON text copy of the output (`content[0].text`) with no `structuredContent` and no declared output schema, so the value is counted once. The MCP bridge and the IPC layer MUST share the budget calculation with the reader. Do not budget only plaintext.
 
 If the next item's mandatory envelope plus even one valid fragment cannot fit, return `RESOURCE_LIMIT`. Never issue a success page with an unchanged cursor that can loop forever. An empty success is valid only at genuine selection exhaustion.
 
@@ -1636,7 +1637,7 @@ Pagination and consistency:
 
 - Fragment a 2 MiB assistant response, tool result, and raw record under 32 KiB.
 - Reassemble decoded fragments with no missing or duplicated content.
-- Account for JSON escaping and any compatibility text copy in the limit.
+- Account for JSON escaping of the single text copy in the limit.
 - Reject a nonprogressing too-small budget.
 - Replay a cursor from the same position, and reject new selection or view fields.
 - Permit safe append-only growth while excluding new records from old cursors.

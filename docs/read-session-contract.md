@@ -38,6 +38,7 @@ Fields:
 | `source_policy` | No | Default `prefer_source` for conversation, `require_source` for other views. |
 | `max_bytes` | No | Default 32,768; permitted 4,096 through 262,144. |
 | `max_items` | No | Default 50; permitted 1 through 200. |
+| `verbose` | No | Default `false`. When `false`, provenance keeps only `origin`; fragments omit `block_ref`, `encoding` when `utf8`, and the range fields (`start_byte`, `end_byte`, `total_bytes`, `is_last`) when the fragment is the whole block. When `true`, every field is returned. A cursor keeps the initial read's choice; a continuation does not accept `verbose`. |
 
 All references must belong to `session_id`. References from other sessions or incompatible snapshots are errors, not instructions to merge or relocate a read.
 
@@ -216,7 +217,7 @@ The response contains:
 
 All variants contain `item_ref`, timestamp or null, turn reference or null, `blocks`, `item_end`, and provenance. Metadata null means unknown/unavailable, not a guessed value.
 
-Every content-bearing item contains `provenance.origin`, either `verified_source` or `indexed_snapshot`, plus opaque source/record references, expected record digest, optional native record ID, and an optional raw source-byte locator. Offsets are validated hints, not sufficient identity on their own.
+Every content-bearing item contains `provenance.origin`, either `verified_source` or `indexed_snapshot`, plus, when `verbose` is true, opaque source/record references, expected record digest, optional native record ID, and an optional raw source-byte locator. Offsets are validated hints, not sufficient identity on their own.
 
 Conversation source fallback can produce differently sourced items in the same page; their individual provenance must make that explicit.
 
@@ -261,7 +262,7 @@ Ranges are half-open `[start_byte, end_byte)`. They refer to the full decoded bl
 
 For UTF-8, never split inside a code point. For base64, decode `data` before comparing its length to the byte range. The response remains valid JSON even when its string contains only part of an original JSON tool payload.
 
-`is_last` means the fragment ends at `total_bytes`; it does not mean the full block is present on this page. `item_end` means this page reaches the final block's end for that item.
+Unless `verbose` is true, a fragment that is the whole block omits the four range fields, `block_ref` and a `utf8` `encoding`; partial fragments always carry the range fields. `is_last` means the fragment ends at `total_bytes`; it does not mean the full block is present on this page. `item_end` means this page reaches the final block's end for that item.
 
 One logical item may therefore appear on consecutive pages with the same `item_ref`, while its emitted content fragments advance without overlap. Metadata repetition is allowed. Decoded content bytes must not be skipped or repeated when following returned cursors.
 
@@ -269,7 +270,7 @@ One logical item may therefore appear on consecutive pages with the same `item_r
 
 ### 8.2 Budget and progress
 
-`max_bytes` caps the final serialized tool result, including wrapping, escaping, metadata, cursors, branch options, and any compatibility text copy. The MCP bridge and the IPC layer MUST share the budget calculation with the reader. Do not budget only plaintext.
+`max_bytes` caps the final serialized tool result, including wrapping, escaping, metadata, cursors and branch options. Every tool result is one compact JSON text copy of the output (`content[0].text`) with no `structuredContent` and no declared output schema, so the value is counted once. The MCP bridge and the IPC layer MUST share the budget calculation with the reader. Do not budget only plaintext.
 
 If the next item's mandatory envelope plus even one valid fragment cannot fit, return `RESOURCE_LIMIT`. Never issue a success page with an unchanged cursor that can loop forever. Empty success is valid only at genuine selection exhaustion.
 
@@ -360,7 +361,7 @@ These are transcript-retrieval mechanics, not episode generation, summaries, or 
 
 - Fragment a 2 MiB assistant response, tool result, and raw record under 32 KiB.
 - Reassemble decoded fragments with no missing or duplicated content.
-- Account for JSON escaping and any compatibility text copy in the limit.
+- Account for JSON escaping of the single text copy in the limit.
 - Reject a nonprogressing too-small budget.
 - Replay a cursor from the same position; reject new selection/view fields.
 - Permit safe append-only growth while excluding new records from old cursors.

@@ -271,7 +271,12 @@ impl Env {
             .unwrap()
     }
 
-    pub async fn read(&self, args: Value) -> Result<Value, AppError> {
+    /// Initial reads default to `verbose: true` here so tests can assert byte ranges and refs;
+    /// pass `"verbose": false` explicitly to see the default wire shape.
+    pub async fn read(&self, mut args: Value) -> Result<Value, AppError> {
+        if args.is_object() && args.get("cursor").is_none() && args.get("verbose").is_none() {
+            args["verbose"] = json!(true);
+        }
         let r = self.svc.call(args).await;
         match &r {
             Ok(v) => {

@@ -127,7 +127,7 @@ impl Rig {
 async fn tool_definition_is_read_only_with_schemas_and_is_the_only_control_tool() {
     let t = ControlService::tool_definition();
     assert_eq!(t.name, "index_status");
-    assert!(t.output_schema.is_some());
+    assert!(t.output_schema.is_none());
     assert_eq!(
         t.input_schema.get("type").and_then(Value::as_str),
         Some("object")

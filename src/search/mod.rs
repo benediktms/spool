@@ -178,7 +178,6 @@ impl SearchService {
 
     pub fn tool_definition() -> Tool {
         Tool::new(TOOL_NAME, DESCRIPTION, schema_for_type::<SearchInput>())
-            .with_output_schema::<SearchOutput>()
             // Read-only for local state, but semantic/hybrid reach a hosted service: open world.
             .with_annotations(ToolAnnotations::from_raw(
                 Some("Search agent sessions".into()),
@@ -973,7 +972,7 @@ impl SearchService {
     }
 
     /// Keep the largest prefix of matches (breadth first: every session's first match before any second match)
-    /// whose tool result, including the compatibility text copy, fits `max_search_response_bytes`.
+    /// whose tool result fits `max_search_response_bytes`.
     fn fit_budget(&self, out: &mut SearchOutput) {
         let budget = self.cfg.search.max_search_response_bytes;
         let size = |o: &SearchOutput| {

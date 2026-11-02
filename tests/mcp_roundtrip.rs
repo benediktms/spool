@@ -132,7 +132,10 @@ async fn stdio_client_reaches_daemon_tool_over_ipc() {
         .await
         .unwrap();
     assert_eq!(r.is_error, Some(false));
-    let v = r.structured_content.expect("structured content");
+    assert!(r.structured_content.is_none(), "one copy only");
+    assert_eq!(r.content.len(), 1);
+    let v: serde_json::Value =
+        serde_json::from_str(&r.content[0].as_text().expect("text content").text).unwrap();
     eprintln!("TOOL RESULT {v}");
     assert_eq!(v["embedding"]["state"], "not_approved");
     assert_eq!(v["queue"]["queued"], 0);

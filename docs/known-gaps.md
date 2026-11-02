@@ -20,7 +20,7 @@ suite and run actually covered, read `docs/smoke-results.md`, `docs/dependency-b
 ## Functional limits and deviations
 
 * **Minimum practical `max_bytes`.** The contract permits `max_bytes` from 4,096. `read_session` counts the
-  structured result plus rmcp's JSON-escaped compatibility text copy plus signed references (each 350 to 430
+  single JSON-escaped text copy of the result plus signed references (each 350 to 430
   bytes), so a page that carries even one message usually needs about 8 KiB; below that the reader returns
   `RESOURCE_LIMIT` with recovery `increase_max_bytes`, as the contract requires for a non-progressing budget.
   Shrinking the reference encoding would lower the floor.
