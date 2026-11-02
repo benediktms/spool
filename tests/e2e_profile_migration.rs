@@ -10,7 +10,6 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -40,8 +39,8 @@ fn embed(text: &str, dims: usize) -> Vec<f32> {
 /// (model, dimensions, inputs) of every request the provider received.
 type Log = Arc<Mutex<Vec<(String, usize, Vec<String>)>>>;
 
-/// Local fake of the embeddings endpoint. Requests for MODEL_B fail with a server error until `allow_b` is set.
-async fn fake_provider(allow_b: Arc<AtomicBool>) -> (u16, Log) {
+/// Local fake of the embeddings endpoint.
+async fn fake_provider() -> (u16, Log) {
     let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = l.local_addr().unwrap().port();
     let log: Log = Arc::default();
@@ -51,7 +50,7 @@ async fn fake_provider(allow_b: Arc<AtomicBool>) -> (u16, Log) {
             let Ok((mut s, _)) = l.accept().await else {
                 return;
             };
-            let (log, allow_b) = (out.clone(), allow_b.clone());
+            let log = out.clone();
             tokio::spawn(async move {
                 let mut buf = Vec::new();
                 let mut tmp = [0u8; 8192];
@@ -89,21 +88,16 @@ async fn fake_provider(allow_b: Arc<AtomicBool>) -> (u16, Log) {
                             .collect()
                     })
                     .unwrap_or_default();
-                let refuse = model == MODEL_B && !allow_b.load(Ordering::SeqCst);
-                let (status, resp) = if refuse {
-                    (
-                        "500 Internal Server Error",
-                        json!({"error": {"message": "model-b is not available yet"}}).to_string(),
+                log.lock().push((model.clone(), dims, inputs.clone()));
+                let data: Vec<Value> = inputs
+                    .iter()
+                    .enumerate()
+                    .map(
+                        |(i, t)| json!({"object":"embedding","index":i,"embedding":embed(t, dims)}),
                     )
-                } else {
-                    let data: Vec<Value> = inputs
-                        .iter()
-                        .enumerate()
-                        .map(|(i, t)| json!({"object":"embedding","index":i,"embedding":embed(t, dims)}))
-                        .collect();
-                    ("200 OK", json!({"object":"list","data":data,"model":model,"usage":{"prompt_tokens":10,"total_tokens":10}}).to_string())
-                };
-                log.lock().push((model, dims, inputs));
+                    .collect();
+                let resp = json!({"object":"list","data":data,"model":model,"usage":{"prompt_tokens":10,"total_tokens":10}}).to_string();
+                let status = "200 OK";
                 let _ = s
                     .write_all(
                         format!("HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{resp}", resp.len())
@@ -176,6 +170,13 @@ impl Env {
                 &format!("dimensions = {dims}"),
             );
         std::fs::write(&p, cfg).unwrap();
+    }
+    fn set_ingestion_budget(&self, budget: i64) {
+        let p = self.home.join("config.toml");
+        let cfg = std::fs::read_to_string(&p).unwrap();
+        let mut cfg: toml::Table = cfg.parse().unwrap();
+        cfg["embedding"]["daily_ingestion_token_budget"] = toml::Value::Integer(budget);
+        std::fs::write(p, toml::to_string(&cfg).unwrap()).unwrap();
     }
 }
 
@@ -312,8 +313,7 @@ fn wait_for(what: &str, secs: u64, mut f: impl FnMut() -> bool) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn profile_change_keeps_old_queries_until_the_published_corpus_is_covered() {
-    let allow_b = Arc::new(AtomicBool::new(false));
-    let (port, log) = fake_provider(allow_b.clone()).await;
+    let (port, log) = fake_provider().await;
     let mut env = setup(port);
 
     // ---- profile A: index and embed everything.
@@ -331,8 +331,8 @@ async fn profile_change_keeps_old_queries_until_the_published_corpus_is_covered(
     assert_eq!(id_a, active_a);
     env.stop();
 
-    // ---- configuration moves to model B / other dimensions; B is not available yet. A source append lands.
     env.set_model(MODEL_B, DIMS_B, (MODEL_A, DIMS_A));
+    env.set_ingestion_budget(0);
     let appended = session_jsonl(
         "s1",
         &[
@@ -347,7 +347,6 @@ async fn profile_change_keeps_old_queries_until_the_published_corpus_is_covered(
     let (target, active) = embedding_ids(&env.home);
     assert_ne!(target, id_a, "the new model is a new profile");
     assert_eq!(active, id_a, "a changed profile never activates itself");
-    // The append is published as text (lexical) even though B cannot embed it yet: part of what B must cover.
     wait_for("appended text published", 40, || {
         let r = json_cli(
             &env.home,
@@ -362,10 +361,15 @@ async fn profile_change_keeps_old_queries_until_the_published_corpus_is_covered(
     assert_eq!(
         embedding_ids(&env.home).1,
         id_a,
-        "still on the old profile while B is unavailable"
+        "still on the old profile while B backfill is budget-deferred"
     );
     {
         let seen = log.lock();
+        assert!(
+            seen[log_mark..]
+                .iter()
+                .all(|(model, _, _)| model != MODEL_B)
+        );
         for (model, dims, inputs) in &seen[log_mark..] {
             let is_query = inputs.len() == 1
                 && !inputs[0].starts_with("USER:")
@@ -380,8 +384,9 @@ async fn profile_change_keeps_old_queries_until_the_published_corpus_is_covered(
         }
     }
 
-    // ---- B becomes available: the whole current corpus (including the appended text) is embedded, then it switches.
-    allow_b.store(true, Ordering::SeqCst);
+    env.stop();
+    env.set_ingestion_budget(1_000_000);
+    env.start();
     let (ok, out) = cli(&env.home, &["index", "--since", "30d", "--wait"]);
     assert!(ok, "{out}");
     wait_for("profile switch", 60, || {
