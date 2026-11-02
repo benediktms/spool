@@ -19,6 +19,9 @@ copied from documentation. `Cargo.lock` is written and pins the set (nothing is 
 | `tokio` | 1.53.2 | |
 | `rmcp` | 3.5.1 | features `server client macros schemars transport-io transport-child-process` (`client` + child-process only exercise it in tests; the shipped bridge uses server + `transport-io`) |
 | `rustix` | 1.x | `fs std process` (flock, openat, geteuid) |
+| `gix-discover` / `gix-config` / `gix-url` | 0.57.1 / 0.62.2 / 0.40.1 | project resolution (`src/projects.rs`): repository discovery incl. linked worktrees, repository-local config with includes, remote URL parsing. `default-features = false`; `sha1` on the first two (gix-hash refuses to build without a hash feature) |
+
+The gix sub-crates were chosen over the `gix` umbrella crate by `cargo tree -e normal` on a scratch crate: the three sub-crates resolve to 72 unique packages (33 `gix-*`), `gix` with `default-features = false` to 121 (63 `gix-*`). Adds 40 crates to the workspace graph, all `MIT OR Apache-2.0` or similarly permissive (`docs/licenses.md`).
 
 All are stable releases; no prerelease is used. (Spec section 2 noted that retrieved docs showed
 differing release candidates; `apalis-sqlite 1.0.0` / `apalis 1.0.0` are published stable.)

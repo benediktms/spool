@@ -14,6 +14,7 @@ pub mod ipc;
 pub mod jobs;
 pub mod mcp;
 pub mod perms;
+pub mod projects;
 pub mod search;
 pub mod service;
 pub mod source;
