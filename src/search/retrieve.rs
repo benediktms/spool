@@ -491,6 +491,7 @@ pub struct SessionRow {
     pub source_id: String,
     pub kind: String,
     pub title: Option<String>,
+    pub title_origin: Option<&'static str>,
     pub cwd: Option<String>,
     pub created_at: Option<i64>,
     pub last_activity_at: Option<i64>,
@@ -514,12 +515,55 @@ pub async fn session_row(
         source_id: r.get(1),
         kind: r.get(2),
         title: r.get(3),
+        title_origin: r.get::<Option<String>, _>(3).map(|_| "native"),
         cwd: r.get(4),
         created_at: r.get(5),
         last_activity_at: r.get(6),
         source_status: r.get(7),
         project_id: r.get(8),
     }))
+}
+
+/// First non-empty cleaned user prompt (of each snapshot's first three user messages) as a title candidate.
+pub async fn first_prompts(
+    conn: &mut SqliteConnection,
+    snapshots: &[String],
+) -> Result<HashMap<String, String>, AppError> {
+    let mut out = HashMap::new();
+    for part in snapshots.chunks(500) {
+        let sql = format!(
+            "WITH um AS (SELECT snapshot_id, record_key, ROW_NUMBER() OVER (PARTITION BY snapshot_id ORDER BY seq) AS rn \
+             FROM messages WHERE role = 'user' AND snapshot_id IN ({})) \
+             SELECT um.snapshot_id, um.rn, b.text FROM um \
+             JOIN blocks b ON b.snapshot_id = um.snapshot_id AND b.record_key = um.record_key \
+             WHERE um.rn <= 3 ORDER BY um.snapshot_id, um.rn, b.idx",
+            ph(part.len())
+        );
+        let binds: Vec<Bind> = part.iter().map(|s| Bind::Text(s.clone())).collect();
+        let mut texts: Vec<(String, i64, String)> = Vec::new();
+        for r in build(sql, &binds)
+            .fetch_all(&mut *conn)
+            .await
+            .map_err(storage_err)?
+        {
+            let (snap, rn, text): (String, i64, String) = (r.get(0), r.get(1), r.get(2));
+            match texts.last_mut() {
+                Some(l) if l.0 == snap && l.1 == rn => {
+                    l.2.push('\n');
+                    l.2.push_str(&text);
+                }
+                _ => texts.push((snap, rn, text)),
+            }
+        }
+        for (snap, _, text) in texts {
+            if !out.contains_key(&snap)
+                && let Some(t) = super::query::title_from_prompt(&text)
+            {
+                out.insert(snap, t);
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Bytes `[start, end)` of a block's text (original span content for the match digest).

@@ -179,8 +179,11 @@ async fn invalid_arguments_are_rejected() {
         json!({"query": "x", "mode": "fuzzy"}),
         json!({"query": "x", "session_kinds": ["weird"]}),
         json!({"query": "x", "limit": 0}),
-        json!({"query": "x", "limit": 51}),
-        json!({"query": "x", "matches_per_session": 4}),
+        json!({"query": "x", "matches_per_session": 0}),
+        json!({"query": "x", "queries": ["y"]}),
+        json!({"queries": []}),
+        json!({"queries": ["a", "b", "c", "d", "e"]}),
+        json!({"queries": ["a", " "]}),
         json!({"query": "x", "after": "yesterday"}),
         json!({"query": "x", "after": "2026-10-01T00:00:00+02:00"}),
         json!({"query": "x", "after": "2026-10-02T00:00:00Z", "before": "2026-10-01T00:00:00Z"}),
@@ -832,9 +835,9 @@ async fn inactive_staging_retired_and_excluded_never_leak() {
     let r = env
         .ok(json!({"query": "leaktoken", "mode": "lexical"}))
         .await;
-    assert_eq!(
-        r["coverage"]["indexed_sessions"], 4,
-        "excluded and snapshot-less sessions are not counted"
+    assert!(
+        r["coverage"].is_null() || r["coverage"]["indexed_sessions"] == 4,
+        "excluded and snapshot-less sessions are not counted: {r}"
     );
 }
 
@@ -883,7 +886,7 @@ async fn embedding_profiles_are_separated() {
         .ok(json!({"query": "driving a sedan", "mode": "semantic"}))
         .await;
     assert_eq!(ids(&r), ["s_a"]);
-    assert_eq!(r["coverage"]["embedded_chunks"], 1);
+    assert!(r["coverage"].is_null(), "healthy index omits coverage: {r}");
 }
 
 #[tokio::test]
@@ -1213,14 +1216,7 @@ async fn match_refs_round_trip_with_one_lease() {
     assert_eq!(s1["project_path"], "/w/one");
     assert_eq!(s1["session_kind"], "interactive");
     assert_eq!(s1["source_status"], "present");
-    assert_eq!(r["coverage"]["indexed_sessions"], 2);
-    assert_eq!(r["coverage"]["active_chunks"], 3);
-    assert_eq!(r["coverage"]["pending_sessions"], 0);
-    assert_eq!(
-        r["coverage"]["last_successful_discovery_at"],
-        format_rfc3339(T0 - 1000)
-    );
-    assert!(!r["coverage"]["scope"].as_str().unwrap().is_empty());
+    assert!(r["coverage"].is_null(), "healthy index omits coverage: {r}");
 
     let mut lease_ids = std::collections::BTreeSet::new();
     let mut manifests = std::collections::BTreeSet::new();
@@ -1428,13 +1424,10 @@ async fn tool_definition_is_honest_about_hosted_modes() {
     assert_eq!(a.read_only_hint, Some(true));
     let input = serde_json::to_value(&*t.input_schema).unwrap();
     assert_eq!(input["additionalProperties"], false);
-    assert!(
-        input["required"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|r| r == "query")
-    );
+    assert!(input.get("required").is_none());
+    assert!(input["properties"].get("queries").is_some());
+    assert_eq!(input["properties"]["limit"]["maximum"], 50);
+    assert_eq!(input["properties"]["matches_per_session"]["maximum"], 3);
     assert!(t.output_schema.is_none(), "results are one JSON text copy");
     let out = output_schema();
     for f in [
@@ -1442,7 +1435,6 @@ async fn tool_definition_is_honest_about_hosted_modes() {
         "mode_requested",
         "mode_used",
         "index_epoch",
-        "coverage",
         "results",
         "warnings",
         "truncated",
@@ -1951,5 +1943,129 @@ async fn linked_worktree_sessions_are_found_by_project_name() {
             .unwrap()
             .len(),
         1
+    );
+}
+
+fn has_warning(r: &Value, code: &str) -> bool {
+    r["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|w| w["code"] == code)
+}
+
+#[tokio::test]
+async fn limits_are_clamped_with_a_warning() {
+    let env = Env::new().await;
+    env.simple(
+        "s1",
+        "omp",
+        "/w",
+        &[
+            ("alpha one", Some(T0)),
+            ("alpha two", Some(T0)),
+            ("alpha three", Some(T0)),
+            ("alpha four", Some(T0)),
+        ],
+    )
+    .await;
+    let r = env
+        .ok(json!({"query": "alpha", "mode": "lexical", "limit": 500, "matches_per_session": 9}))
+        .await;
+    assert!(has_warning(&r, "limit_clamped"), "{r}");
+    let n = r["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|w| w["code"] == "limit_clamped")
+        .count();
+    assert_eq!(n, 2, "{r}");
+    let r = env.ok(json!({"query": "alpha", "mode": "lexical"})).await;
+    assert!(!has_warning(&r, "limit_clamped"));
+}
+
+#[tokio::test]
+async fn multiple_queries_fuse_and_dedup_sessions() {
+    let env = Env::new().await;
+    env.simple("s_a", "omp", "/w", &[("zebra crossing notes", Some(T0))])
+        .await;
+    env.simple("s_b", "omp", "/w", &[("giraffe habitat notes", Some(T0))])
+        .await;
+    env.simple(
+        "s_c",
+        "omp",
+        "/w",
+        &[("zebra and giraffe together", Some(T0))],
+    )
+    .await;
+    let r = env
+        .ok(json!({"queries": ["zebra", "giraffe"], "mode": "lexical"}))
+        .await;
+    let got = ids(&r);
+    assert_eq!(got.len(), 3, "{got:?}");
+    assert_eq!(got[0], "s_c", "chunk found by both queries ranks first");
+    let r = env
+        .ok(json!({"queries": ["zebra", "zebra"], "mode": "lexical"}))
+        .await;
+    assert_eq!(ids(&r).len(), 2);
+    let r = env
+        .ok(json!({"queries": ["zebra", "giraffe"], "mode": "literal"}))
+        .await;
+    assert_eq!(ids(&r).len(), 3);
+}
+
+#[tokio::test]
+async fn excerpts_are_centred_and_stripped() {
+    let env = Env::new().await;
+    let text = format!(
+        "<oai-mem-citation>SECRETCITE</oai-mem-citation>{}needle{}",
+        "a ".repeat(1500),
+        "b ".repeat(1500)
+    );
+    let text = text.replace("needle", " needle ");
+    env.simple("s1", "omp", "/w", &[(&text, Some(T0))]).await;
+    let r = env.ok(json!({"query": "needle", "mode": "lexical"})).await;
+    let ex = r["results"][0]["matches"][0]["excerpt"].as_str().unwrap();
+    assert!(
+        ex.contains("needle") && !ex.contains("SECRETCITE") && !ex.contains("oai-mem"),
+        "{ex}"
+    );
+    assert!(ex.len() <= 1200);
+    let r = env.ok(json!({"query": "needle", "mode": "semantic"})).await;
+    let ex = r["results"][0]["matches"][0]["excerpt"].as_str().unwrap();
+    assert!(!ex.contains("SECRETCITE") && ex.len() <= 1200, "{ex}");
+}
+
+#[tokio::test]
+async fn title_falls_back_to_the_first_prompt() {
+    let env = Env::new().await;
+    let long = format!(
+        "<environment_context>noise</environment_context>Fix the parser {}",
+        "x".repeat(300)
+    );
+    env.simple("s1", "omp", "/w", &[(&long, Some(T0))]).await;
+    sqlx::query("UPDATE sessions SET native_title = NULL WHERE id = 's1'")
+        .execute(&env.index.writer)
+        .await
+        .unwrap();
+    let r = env.ok(json!({"query": "parser", "mode": "lexical"})).await;
+    let s = &r["results"][0];
+    assert_eq!(s["title_origin"], "first_prompt");
+    let t = s["title"].as_str().unwrap();
+    assert!(t.starts_with("Fix the parser") && t.len() <= 120, "{t}");
+}
+
+#[tokio::test]
+async fn coverage_is_present_only_when_degraded() {
+    let env = Env::new().await;
+    env.simple("s1", "omp", "/w", &[("alpha", Some(T0))]).await;
+    let r = env.ok(json!({"query": "alpha", "mode": "lexical"})).await;
+    assert!(r.get("coverage").is_none(), "{r}");
+    env.simple_with("s2", &Seed::default(), &[("beta", Some(T0))])
+        .await;
+    let r = env.ok(json!({"query": "beta", "mode": "lexical"})).await;
+    assert!(
+        r["coverage"]["active_chunks"].as_i64().unwrap()
+            > r["coverage"]["embedded_chunks"].as_i64().unwrap()
     );
 }

@@ -50,8 +50,13 @@ impl SessionKind {
 #[serde(deny_unknown_fields)]
 #[schemars(crate = "schemars")]
 pub struct SearchInput {
-    /// Non-empty query, at most 4,096 UTF-8 bytes and 1,024 provider tokens.
-    pub query: String,
+    /// Non-empty query, at most 4,096 UTF-8 bytes and 1,024 provider tokens. Exactly one of `query` or `queries`.
+    #[serde(default)]
+    pub query: Option<String>,
+    /// 1 to 4 queries run separately and fused. Each hybrid or semantic query costs one embedding and spends the query budget.
+    #[serde(default)]
+    #[schemars(length(min = 1, max = 4))]
+    pub queries: Option<Vec<String>>,
     /// Default `hybrid`.
     #[serde(default)]
     pub mode: Option<Mode>,
@@ -85,11 +90,13 @@ pub struct SearchInput {
     /// Reorder only near-tied sessions (scores within 1%) newest first.
     #[serde(default)]
     pub prefer_recent: bool,
-    /// Sessions to return (default 10, maximum 50).
+    /// Sessions to return (default 10, maximum 50; larger values are clamped with a `limit_clamped` warning).
     #[serde(default)]
+    #[schemars(range(min = 1, max = 50))]
     pub limit: Option<usize>,
-    /// Matches per session (default and maximum 3).
+    /// Matches per session (default and maximum 3; larger values are clamped with a `limit_clamped` warning).
     #[serde(default)]
+    #[schemars(range(min = 1, max = 3))]
     pub matches_per_session: Option<usize>,
     /// Include per-match ranking diagnostics.
     #[serde(default)]
@@ -190,9 +197,9 @@ pub struct SessionResult {
     pub session_id: String,
     pub source: String,
     pub session_kind: String,
-    /// Native title metadata, never generated.
+    /// Native title metadata, else the first user prompt (at most 120 bytes); never generated.
     pub title: Option<String>,
-    /// `native` when `title` is set.
+    /// `native` or `first_prompt` when `title` is set.
     pub title_origin: Option<String>,
     pub project_path: Option<String>,
     pub project: Option<ProjectRef>,
@@ -208,7 +215,7 @@ impl SessionResult {
             session_id: r.id,
             source: r.source_id,
             session_kind: r.kind,
-            title_origin: r.title.as_ref().map(|_| "native".to_string()),
+            title_origin: r.title_origin.map(str::to_string),
             title: r.title,
             project_path: r.cwd,
             project: None,
@@ -234,7 +241,9 @@ pub struct SearchOutput {
     pub mode_requested: Mode,
     pub mode_used: Mode,
     pub index_epoch: i64,
-    pub coverage: Coverage,
+    /// Present only when the index is degraded: sessions pending, chunks without vectors, or a fallback mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<Coverage>,
     pub results: Vec<SessionResult>,
     pub warnings: Vec<Warning>,
     /// Present only when `projects` was given.
