@@ -58,9 +58,15 @@ pub struct SearchInput {
     /// Restrict to these configured source ids (e.g. `omp`). Empty = all.
     #[serde(default)]
     pub sources: Vec<String>,
-    /// Absolute project path; matched exactly (canonical path) against the session working directory.
+    /// Restrict to these projects (1 to 16 entries). Each entry is one of: a project name such as
+    /// `app-memberships` (case-insensitive); `owner/repo` such as `freshaengineering/app-memberships` (any host);
+    /// a git URL such as `git@github.com:freshaengineering/app-memberships.git` or
+    /// `https://github.com/freshaengineering/app-memberships`; an absolute path inside a project such as
+    /// `/Users/me/code/app-memberships/src`. An entry that matches nothing adds a `project_not_found` warning;
+    /// when no entry matches, the result is empty.
     #[serde(default)]
-    pub project_path: Option<String>,
+    #[schemars(length(min = 1, max = 16))]
+    pub projects: Option<Vec<String>>,
     /// Restrict to these session ids. Empty = all.
     #[serde(default)]
     pub session_ids: Vec<String>,
@@ -91,6 +97,22 @@ pub struct SearchInput {
     /// Literal mode only: case-sensitive substring match (default true).
     #[serde(default)]
     pub case_sensitive: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[schemars(crate = "schemars")]
+pub struct ProjectRef {
+    pub name: String,
+    /// Normalized `host/owner/repo`, when the project has a git remote.
+    pub remote: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[schemars(crate = "schemars")]
+pub struct ResolvedProjects {
+    /// The filter entry; git URLs are shown normalized, never as given.
+    pub input: String,
+    pub projects: Vec<ProjectRef>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -173,6 +195,7 @@ pub struct SessionResult {
     /// `native` when `title` is set.
     pub title_origin: Option<String>,
     pub project_path: Option<String>,
+    pub project: Option<ProjectRef>,
     pub started_at: Option<String>,
     pub last_activity_at: Option<String>,
     pub source_status: String,
@@ -188,6 +211,7 @@ impl SessionResult {
             title_origin: r.title.as_ref().map(|_| "native".to_string()),
             title: r.title,
             project_path: r.cwd,
+            project: None,
             started_at: r.created_at.map(format_rfc3339),
             last_activity_at: r.last_activity_at.map(format_rfc3339),
             source_status: r.source_status,
@@ -213,6 +237,9 @@ pub struct SearchOutput {
     pub coverage: Coverage,
     pub results: Vec<SessionResult>,
     pub warnings: Vec<Warning>,
+    /// Present only when `projects` was given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_projects: Option<Vec<ResolvedProjects>>,
     /// True when matches were dropped to fit the response size limit.
     pub truncated: bool,
     /// Set when the query had no searchable word tokens; retry with `mode: "literal"`.

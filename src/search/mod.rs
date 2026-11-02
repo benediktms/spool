@@ -1,6 +1,7 @@
 //! `search_sessions` (spec 13 + 14.1): filters, lexical / semantic / literal retrieval, RRF fusion, session
 //! grouping, coverage, match references and the response byte budget.
 
+mod project_filter;
 mod query;
 mod retrieve;
 mod types;
@@ -77,6 +78,8 @@ struct Plan {
     per_session: usize,
     debug: bool,
     case_sensitive: bool,
+    resolved_projects: Option<Vec<ResolvedProjects>>,
+    warnings: Vec<Warning>,
 }
 
 /// The lexical side of a search: highlight terms, the FTS expression (if any) and its first candidate window.
@@ -223,10 +226,11 @@ impl SearchService {
         &self,
         plan: &Plan,
     ) -> Result<(Mode, Option<QueryVector>, Vec<Warning>), AppError> {
-        let mut warnings = Vec::new();
+        let mut warnings = plan.warnings.clone();
         let mut mode_used = plan.mode;
         let mut qvec = None;
-        if matches!(plan.mode, Mode::Hybrid | Mode::Semantic) {
+        let unsatisfiable = plan.filters.project_ids.as_ref().is_some_and(Vec::is_empty);
+        if matches!(plan.mode, Mode::Hybrid | Mode::Semantic) && !unsatisfiable {
             match self.query_vector(plan).await {
                 Ok(v) => qvec = Some(v),
                 Err(e) if plan.mode == Mode::Hybrid => {
@@ -337,19 +341,14 @@ impl SearchService {
                 .map(|k| k.as_str().to_string())
                 .collect()
         };
-        let mut cwds = Vec::new();
-        if let Some(p) = input.project_path.as_deref() {
-            let norm = query::normalize_abs_path(p)
-                .ok_or_else(|| invalid("project_path must be an absolute path"))?;
-            if let Ok(canon) = tokio::fs::canonicalize(&norm).await
-                && let Some(c) = canon.to_str()
-            {
-                cwds.push(c.to_string());
+        let (project_ids, resolved_projects, warnings) = match input.projects.as_deref() {
+            Some(entries) => {
+                let r =
+                    project_filter::resolve_entries(&self.index.reader, entries, invalid).await?;
+                (Some(r.ids), Some(r.resolved), r.warnings)
             }
-            if !cwds.contains(&norm) {
-                cwds.push(norm);
-            }
-        }
+            None => (None, None, Vec::new()),
+        };
         let dedup = |v: Vec<String>| {
             v.into_iter()
                 .collect::<BTreeSet<_>>()
@@ -363,7 +362,7 @@ impl SearchService {
                 sources: dedup(input.sources),
                 session_ids: dedup(input.session_ids),
                 kinds: kinds.into_iter().collect(),
-                cwds,
+                project_ids,
                 after,
                 before,
                 include_unknown_time: input.include_unknown_time,
@@ -373,6 +372,8 @@ impl SearchService {
             per_session,
             debug: input.debug_scores,
             case_sensitive: input.case_sensitive.unwrap_or(true),
+            resolved_projects,
+            warnings,
         })
     }
 
@@ -873,6 +874,7 @@ impl SearchService {
             Some(self.leases.pin(&targets).await?)
         };
 
+        let projects = self.session_projects(&ret.sessions).await?;
         let mut results: Vec<SessionResult> = Vec::new();
         if let Some(lease) = &lease {
             let expires = format_rfc3339(lease.expires_at_ms);
@@ -909,7 +911,10 @@ impl SearchService {
                         debug: m.debug,
                     })
                     .collect();
-                results.push(SessionResult::new(s.row, matches));
+                let project = projects.get(s.row.project_id.as_deref().unwrap_or_default());
+                let mut result = SessionResult::new(s.row, matches);
+                result.project = project.cloned();
+                results.push(result);
             }
         }
 
@@ -921,12 +926,50 @@ impl SearchService {
             coverage: Coverage::from_row(&ret.coverage),
             results,
             warnings,
+            resolved_projects: plan.resolved_projects.clone(),
             truncated: false,
             suggest_literal: ret.suggest_literal,
         };
         self.fit_budget(&mut out);
         serde_json::to_value(&out)
             .map_err(|_| AppError::new("STORAGE_ERROR", "the search response could not be encoded"))
+    }
+
+    async fn session_projects(
+        &self,
+        sessions: &[SessionDraft],
+    ) -> Result<HashMap<String, ProjectRef>, AppError> {
+        let ids: Vec<&str> = sessions
+            .iter()
+            .filter_map(|s| s.row.project_id.as_deref())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let mut out = HashMap::new();
+        for batch in ids.chunks(500) {
+            let sql = format!(
+                "SELECT id, name, remote FROM projects WHERE id IN ({})",
+                vec!["?"; batch.len()].join(",")
+            );
+            let mut q = sqlx::query(sqlx::AssertSqlSafe(sql));
+            for id in batch {
+                q = q.bind(*id);
+            }
+            for r in q
+                .fetch_all(&self.index.reader)
+                .await
+                .map_err(retrieve::storage_err)?
+            {
+                out.insert(
+                    sqlx::Row::get::<String, _>(&r, 0),
+                    ProjectRef {
+                        name: sqlx::Row::get(&r, 1),
+                        remote: sqlx::Row::get(&r, 2),
+                    },
+                );
+            }
+        }
+        Ok(out)
     }
 
     /// Keep the largest prefix of matches (breadth first: every session's first match before any second match)

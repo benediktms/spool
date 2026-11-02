@@ -152,6 +152,9 @@ pub struct SearchArgs {
     /// Restrict to a source id (repeatable).
     #[arg(long)]
     pub source: Vec<String>,
+    /// Restrict to a project (repeatable): name, owner/repo, git URL, or absolute path.
+    #[arg(long = "project", value_name = "VALUE")]
+    pub project: Vec<String>,
     /// Only sessions active after this time: 7d, 12h, 2w, or 2026-10-01[T..] (see --tz).
     #[arg(long)]
     pub since: Option<String>,

@@ -48,7 +48,7 @@ pub struct Filters {
     pub sources: Vec<String>,
     pub session_ids: Vec<String>,
     pub kinds: Vec<String>,
-    pub cwds: Vec<String>,
+    pub project_ids: Option<Vec<String>>,
     pub after: Option<i64>,
     pub before: Option<i64>,
     pub include_unknown_time: bool,
@@ -70,7 +70,7 @@ impl Filters {
         (sql, binds)
     }
 
-    /// Everything except the time window: exclusion and the source/session/kind/cwd lists.
+    /// Everything except the time window: exclusion and the source/session/kind/project lists.
     fn base_clause(&self) -> (String, Vec<Bind>) {
         let mut sql = String::from("s.excluded = 0");
         let mut binds = Vec::new();
@@ -78,12 +78,19 @@ impl Filters {
             ("s.session_kind", &self.kinds),
             ("s.source_id", &self.sources),
             ("s.id", &self.session_ids),
-            ("s.cwd", &self.cwds),
         ] {
             if !vals.is_empty() {
                 sql.push_str(&format!(" AND {col} IN ({})", ph(vals.len())));
                 binds.extend(vals.iter().cloned().map(Bind::Text));
             }
+        }
+        match &self.project_ids {
+            Some(ids) if !ids.is_empty() => {
+                sql.push_str(&format!(" AND s.project_id IN ({})", ph(ids.len())));
+                binds.extend(ids.iter().cloned().map(Bind::Text));
+            }
+            Some(_) => sql.push_str(" AND 0"),
+            None => {}
         }
         (sql, binds)
     }
@@ -488,6 +495,7 @@ pub struct SessionRow {
     pub created_at: Option<i64>,
     pub last_activity_at: Option<i64>,
     pub source_status: String,
+    pub project_id: Option<String>,
 }
 
 pub async fn session_row(
@@ -495,7 +503,7 @@ pub async fn session_row(
     id: &str,
 ) -> Result<Option<SessionRow>, AppError> {
     let r = sqlx::query(
-        "SELECT id, source_id, session_kind, native_title, cwd, created_at, last_activity_at, source_status FROM sessions WHERE id = ?",
+        "SELECT id, source_id, session_kind, native_title, cwd, created_at, last_activity_at, source_status, project_id FROM sessions WHERE id = ?",
     )
     .bind(id)
     .fetch_optional(&mut *conn)
@@ -510,6 +518,7 @@ pub async fn session_row(
         created_at: r.get(5),
         last_activity_at: r.get(6),
         source_status: r.get(7),
+        project_id: r.get(8),
     }))
 }
 

@@ -422,6 +422,15 @@ fn search_and_index_requests_resolve_relative_dates() {
         search_request(&search_args(&["hello"]), NOW, UTC).unwrap(),
         json!({"query":"hello"})
     );
+    assert_eq!(
+        search_request(
+            &search_args(&["hello", "--project", "app", "--project", "acme/app"]),
+            NOW,
+            UTC
+        )
+        .unwrap(),
+        json!({"query":"hello","projects":["app","acme/app"]})
+    );
     assert!(
         search_request(
             &search_args(&["hello", "--since", "2026-10-11", "--until", "2026-10-10"]),

@@ -46,14 +46,15 @@ Input (unknown fields are rejected; only `query` is required):
 |---|---|
 | `query` | non-empty, at most 4,096 UTF-8 bytes and 1,024 provider tokens |
 | `mode` | `hybrid` (default), `lexical`, `semantic`, `literal` |
-| `sources`, `project_path`, `session_ids`, `session_kinds` | filters (default kind: interactive) |
+| `sources`, `session_ids`, `session_kinds` | filters (default kind: interactive) |
+| `projects` | 1 to 16 entries, each a project name (`app-memberships`, case-insensitive), `owner/repo` (any host), a git URL, or an absolute path inside a project. Matches of several entries are unioned |
 | `after`, `before`, `include_unknown_time` | absolute RFC 3339 timestamps only; relative dates exist only in the CLI |
 | `prefer_recent`, `limit`, `matches_per_session`, `debug_scores` | ranking and size controls |
 
 Output: `mode_requested`, `mode_used`, `index_epoch`, `coverage` (indexed sessions, active/embedded
 chunks, pending sessions, last discovery), `results` (session identity and native title, `matches`
 with `match_ref`, `match_ref_expires_at`, optional `branch_ref`, excerpt of at most 1,200 bytes,
-`matched_by`), `warnings`, `truncated`. Default response cap 64 KiB.
+`matched_by`) and `project` (`name`, `remote`; null when unknown) per session, `warnings`, `truncated`, and `resolved_projects` (per `projects` entry, the projects it matched; absent without the filter). An entry that matches nothing adds a `project_not_found` warning; when no entry matches, the result is empty (the search never widens to all projects). Default response cap 64 KiB.
 
 Behaviour worth knowing:
 

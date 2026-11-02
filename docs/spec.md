@@ -750,7 +750,7 @@ Input:
   "query": "implementing a local GitHub review bot",
   "mode": "hybrid",
   "sources": ["omp"],
-  "project_path": null,
+  "projects": null,
   "session_ids": [],
   "session_kinds": ["interactive"],
   "after": "2026-10-01T00:00:00Z",
@@ -763,7 +763,7 @@ Input:
 }
 ```
 
-Required field: nonempty `query`. Query limit: 4,096 UTF-8 bytes and 1,024 provider tokens. Empty optional lists mean no additional filter except the default interactive-session kind. Reject unknown enum values and unrecognized fields to catch client mistakes.
+Required field: nonempty `query`. Query limit: 4,096 UTF-8 bytes and 1,024 provider tokens. `projects` takes 1 to 16 entries (an empty list is an error); each entry is detected deterministically: a leading `/` is an absolute path, `://` or scp-style `user@host:` is a git URL, exactly one `/` is `owner/repo`, anything else is a project name. A name matches `projects.name` case-insensitively; `owner/repo` matches `git_remote` keys ending in `/owner/repo` on any host; a URL is normalized and matched exactly against `key`; a path takes the nearest `project_paths` row equal to the path or one of its parents, else a live project resolution of the path. Entries that match several projects contribute all of them. An entry without a match adds a `project_not_found` warning that names the entry (URLs are shown normalized, never as given); when no entry matches, the response has no results and the search never widens to all projects. The output then carries `resolved_projects` (`input` and the matched `name`/`remote` pairs per entry), and every result carries `project` (`name`, `remote`, or null) next to the working directory `project_path`. Empty optional lists mean no additional filter except the default interactive-session kind. Reject unknown enum values and unrecognized fields to catch client mistakes.
 
 Output:
 
@@ -789,6 +789,7 @@ Output:
       "title": "Local review bot",
       "title_origin": "native",
       "project_path": "/Users/example/projects/review-bot",
+      "project": { "name": "review-bot", "remote": "github.com/example/review-bot" },
       "started_at": "2026-09-08T09:00:00Z",
       "last_activity_at": "2026-10-10T15:10:00Z",
       "source_status": "present",

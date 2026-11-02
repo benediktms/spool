@@ -32,6 +32,9 @@ pub fn search_request(a: &SearchArgs, now_ms: i64, tz: Tz) -> Built<Value> {
     if !a.source.is_empty() {
         m.insert("sources".into(), json!(a.source));
     }
+    if !a.project.is_empty() {
+        m.insert("projects".into(), json!(a.project));
+    }
     for (flag, key, v) in [("since", "after", &a.since), ("until", "before", &a.until)] {
         if let Some(raw) = v {
             let ms = parse_when(raw, now_ms, tz).map_err(|e| format!("--{flag}: {e}"))?;

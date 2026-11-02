@@ -185,7 +185,10 @@ async fn invalid_arguments_are_rejected() {
         json!({"query": "x", "after": "2026-10-01T00:00:00+02:00"}),
         json!({"query": "x", "after": "2026-10-02T00:00:00Z", "before": "2026-10-01T00:00:00Z"}),
         json!({"query": "x", "after": "2026-10-01T00:00:00Z", "before": "2026-10-01T00:00:00Z"}),
-        json!({"query": "x", "project_path": "relative/path"}),
+        json!({"query": "x", "project_path": "/w"}),
+        json!({"query": "x", "projects": []}),
+        json!({"query": "x", "projects": [""]}),
+        json!({"query": "x", "projects": (0..17).map(|i| format!("p{i}")).collect::<Vec<_>>()}),
         json!({"query": "x", "sources": "omp"}),
         json!({"mode": "lexical"}),
         json!({"query": "y".repeat(4097), "mode": "lexical"}),
@@ -356,11 +359,8 @@ async fn filters_apply_before_candidate_limits() {
             json!({"session_ids": ["codex_target"]}),
             vec!["codex_target"],
         ),
-        (json!({"project_path": "/w/target"}), vec!["codex_target"]),
-        (
-            json!({"project_path": "/w/target/./"}),
-            vec!["codex_target"],
-        ),
+        (json!({"projects": ["/w/target"]}), vec!["codex_target"]),
+        (json!({"projects": ["/w/target/./"]}), vec!["codex_target"]),
         (
             json!({"sources": ["codex"], "session_kinds": ["subagent"]}),
             vec!["sub"],
@@ -394,7 +394,7 @@ async fn filters_apply_before_candidate_limits() {
         .await;
     assert_eq!(
         ids(&env
-            .ok(json!({"query": "gadget", "mode": "lexical", "project_path": "/w/alpha"}))
+            .ok(json!({"query": "gadget", "mode": "lexical", "projects": ["/w/alpha"]}))
             .await),
         ["alpha"]
     );
@@ -1814,5 +1814,143 @@ async fn profile_migration_queries_the_old_profile_until_the_current_corpus_is_c
         fake_old.calls_for(Purpose::Query),
         1,
         "the old provider is no longer asked"
+    );
+}
+
+async fn remote_session(env: &Env, id: &str, cwd: &str, remote: &str) {
+    env.simple(id, "omp", cwd, &[("zebra crossing", Some(T0))])
+        .await;
+    let name = remote.rsplit('/').next().unwrap();
+    env.link_project(id, cwd, "git_remote", remote, name, Some(remote))
+        .await;
+}
+
+#[tokio::test]
+async fn projects_filter_accepts_each_entry_form() {
+    let env = Env::new().await;
+    let repo = tempfile::tempdir().unwrap();
+    let repo_dir = std::fs::canonicalize(repo.path()).unwrap();
+    std::fs::create_dir_all(repo_dir.join(".git/objects")).unwrap();
+    std::fs::create_dir_all(repo_dir.join(".git/refs")).unwrap();
+    std::fs::write(repo_dir.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+    std::fs::write(
+        repo_dir.join(".git/config"),
+        "[remote \"origin\"]\n\turl = git@github.com:acme/live.git\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(repo_dir.join("src")).unwrap();
+    remote_session(&env, "widgets", "/w/widgets", "github.com/acme/widgets").await;
+    remote_session(&env, "live", "/elsewhere/live", "github.com/acme/live").await;
+    remote_session(&env, "other", "/w/other", "github.com/acme/other").await;
+    let q = |p: Value| json!({"query": "zebra", "mode": "lexical", "projects": p});
+    for (entry, want) in [
+        ("Widgets", "widgets"),
+        ("acme/widgets", "widgets"),
+        ("ACME/Widgets.git", "widgets"),
+        ("git@github.com:acme/widgets.git", "widgets"),
+        ("https://user:secret@GitHub.com/acme/widgets.git", "widgets"),
+        ("/w/widgets/src/deep", "widgets"),
+        (repo_dir.join("src").to_str().unwrap(), "live"),
+    ] {
+        let r = env.ok(q(json!([entry]))).await;
+        assert_eq!(ids(&r), [want], "{entry}");
+        assert!(r["warnings"].as_array().unwrap().is_empty(), "{entry}");
+        assert_eq!(
+            r["resolved_projects"][0]["projects"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+    let r = env.ok(q(json!(["widgets"]))).await;
+    assert_eq!(r["results"][0]["project"]["name"], "widgets");
+    assert_eq!(
+        r["results"][0]["project"]["remote"],
+        "github.com/acme/widgets"
+    );
+    assert_eq!(r["results"][0]["project_path"], "/w/widgets");
+    let r = env.ok(json!({"query": "zebra", "mode": "lexical"})).await;
+    assert!(r.get("resolved_projects").is_none());
+}
+
+#[tokio::test]
+async fn projects_filter_unions_and_reports_unmatched_entries() {
+    let env = Env::new().await;
+    remote_session(&env, "a", "/w/a", "github.com/acme/alpha").await;
+    remote_session(&env, "b", "/w/b", "gitlab.com/acme/beta").await;
+    remote_session(&env, "c", "/w/c", "github.com/acme/gamma").await;
+    remote_session(&env, "a2", "/x/a2", "gitlab.com/other/alpha").await;
+    let search = |p: Value| env.ok(json!({"query": "zebra", "mode": "lexical", "projects": p}));
+
+    let r = search(json!(["alpha", "acme/beta"])).await;
+    let mut got = ids(&r);
+    got.sort();
+    assert_eq!(got, ["a", "a2", "b"]);
+    assert_eq!(
+        r["resolved_projects"][0]["projects"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+
+    let r = search(json!([
+        "beta",
+        "nope",
+        "https://tok:secret@github.com/no/such.git"
+    ]))
+    .await;
+    assert_eq!(ids(&r), ["b"]);
+    let w: Vec<&Value> = r["warnings"].as_array().unwrap().iter().collect();
+    assert_eq!(w.len(), 2);
+    assert!(w.iter().all(|w| w["code"] == "project_not_found"));
+    assert!(w[0]["message"].as_str().unwrap().contains("nope"));
+    assert!(
+        w[1]["message"]
+            .as_str()
+            .unwrap()
+            .contains("github.com/no/such")
+    );
+    assert!(!r.to_string().contains("secret"));
+
+    let r = search(json!(["nope", "also/nope", "not a url://"])).await;
+    assert!(ids(&r).is_empty());
+    assert_eq!(r["warnings"].as_array().unwrap().len(), 3);
+    assert_eq!(env.provider.calls(), 0);
+    let r = env
+        .ok(json!({"query": "zebra", "mode": "hybrid", "projects": ["nope"]}))
+        .await;
+    assert!(ids(&r).is_empty());
+    assert_eq!(
+        env.provider.calls(),
+        0,
+        "an unmatched filter never reaches the provider"
+    );
+}
+
+#[tokio::test]
+async fn linked_worktree_sessions_are_found_by_project_name() {
+    let env = Env::new().await;
+    remote_session(&env, "main", "/code/app", "github.com/acme/app").await;
+    remote_session(
+        &env,
+        "tree",
+        "/code/app-worktrees/feat",
+        "github.com/acme/app",
+    )
+    .await;
+    let r = env
+        .ok(json!({"query": "zebra", "mode": "lexical", "projects": ["app"]}))
+        .await;
+    let mut got = ids(&r);
+    got.sort();
+    assert_eq!(got, ["main", "tree"]);
+    assert_eq!(
+        r["resolved_projects"][0]["projects"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
     );
 }
