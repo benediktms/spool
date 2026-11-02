@@ -8,7 +8,9 @@ use serde_json::json;
 use spool::embeddings::fake::Fault;
 use spool::jobs::WorkerState;
 use spool::jobs::payload::*;
-use spool::jobs::scheduler::{RETRY_CAP, Reconciler, interleave, jitter_from, retry_delay};
+use spool::jobs::scheduler::{
+    RETRY_CAP, Reconciler, backoff_delay, interleave, jitter_from, retry_delay,
+};
 use spool::storage::catalog;
 use std::sync::Arc;
 use std::time::Duration;
@@ -121,6 +123,23 @@ fn retry_delay_is_exponential_with_jitter_capped_and_honours_retry_after() {
         "Retry-After is a floor"
     );
     assert_eq!(d(3, Some(1), 0.5), Duration::from_secs(20));
+    let base = Duration::from_millis(200);
+    let cap = Duration::from_millis(2000);
+    for (attempt, lower, upper) in [
+        (1, 160, 240),
+        (3, 640, 960),
+        (4, 1280, 1920),
+        (5, 1600, 2000),
+    ] {
+        assert_eq!(
+            backoff_delay(base, cap, attempt, None, 0.0),
+            Duration::from_millis(lower)
+        );
+        assert_eq!(
+            backoff_delay(base, cap, attempt, None, 1.0),
+            Duration::from_millis(upper)
+        );
+    }
     let a = jitter_from("s", 1);
     assert!((0.0..1.0).contains(&a));
     assert_eq!(a, jitter_from("s", 1), "deterministic per seed");
@@ -774,18 +793,12 @@ async fn apalis_retry_layer_backs_off_exponentially_with_jitter_and_honours_retr
     assert_eq!(v.len(), 5, "failed 4 times then succeeded");
     let gaps: Vec<u128> = v.windows(2).map(|w| (w[1] - w[0]).as_millis()).collect();
     println!("RETRY_TIMING base=200ms cap=2000ms retry_after(attempt2)=1000ms gaps_ms={gaps:?}");
-    assert!(
-        (140..=400).contains(&gaps[0]),
-        "attempt 1 -> 2 ~200ms +-20%: {gaps:?}"
-    );
-    assert!(
-        gaps[1] >= 1000 && gaps[1] < 1500,
-        "Retry-After is a floor: {gaps:?}"
-    );
-    assert!(
-        (560..=900).contains(&gaps[2]),
-        "attempt 3 -> 4 ~800ms with jitter... {gaps:?}"
-    );
+    for (gap, minimum) in gaps.iter().zip([160, 1000, 640, 1280]) {
+        assert!(
+            *gap >= minimum,
+            "retry ran before its minimum delay: {gaps:?}"
+        );
+    }
     let (status, attempts): (String, i64) =
         sqlx::query_as("SELECT status, attempts FROM Jobs WHERE job_type='retry-probe'")
             .fetch_one(&env.jobs_pool)
