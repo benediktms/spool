@@ -48,8 +48,13 @@ struct Payload {
     #[serde(rename = "internal_chat_message_metadata_passthrough")]
     turn_metadata: Option<TurnMetadata>,
     history_mode: Option<String>,
+    git: Option<CodexGit>,
     #[serde(flatten)]
     _rest: HashMap<String, IgnoredAny>,
+}
+#[derive(Deserialize, Default)]
+struct CodexGit {
+    repository_url: Option<String>,
 }
 #[derive(Deserialize, Default)]
 struct Content {
@@ -61,7 +66,7 @@ struct Content {
 }
 impl JsonlHarness for CodexAdapter {
     const KIND: HarnessKind = HarnessKind::Codex;
-    const PARSER_VERSION: &'static str = "codex-rollout-cab328f2";
+    const PARSER_VERSION: &'static str = "codex-rollout-cab328f2+git-remote";
     const MALFORMED_DETAIL: &'static str = "invalid complete JSONL rollout line";
     type Parser = parse::ParseState;
 

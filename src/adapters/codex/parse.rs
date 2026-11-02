@@ -5,6 +5,7 @@ use crate::domain::{
     BlockOrigin, Coverage, Digest, MessageEntry, RecordKind, RecordMeta, Role, SessionKind,
     TextBlock, ToolCallMeta, ToolResultMeta, parse_timestamp_ms,
 };
+use crate::projects::normalize_remote;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
@@ -50,11 +51,16 @@ fn session_facts(p: Payload) -> SessionFacts {
             .map(str::to_owned)
     });
 
+    let remote = p
+        .git
+        .and_then(|g| g.repository_url)
+        .and_then(|url| normalize_remote(&url).ok());
+
     SessionFacts {
         native_id: p.thread_id.or(p.conversation_id).or(p.id),
         title: None,
         cwd: p.cwd,
-        remote: None,
+        remote,
         parent_native_session,
         kind,
     }

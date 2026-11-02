@@ -258,3 +258,11 @@ fn codex_graph_resolves_linear_record_ancestry_through_controls() {
     assert_eq!(graph.path_to("assistant"), ["user", "assistant"]);
     assert_eq!(graph.message_parent("assistant"), Some("user"));
 }
+
+#[test]
+fn codex_session_meta_git_remote_is_normalized_and_never_keeps_credentials() {
+    let line = r#"{"timestamp":"2026-10-10T00:00:00Z","type":"session_meta","payload":{"id":"t1","cwd":"/w","source":"cli","git":{"branch":"main","repository_url":"https://user:tok3n@github.com/acme/widgets.git"}}}"#;
+    let (manifest, _) = parse(&CodexAdapter, format!("{line}\n").as_bytes());
+    assert_eq!(manifest.remote.as_deref(), Some("github.com/acme/widgets"));
+    assert!(!format!("{manifest:?}").contains("tok3n"));
+}
