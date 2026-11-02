@@ -1,4 +1,4 @@
-//! Milestone 0: real stdio MCP client -> `spool mcp` -> owner-only Unix socket -> daemon.
+//! Real stdio MCP client -> `spool mcp` -> owner-only Unix socket -> daemon.
 
 use rmcp::{ServiceExt, model::CallToolRequestParams, transport::TokioChildProcess};
 use std::io::{BufRead, BufReader, Write};
@@ -29,19 +29,67 @@ fn start_daemon() -> Daemon {
         .tempdir_in("/tmp")
         .unwrap();
     let home = tmp.path().join("h");
-    let child = Command::new(BIN)
+    let src = tmp.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    let init = Command::new(BIN)
+        .args([
+            "init",
+            "--enable-source",
+            "omp",
+            "--hosted-processing",
+            "no",
+        ])
+        .env("SPOOL_HOME", &home)
+        .output()
+        .unwrap();
+    assert!(
+        init.status.success(),
+        "init failed: {}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+    let config = home.join("config.toml");
+    let cfg = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(
+        &config,
+        cfg.replace("~/.omp/agent/sessions", src.to_str().unwrap()),
+    )
+    .unwrap();
+    let log = tmp.path().join("daemon.log");
+    let mut child = Command::new(BIN)
         .args(["daemon", "run"])
         .env("SPOOL_HOME", &home)
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(std::fs::File::create(&log).unwrap())
         .spawn()
         .unwrap();
     let sock = home.join("state/spool.sock");
     let t = Instant::now();
     while !sock.exists() {
+        if let Some(status) = child.try_wait().unwrap() {
+            panic!(
+                "daemon exited {status}: {}",
+                std::fs::read_to_string(&log).unwrap()
+            );
+        }
         assert!(
             t.elapsed() < Duration::from_secs(20),
             "daemon did not create socket"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    loop {
+        let status = Command::new(BIN)
+            .args(["status", "--json"])
+            .env("SPOOL_HOME", &home)
+            .output()
+            .unwrap();
+        if status.status.success() {
+            break;
+        }
+        assert!(
+            t.elapsed() < Duration::from_secs(20),
+            "daemon control plane not ready: {}",
+            String::from_utf8_lossy(&status.stderr)
         );
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -75,8 +123,9 @@ async fn stdio_client_reaches_daemon_tool_over_ipc() {
     );
 
     let tools = client.list_all_tools().await.unwrap();
-    let names: Vec<_> = tools.iter().map(|t| t.name.to_string()).collect();
-    assert_eq!(names, ["index_status"]);
+    let mut names: Vec<_> = tools.iter().map(|t| t.name.to_string()).collect();
+    names.sort();
+    assert_eq!(names, ["index_status", "read_session", "search_sessions"]);
 
     let r = client
         .call_tool(CallToolRequestParams::new("index_status"))
@@ -85,7 +134,7 @@ async fn stdio_client_reaches_daemon_tool_over_ipc() {
     assert_eq!(r.is_error, Some(false));
     let v = r.structured_content.expect("structured content");
     eprintln!("TOOL RESULT {v}");
-    assert_eq!(v["fts5"], true);
+    assert_eq!(v["embedding"]["state"], "not_approved");
     assert_eq!(v["queue"]["queued"], 0);
     client.cancel().await.unwrap();
 }

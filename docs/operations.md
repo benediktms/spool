@@ -21,6 +21,75 @@ Hosted embeddings additionally need the provider key in `secrets/provider.key` (
 key). Without it Spool is lexical-only; `doctor` and `status` report the two causes (not approved
 vs. no credential) distinctly.
 
+## Embeddings for semantic search
+
+The default provider is OpenAI, using `text-embedding-3-small` with 768 dimensions. Enabling
+hosted processing sends rendered conversation chunks and semantic/hybrid search queries to the
+provider. Text may contain pasted secrets; the tool-block filter is not a secret scanner. See
+[privacy and security](privacy-and-security.md#hosted-processing-consent).
+
+1. Find your `config.toml`: `~/Library/Application Support/Spool/config.toml` on macOS,
+   `~/.local/state/spool/config.toml` on Linux (`$XDG_STATE_HOME/spool/config.toml` if set), or `$SPOOL_HOME/config.toml`
+   when overridden. `spool config show` prints the config file path. Edit the existing
+   `[embedding]` section (do not add a second one):
+
+   ```toml
+   [embedding]
+   enabled = true
+   hosted_processing_approved = true
+   provider = "openai"
+   model = "text-embedding-3-small"
+   dimensions = 768
+   credential_file = "secrets/provider.key"
+   ```
+
+2. Save your provider API key in `secrets/provider.key` beside `config.toml`, or at the path set
+   by `credential_file`. The file must contain only the key, without quotes, `Bearer`, or an
+   environment-variable assignment. Create it with restricted permissions before opening it
+   in an editor:
+
+   ```sh
+   # macOS default; use your actual config directory if different.
+   spool_home="$HOME/Library/Application Support/Spool"
+   umask 077
+   mkdir -p "$spool_home/secrets"
+   chmod 700 "$spool_home/secrets"
+   touch "$spool_home/secrets/provider.key"
+   chmod 600 "$spool_home/secrets/provider.key"
+   vi "$spool_home/secrets/provider.key"
+   ```
+
+   Spool reads this file directly; exporting an API key in your shell does not configure the daemon.
+
+3. Restart the daemon to load the configuration and credential, then test provider access:
+
+   ```sh
+   spool service restart
+   spool doctor --probe-provider
+   spool status --json
+   ```
+
+   For a foreground daemon, stop and rerun `spool daemon run` instead. The provider probe sends
+   one fixed harmless string and should report the configured dimensions. It does not embed
+   your indexed conversation history.
+
+4. The daemon fills missing vectors for already indexed sessions in the background. Check
+   vector coverage with `spool status --json`; provider readiness alone does not mean that
+   all conversation chunks have vectors. To request a coverage scan explicitly, run
+   `spool index rebuild --embeddings-only`. To include older sessions, first preview the scope
+   with `spool index --since 30d --dry-run`, then run `spool index --since 30d --wait`.
+
+   ```sh
+   spool search "how did we handle webhook retries?" --mode semantic
+   spool search "webhook retries" --mode hybrid
+   ```
+
+The default daily token budgets are 1,000,000 for ingestion and 50,000 for queries, resetting at
+midnight UTC. They limit token usage, not currency spending; adjust `embedding.daily_ingestion_token_budget`
+and `embedding.daily_query_token_budget` before enabling hosted processing if needed. Budget exhaustion
+can delay vector coverage. Hybrid search falls back to lexical search when query embedding is
+unavailable; semantic-only search returns an error instead.
+
 ## Running the daemon
 
 * Foreground: `spool daemon run` (Ctrl-C / SIGTERM stops it; graceful target 15 s).
