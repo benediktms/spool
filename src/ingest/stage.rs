@@ -96,6 +96,8 @@ impl From<sqlx::Error> for StageError {
 pub struct StageMeta {
     pub title: Option<String>,
     pub cwd: Option<String>,
+    #[serde(default)]
+    pub remote: Option<String>,
     pub session_kind: SessionKind,
     pub lineage: Option<String>,
     pub lineage_verified: bool,
@@ -839,6 +841,7 @@ async fn run(pass: Pass<'_>, opened: crate::source::OpenedSource) -> Result<Stag
     let meta = StageMeta {
         title: manifest.native_title.clone(),
         cwd: manifest.cwd.clone(),
+        remote: manifest.remote.clone(),
         session_kind: manifest.session_kind,
         lineage: manifest.parent_native_session.clone(),
         lineage_verified: manifest.lineage_verified,

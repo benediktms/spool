@@ -449,7 +449,7 @@ The following is the required logical model; names may change if the migration a
 | Table | Purpose and important fields |
 |---|---|
 | `sources` | Stable ID, adapter, roots, enabled flag, configuration revision, bootstrap cutoff, discovery watermark, last successful scan, last scan error |
-| `sessions` | Internal ID, source ID, native ID, lineage, native title, cwd, project ID, session kind, creation/activity times, active snapshot ID, exclusion flag, observed fingerprint, parser/coverage status |
+| `sessions` | Internal ID, source ID, native ID, lineage, native title, cwd, normalized git remote (first non-null value kept), project ID, session kind, creation/activity times, active snapshot ID, exclusion flag, observed fingerprint, parser/coverage status |
 | `projects` | Stable ID, kind (`git_remote`, `git_dir`, `path`), unique key, display name, normalized remote, creation time. Identity, first match wins: normalized `host/owner/repo` (Codex `session_meta.git.repository_url`, else the cwd repository's `remote.origin.url`); the canonical common git directory (groups linked worktrees of a repository without a remote); the exact cwd |
 | `project_paths` | Working directory, project ID, resolution time, `dead_at` (set when the path no longer exists; rows are never deleted) |
 | `source_files` | Session ID, canonical path, native file identity, observed size/mtime, format/compression, existence status |
@@ -1489,6 +1489,8 @@ Provide a systemd user unit running the foreground daemon with restart-on-failur
 At the configured warning threshold, surface a warning. At the hard storage threshold, pause new ingestion and preserve existing search; do not silently delete old conversations to free space. Include WAL size in the budget.
 
 Maintenance uses bounded transactions to delete retired snapshots whose leases expired, remove unreferenced embeddings, prune old completed job records through supported backend APIs, and request nonblocking checkpoints when appropriate. Large compaction or VACUUM is explicit maintenance with documented impact.
+
+The routine maintenance step also correlates projects, at most 500 distinct paths per run and idempotently. It assigns a project to sessions that have none (a stored remote wins over the working directory; Codex sessions with neither a stored remote nor a project are re-probed from the bounded source header, skipping missing files), moves the sessions of a `path` project to the git project that holds their working directory's `project_paths` row and deletes the emptied `path` project, and sets `dead_at` on `project_paths` rows whose path no longer exists (a plain existence check). The job never runs git discovery on an existing path: discovering a new session in a directory that is now a repository is what re-points the row, and the next run does the move. It never deletes `project_paths` rows, never re-checks dead rows, never reassigns sessions of git-backed projects and never changes eligibility.
 
 Use SQLite's backup facilities or a controlled offline procedure for consistent backups. Do not copy only a live `.sqlite` file while ignoring its WAL. Backups and support bundles exclude secrets by default. Logical purge is not a forensic secure-erasure guarantee for old disk pages, filesystem snapshots, or prior backups.
 

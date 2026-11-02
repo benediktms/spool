@@ -231,15 +231,12 @@ pub async fn upsert_session(
     Ok((id, existed.is_none()))
 }
 
-/// Record the project (and the path that resolved to it) and attach it to a session that has none.
-/// Idempotent: an existing project row, with its original name and creation time, is kept.
-pub async fn assign_project(
+async fn upsert_project_path(
     conn: &mut SqliteConnection,
-    session_id: &str,
     cwd: &str,
     project: &ProjectKey,
     now_ms: i64,
-) -> Result<()> {
+) -> Result<String> {
     let id = project.id();
     sqlx::query(
         "INSERT INTO projects(id, kind, key, name, remote, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
@@ -263,12 +260,99 @@ pub async fn assign_project(
     .bind(now_ms)
     .execute(&mut *conn)
     .await?;
+    Ok(id)
+}
+
+/// Record the project (and the path that resolved to it) and attach it to a session that has none.
+/// Idempotent: an existing project row, with its original name and creation time, is kept.
+pub async fn assign_project(
+    conn: &mut SqliteConnection,
+    session_id: &str,
+    cwd: &str,
+    project: &ProjectKey,
+    now_ms: i64,
+) -> Result<()> {
+    let id = upsert_project_path(conn, cwd, project, now_ms).await?;
     sqlx::query("UPDATE sessions SET project_id = ?1 WHERE id = ?2 AND project_id IS NULL")
         .bind(&id)
         .bind(session_id)
         .execute(&mut *conn)
         .await?;
     Ok(())
+}
+
+/// Keep the first normalized remote seen for a session; a later parse without one never erases it.
+pub async fn set_session_remote(
+    conn: &mut SqliteConnection,
+    session_id: &str,
+    remote: &str,
+) -> Result<()> {
+    sqlx::query("UPDATE sessions SET remote = ?1 WHERE id = ?2 AND remote IS NULL")
+        .bind(remote)
+        .bind(session_id)
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
+/// Attach the project to every session at `cwd` with the same stored `remote` that has none;
+/// returns the sessions updated.
+pub async fn assign_project_to_cwd(
+    conn: &mut SqliteConnection,
+    cwd: &str,
+    remote: Option<&str>,
+    project: &ProjectKey,
+    now_ms: i64,
+) -> Result<u64> {
+    let id = upsert_project_path(conn, cwd, project, now_ms).await?;
+    Ok(
+        sqlx::query(
+            "UPDATE sessions SET project_id = ?1 WHERE cwd = ?2 AND remote IS ?3 AND project_id IS NULL",
+        )
+        .bind(&id)
+        .bind(cwd)
+        .bind(remote)
+            .execute(&mut *conn)
+            .await?
+            .rows_affected(),
+    )
+}
+
+/// Move sessions of `path` projects to the non-`path` project that now holds their cwd, then
+/// drop `path` projects nothing references. SQL only. Bounded to `limit` distinct cwds; returns
+/// `(sessions moved, projects deleted)`.
+pub async fn merge_path_projects(conn: &mut SqliteConnection, limit: usize) -> Result<(u64, u64)> {
+    let targets: Vec<(String, String)> = sqlx::query_as(
+        "SELECT DISTINCT s.cwd, pp.project_id FROM sessions s \
+         JOIN projects op ON op.id = s.project_id AND op.kind = 'path' \
+         JOIN project_paths pp ON pp.path = s.cwd \
+         JOIN projects np ON np.id = pp.project_id AND np.kind <> 'path' \
+         ORDER BY s.cwd LIMIT ?",
+    )
+    .bind(limit as i64)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut moved = 0;
+    for (cwd, project) in &targets {
+        moved += sqlx::query(
+            "UPDATE sessions SET project_id = ?1 WHERE cwd = ?2 \
+             AND project_id IN (SELECT id FROM projects WHERE kind = 'path')",
+        )
+        .bind(project)
+        .bind(cwd)
+        .execute(&mut *conn)
+        .await?
+        .rows_affected();
+    }
+    let deleted = sqlx::query(
+        "DELETE FROM projects WHERE kind = 'path' \
+         AND NOT EXISTS (SELECT 1 FROM sessions WHERE project_id = projects.id) \
+         AND NOT EXISTS (SELECT 1 FROM project_paths WHERE project_id = projects.id)",
+    )
+    .execute(&mut *conn)
+    .await?
+    .rows_affected();
+    Ok((moved, deleted))
 }
 
 pub async fn upsert_source_file(

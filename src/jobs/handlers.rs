@@ -811,6 +811,17 @@ async fn maintain(ctx: &Arc<JobCtx>, m: MaintainIndex) -> Result<(), JobError> {
     .bind(now - 30 * catalog::DAY_MS)
     .execute(&idx.writer)
     .await?;
+    if m.scope == MaintenanceScope::Routine {
+        summary["projects"] = correlate_projects(
+            idx,
+            &ctx.discovery,
+            now,
+            PROJECT_PATHS_PER_RUN,
+            &ctx.shutdown,
+        )
+        .await
+        .map_err(|e| Box::new(e) as JobError)?;
+    }
     // Completed Apalis rows are pruned through the backend's own API once enough accumulate.
     let counts = ctx.sub.counts(INGEST_QUEUE).await.map_err(|e| e.message)?;
     if counts.done + counts.killed >= JOB_PRUNE_THRESHOLD
@@ -848,6 +859,151 @@ async fn maintain(ctx: &Arc<JobCtx>, m: MaintainIndex) -> Result<(), JobError> {
             .map_err(|e| Box::new(e) as JobError)?;
     }
     Ok(())
+}
+
+/// Distinct paths one maintenance run resolves or probes.
+pub const PROJECT_PATHS_PER_RUN: usize = 500;
+
+/// Keep the project model current: assign projects to sessions that have none, move sessions of
+/// `path` projects to the git project that ingestion has since attached to their cwd (SQL only,
+/// no git discovery here), and mark vanished paths dead with a plain existence check. Idempotent.
+/// A stored remote wins over the working directory; Codex sessions without one are re-probed from
+/// their source header first.
+pub async fn correlate_projects(
+    idx: &Index,
+    discovery: &DiscoveryService,
+    now: i64,
+    limit: usize,
+    stop: &AtomicBool,
+) -> Result<Value, sqlx::Error> {
+    let mut report = json!({
+        "remotes_backfilled": 0,
+        "sessions_assigned": 0,
+        "sessions_merged": 0,
+        "path_projects_deleted": 0,
+        "paths_dead": 0,
+    });
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    let unprobed: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT s.id, s.source_id, sf.path FROM sessions s \
+         JOIN sources src ON src.id = s.source_id AND src.kind = 'codex' \
+         JOIN source_files sf ON sf.session_id = s.id AND sf.exists_status = 'present' \
+         WHERE s.project_id IS NULL AND s.remote IS NULL AND s.cwd IS NOT NULL ORDER BY s.id LIMIT ?",
+    )
+    .bind(limit as i64)
+    .fetch_all(&idx.reader)
+    .await?;
+    if !unprobed.is_empty() {
+        let files = unprobed
+            .iter()
+            .map(|(_, source, path)| (source.clone(), std::path::PathBuf::from(path)))
+            .collect();
+        let remotes = discovery
+            .probe_codex_remotes(files)
+            .await
+            .map_err(|e| sqlx::Error::Io(std::io::Error::other(e)))?;
+        let mut tx = idx.writer.begin().await?;
+        let mut found = 0;
+        for ((sid, _, _), remote) in unprobed.iter().zip(remotes) {
+            if let Some(remote) = remote {
+                catalog::set_session_remote(&mut tx, sid, &remote).await?;
+                found += 1;
+            }
+        }
+        tx.commit().await?;
+        report["remotes_backfilled"] = json!(found);
+    }
+    if stop.load(Ordering::Relaxed) {
+        return Ok(report);
+    }
+
+    let orphans: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT DISTINCT cwd, remote FROM sessions WHERE project_id IS NULL AND cwd IS NOT NULL ORDER BY cwd, remote LIMIT ?",
+    )
+    .bind(limit as i64)
+    .fetch_all(&idx.reader)
+    .await?;
+    let resolved = tokio::task::spawn_blocking(move || {
+        orphans
+            .into_iter()
+            .map(|(cwd, remote)| {
+                let key = crate::projects::resolve(&cwd, remote.as_deref());
+                (cwd, remote, key)
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    .map_err(|e| sqlx::Error::Io(std::io::Error::other(e)))?;
+    if !resolved.is_empty() {
+        let mut tx = idx.writer.begin().await?;
+        let mut assigned = 0;
+        for (cwd, remote, key) in &resolved {
+            assigned +=
+                catalog::assign_project_to_cwd(&mut tx, cwd, remote.as_deref(), key, now).await?;
+        }
+        tx.commit().await?;
+        report["sessions_assigned"] = json!(assigned);
+    }
+    seen.extend(resolved.into_iter().map(|(cwd, _, _)| cwd));
+    {
+        let mut tx = idx.writer.begin().await?;
+        let (moved, deleted) = catalog::merge_path_projects(&mut tx, limit).await?;
+        tx.commit().await?;
+        report["sessions_merged"] = json!(moved);
+        report["path_projects_deleted"] = json!(deleted);
+    }
+    if stop.load(Ordering::Relaxed) || seen.len() >= limit {
+        return Ok(report);
+    }
+
+    let rows: Vec<String> = sqlx::query_scalar(
+        "SELECT path FROM project_paths WHERE dead_at IS NULL ORDER BY resolved_at, path LIMIT ?",
+    )
+    .bind((limit + seen.len()) as i64)
+    .fetch_all(&idx.reader)
+    .await?;
+    let rows: Vec<_> = rows
+        .into_iter()
+        .filter(|path| !seen.contains(path))
+        .take(limit - seen.len())
+        .collect();
+    let probed = tokio::task::spawn_blocking(move || {
+        rows.into_iter()
+            .map(|path| {
+                let alive = std::fs::metadata(&path).is_ok();
+                (path, alive)
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    .map_err(|e| sqlx::Error::Io(std::io::Error::other(e)))?;
+    if probed.is_empty() {
+        return Ok(report);
+    }
+    let mut tx = idx.writer.begin().await?;
+    let mut dead = 0;
+    for (path, alive) in &probed {
+        if *alive {
+            sqlx::query("UPDATE project_paths SET resolved_at = ?1 WHERE path = ?2")
+                .bind(now)
+                .bind(path)
+                .execute(&mut *tx)
+                .await?;
+        } else {
+            dead += sqlx::query(
+                "UPDATE project_paths SET dead_at = ?1 WHERE path = ?2 AND dead_at IS NULL",
+            )
+            .bind(now)
+            .bind(path)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        }
+    }
+    tx.commit().await?;
+    report["paths_dead"] = json!(dead);
+    Ok(report)
 }
 
 /// Delete embeddings no chunk references (any profile; the hash is content-addressed) older than
