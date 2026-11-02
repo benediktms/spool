@@ -4,6 +4,7 @@
 
 use crate::domain::SessionKind;
 use crate::ids;
+use crate::projects::ProjectKey;
 use crate::source::SourceFileInfo;
 use crate::sources::SourceEntry;
 use crate::storage::index::Index;
@@ -228,6 +229,46 @@ pub async fn upsert_session(
     .execute(&mut *conn)
     .await?;
     Ok((id, existed.is_none()))
+}
+
+/// Record the project (and the path that resolved to it) and attach it to a session that has none.
+/// Idempotent: an existing project row, with its original name and creation time, is kept.
+pub async fn assign_project(
+    conn: &mut SqliteConnection,
+    session_id: &str,
+    cwd: &str,
+    project: &ProjectKey,
+    now_ms: i64,
+) -> Result<()> {
+    let id = project.id();
+    sqlx::query(
+        "INSERT INTO projects(id, kind, key, name, remote, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+         ON CONFLICT(key) DO NOTHING",
+    )
+    .bind(&id)
+    .bind(project.kind.as_str())
+    .bind(&project.key)
+    .bind(&project.name)
+    .bind(&project.remote)
+    .bind(now_ms)
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query(
+        "INSERT INTO project_paths(path, project_id, resolved_at) VALUES (?1, ?2, ?3) \
+         ON CONFLICT(path) DO UPDATE SET project_id = excluded.project_id, resolved_at = excluded.resolved_at, dead_at = NULL \
+         WHERE project_paths.project_id IN (SELECT id FROM projects WHERE kind = 'path')",
+    )
+    .bind(cwd)
+    .bind(&id)
+    .bind(now_ms)
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query("UPDATE sessions SET project_id = ?1 WHERE id = ?2 AND project_id IS NULL")
+        .bind(&id)
+        .bind(session_id)
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
 }
 
 pub async fn upsert_source_file(

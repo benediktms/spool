@@ -859,3 +859,64 @@ async fn cancelled_discovery_is_incomplete() {
     assert!(!rep.complete);
     assert_eq!(source_row(&env).await.discovery_watermark, None);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn discovery_assigns_a_path_project_to_a_non_git_cwd() {
+    let env = Env::new().await;
+    env.omp("a.jsonl", "a", &["hello"], T0 - DAY);
+    env.omp("b.jsonl", "b", &["hello"], T0 - DAY);
+    auto(&svc(&env)).await;
+
+    let rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT p.kind, p.key, p.name FROM sessions s JOIN projects p ON p.id = s.project_id",
+    )
+    .fetch_all(&env.index.reader)
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(
+        rows.iter()
+            .all(|r| *r == ("path".into(), "/tmp/project".into(), "project".into()))
+    );
+    assert_eq!(env.count("SELECT count(*) FROM projects").await, 1);
+    assert_eq!(
+        env.count(
+            "SELECT count(*) FROM project_paths WHERE path = '/tmp/project' AND dead_at IS NULL"
+        )
+        .await,
+        1
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_path_held_by_a_git_project_is_not_repointed() {
+    use spool::projects::{ProjectKey, ProjectKind};
+    let env = Env::new().await;
+    env.omp("a.jsonl", "a", &["hello"], T0 - DAY);
+    auto(&svc(&env)).await;
+    let sid = env.session_by_native("a").await.unwrap().id;
+    let key = |kind, key: &str| ProjectKey {
+        kind,
+        key: key.into(),
+        name: "n".into(),
+        remote: None,
+    };
+    let git = key(ProjectKind::GitDir, "/g/.git");
+    let other = key(ProjectKind::GitRemote, "github.com/o/r");
+
+    let mut conn = env.index.writer.acquire().await.unwrap();
+    catalog::assign_project(&mut conn, &sid, "/tmp/project", &git, 1)
+        .await
+        .unwrap();
+    catalog::assign_project(&mut conn, &sid, "/tmp/project", &other, 2)
+        .await
+        .unwrap();
+    drop(conn);
+
+    let held: String =
+        sqlx::query_scalar("SELECT project_id FROM project_paths WHERE path = '/tmp/project'")
+            .fetch_one(&env.index.reader)
+            .await
+            .unwrap();
+    assert_eq!(held, git.id());
+}

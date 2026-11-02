@@ -54,6 +54,7 @@ fn session_facts(p: Payload) -> SessionFacts {
         native_id: p.thread_id.or(p.conversation_id).or(p.id),
         title: None,
         cwd: p.cwd,
+        remote: None,
         parent_native_session,
         kind,
     }

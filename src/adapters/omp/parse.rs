@@ -91,6 +91,7 @@ fn handle_session(
         native_id: e.id,
         title: e.title,
         cwd: e.cwd,
+        remote: None,
         parent_native_session: e.parent_session,
     };
 

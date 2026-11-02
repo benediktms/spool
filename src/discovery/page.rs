@@ -7,6 +7,7 @@ use crate::domain::{
     MessageEntry, ParseWarning, RecordMeta, SessionKind, ToolCallMeta, ToolResultMeta, digest,
 };
 use crate::ids;
+use crate::projects::{self, ProjectKey};
 use crate::source::SourceFileInfo;
 use crate::storage::catalog::{self, KnownFile, NewSession};
 use std::collections::{HashMap, HashSet};
@@ -18,6 +19,7 @@ struct Probe {
     native_id: String,
     kind: SessionKind,
     cwd: Option<String>,
+    project: Option<ProjectKey>,
     activity: Option<i64>,
 }
 
@@ -251,6 +253,7 @@ impl DiscoveryService {
             let _p = permit;
             let adapter = adapter_for(kind);
             let mut out = Vec::with_capacity(files.len());
+            let mut resolved: HashMap<(String, Option<String>), ProjectKey> = HashMap::new();
             for info in files {
                 if cancel.load(Ordering::Relaxed) {
                     break;
@@ -272,10 +275,17 @@ impl DiscoveryService {
                     }
                     // Native last activity is "reliable" only when the probe saw the whole file.
                     let whole = m.prefix_end >= opened.info.len;
+                    let project = m.cwd.as_ref().map(|cwd| {
+                        resolved
+                            .entry((cwd.clone(), m.remote.clone()))
+                            .or_insert_with(|| projects::resolve(cwd, m.remote.as_deref()))
+                            .clone()
+                    });
                     Some(Probe {
                         native_id: m.native_session_id,
                         kind: m.session_kind,
                         cwd: m.cwd,
+                        project,
                         activity: if whole { m.last_activity_at } else { None },
                     })
                 })();
@@ -497,6 +507,10 @@ impl DiscoveryService {
             ctx.now,
         )
         .await?;
+        if let (Some(cwd), Some(project)) = (cwd.as_deref(), probe.and_then(|p| p.project.as_ref()))
+        {
+            catalog::assign_project(tx, &sid, cwd, project, ctx.now).await?;
+        }
         catalog::upsert_source_file(tx, &sid, f, ctx.now).await?;
         if created {
             rep.new_sessions += 1;

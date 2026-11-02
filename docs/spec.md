@@ -449,7 +449,9 @@ The following is the required logical model; names may change if the migration a
 | Table | Purpose and important fields |
 |---|---|
 | `sources` | Stable ID, adapter, roots, enabled flag, configuration revision, bootstrap cutoff, discovery watermark, last successful scan, last scan error |
-| `sessions` | Internal ID, source ID, native ID, lineage, native title, project/cwd, session kind, creation/activity times, active snapshot ID, exclusion flag, observed fingerprint, parser/coverage status |
+| `sessions` | Internal ID, source ID, native ID, lineage, native title, cwd, project ID, session kind, creation/activity times, active snapshot ID, exclusion flag, observed fingerprint, parser/coverage status |
+| `projects` | Stable ID, kind (`git_remote`, `git_dir`, `path`), unique key, display name, normalized remote, creation time. Identity, first match wins: normalized `host/owner/repo` (Codex `session_meta.git.repository_url`, else the cwd repository's `remote.origin.url`); the canonical common git directory (groups linked worktrees of a repository without a remote); the exact cwd |
+| `project_paths` | Working directory, project ID, resolution time, `dead_at` (set when the path no longer exists; rows are never deleted) |
 | `source_files` | Session ID, canonical path, native file identity, observed size/mtime, format/compression, existence status |
 | `snapshots` | ID, session ID, observed source revision, pipeline fingerprint, generation, staging/published/retired state (a retired snapshot that a live lease pins is `retired_leased`), source-prefix endpoint, counts and parse warnings |
 | `records` | Snapshot ID, record key, native ID, parent key, kind, timestamp, locator, raw-record digest; no raw tool payload |
