@@ -260,24 +260,25 @@ impl DiscoveryService {
         Ok(seen)
     }
 
-    /// Re-read the bounded header of each cataloged Codex file and return its recorded remote.
+    /// Re-read the bounded header of each cataloged file of `kind` and return its manifest.
     /// Missing or unreadable files yield `None`.
-    pub async fn probe_codex_remotes(
+    pub async fn probe_headers(
         &self,
+        kind: HarnessKind,
         files: Vec<(String, PathBuf)>,
-    ) -> anyhow::Result<Vec<Option<String>>> {
+    ) -> anyhow::Result<Vec<Option<ParsedSessionManifest>>> {
         let reg = self.sources.clone();
         let max_record = self.cfg.ingestion.max_record_bytes;
         let permit = self.cpu.clone().acquire_owned().await?;
         Ok(tokio::task::spawn_blocking(move || {
             let _p = permit;
             let cancel = AtomicBool::new(false);
-            let adapter = adapter_for(HarnessKind::Codex);
+            let adapter = adapter_for(kind);
             files
                 .into_iter()
                 .map(|(source_id, path)| {
                     probe_manifest(&reg, &source_id, adapter, &path, max_record, &cancel)
-                        .and_then(|(m, _)| m.remote)
+                        .map(|(m, _)| m)
                 })
                 .collect()
         })

@@ -60,7 +60,7 @@ struct Block {
 
 impl JsonlHarness for ClaudeAdapter {
     const KIND: HarnessKind = HarnessKind::Claude;
-    const PARSER_VERSION: &'static str = "claude-jsonl-session-browser-2026-10.1";
+    const PARSER_VERSION: &'static str = "claude-jsonl-session-browser-2026-10.1+late-cwd";
     const MALFORMED_DETAIL: &'static str = "invalid complete JSONL record";
     type Parser = parse::ParseState;
 

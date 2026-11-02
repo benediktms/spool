@@ -11,6 +11,7 @@ use super::scheduler::*;
 use crate::clock::SharedClock;
 use crate::config::Config;
 use crate::discovery::{DiscoveryService, Mode, Selection};
+use crate::domain::HarnessKind;
 use crate::embeddings::{EmbeddingService, EmbeddingState};
 use crate::ingest::engine::{
     DeferReason, IndexOutcome, IndexRequest, IngestEngine, IngestError, IngestErrorKind,
@@ -878,6 +879,7 @@ pub async fn correlate_projects(
 ) -> Result<Value, sqlx::Error> {
     let mut report = json!({
         "remotes_backfilled": 0,
+        "cwds_backfilled": 0,
         "sessions_assigned": 0,
         "sessions_merged": 0,
         "path_projects_deleted": 0,
@@ -900,13 +902,13 @@ pub async fn correlate_projects(
             .map(|(_, source, path)| (source.clone(), std::path::PathBuf::from(path)))
             .collect();
         let remotes = discovery
-            .probe_codex_remotes(files)
+            .probe_headers(HarnessKind::Codex, files)
             .await
             .map_err(|e| sqlx::Error::Io(std::io::Error::other(e)))?;
         let mut tx = idx.writer.begin().await?;
         let mut found = 0;
-        for ((sid, _, _), remote) in unprobed.iter().zip(remotes) {
-            if let Some(remote) = remote {
+        for ((sid, _, _), manifest) in unprobed.iter().zip(remotes) {
+            if let Some(remote) = manifest.and_then(|m| m.remote) {
                 catalog::set_session_remote(&mut tx, sid, &remote).await?;
                 found += 1;
             }
@@ -914,6 +916,7 @@ pub async fn correlate_projects(
         tx.commit().await?;
         report["remotes_backfilled"] = json!(found);
     }
+    report["cwds_backfilled"] = json!(backfill_claude_cwds(idx, discovery, limit).await?);
     if stop.load(Ordering::Relaxed) {
         return Ok(report);
     }
@@ -1004,6 +1007,59 @@ pub async fn correlate_projects(
     tx.commit().await?;
     report["paths_dead"] = json!(dead);
     Ok(report)
+}
+
+const CLAUDE_CWD_CURSOR: &str = "maintenance.claude_cwd_after";
+
+/// Set the missing `cwd` of indexed Claude sessions from their source header. A cursor in
+/// `app_meta` advances past every probed session, so one whose header has no cwd is not re-read;
+/// sessions parsed or re-parsed later take their cwd from the parser itself.
+async fn backfill_claude_cwds(
+    idx: &Index,
+    discovery: &DiscoveryService,
+    limit: usize,
+) -> Result<u64, sqlx::Error> {
+    let after = catalog::app_meta_get(idx, CLAUDE_CWD_CURSOR)
+        .await?
+        .unwrap_or_default();
+    let rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT s.id, s.source_id, sf.path FROM sessions s \
+         JOIN sources src ON src.id = s.source_id AND src.kind = 'claude' \
+         JOIN source_files sf ON sf.session_id = s.id AND sf.exists_status = 'present' \
+         WHERE s.cwd IS NULL AND s.index_state = 'indexed' AND s.id > ? ORDER BY s.id LIMIT ?",
+    )
+    .bind(&after)
+    .bind(limit as i64)
+    .fetch_all(&idx.reader)
+    .await?;
+    let Some((last, _, _)) = rows.last() else {
+        return Ok(0);
+    };
+    let last = last.clone();
+    let files = rows
+        .iter()
+        .map(|(_, source, path)| (source.clone(), std::path::PathBuf::from(path)))
+        .collect();
+    let manifests = discovery
+        .probe_headers(HarnessKind::Claude, files)
+        .await
+        .map_err(|e| sqlx::Error::Io(std::io::Error::other(e)))?;
+
+    let mut tx = idx.writer.begin().await?;
+    let mut found = 0;
+    for ((sid, _, _), manifest) in rows.iter().zip(manifests) {
+        if let Some(cwd) = manifest.and_then(|m| m.cwd) {
+            found += sqlx::query("UPDATE sessions SET cwd = ?1 WHERE id = ?2 AND cwd IS NULL")
+                .bind(cwd)
+                .bind(sid)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+        }
+    }
+    tx.commit().await?;
+    catalog::app_meta_set(idx, CLAUDE_CWD_CURSOR, &last).await?;
+    Ok(found)
 }
 
 /// Delete embeddings no chunk references (any profile; the hash is content-addressed) older than

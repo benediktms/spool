@@ -67,8 +67,10 @@ fn observe_timestamp(cx: &mut ParseCx<'_>, timestamp: Option<i64>) {
 fn observe_session(cx: &mut ParseCx<'_>, x: &Line) {
     if cx.session.native_id.is_none() {
         cx.session.native_id = x.session_id.clone();
-        cx.session.cwd = x.cwd.clone();
         cx.session.parent_native_session = x.parent_session.clone();
+    }
+    if cx.session.cwd.is_none() {
+        cx.session.cwd = x.cwd.clone();
     }
     if x.parent_session.is_some()
         || (cx.session.native_id.is_none() && x.is_sidechain == Some(true))

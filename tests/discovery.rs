@@ -1134,6 +1134,100 @@ mod correlate {
         );
     }
 
+    async fn claude_env() -> (Env, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let env = Env::with(move |c| {
+            c.sources.push(SourceConfig {
+                id: "cl".into(),
+                kind: HarnessKind::Claude,
+                enabled: true,
+                roots: vec![root.to_string_lossy().into_owned()],
+                include_subagents: false,
+            })
+        })
+        .await;
+        (env, tmp)
+    }
+
+    fn write_claude(dir: &tempfile::TempDir, cwd: &str) -> std::path::PathBuf {
+        let path = dir.path().join("proj").join("c1.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                "{{\"type\":\"last-prompt\",\"sessionId\":\"c1\"}}\n\
+{{\"type\":\"mode\",\"sessionId\":\"c1\"}}\n\
+{{\"type\":\"user\",\"uuid\":\"u1\",\"sessionId\":\"c1\",\"cwd\":\"{cwd}\",\"message\":{{\"role\":\"user\",\"content\":\"hello\"}}}}\n"
+            ),
+        )
+        .unwrap();
+        set_mtime(&path, T0 - DAY);
+        path
+    }
+
+    async fn claude_cwd(env: &Env) -> Option<String> {
+        sqlx::query_scalar("SELECT cwd FROM sessions WHERE native_id = 'c1'")
+            .fetch_one(&env.index.reader)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn discovery_probe_takes_a_claude_cwd_from_a_later_line() {
+        let (env, cl) = claude_env().await;
+        let dir = cl.path().join("work");
+        std::fs::create_dir_all(&dir).unwrap();
+        write_claude(&cl, dir.to_str().unwrap());
+        svc(&env).run_auto("cl", flag()).await.unwrap();
+        assert_eq!(claude_cwd(&env).await.as_deref(), dir.to_str());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_indexed_claude_session_without_a_cwd_is_backfilled_and_linked_to_a_project() {
+        let (env, cl) = claude_env().await;
+        let dir = cl.path().join("work");
+        std::fs::create_dir_all(&dir).unwrap();
+        write_claude(&cl, dir.to_str().unwrap());
+        svc(&env).run_auto("cl", flag()).await.unwrap();
+        sqlx::query("UPDATE sessions SET cwd = NULL, project_id = NULL, index_state = 'indexed'")
+            .execute(&env.index.writer)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM project_paths")
+            .execute(&env.index.writer)
+            .await
+            .unwrap();
+
+        let r = run(&env, 10, 500).await;
+        assert_eq!(r["cwds_backfilled"], 1);
+        assert_eq!(claude_cwd(&env).await.as_deref(), dir.to_str());
+        assert_eq!(r["sessions_assigned"], 1);
+        assert_eq!(
+            env.count("SELECT count(*) FROM sessions WHERE project_id IS NULL")
+                .await,
+            0
+        );
+        let r = run(&env, 20, 500).await;
+        assert_eq!(r["cwds_backfilled"], 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_claude_session_whose_file_is_missing_is_skipped() {
+        let (env, cl) = claude_env().await;
+        let path = write_claude(&cl, "/gone/worktree");
+        svc(&env).run_auto("cl", flag()).await.unwrap();
+        sqlx::query("UPDATE sessions SET cwd = NULL, project_id = NULL, index_state = 'indexed'")
+            .execute(&env.index.writer)
+            .await
+            .unwrap();
+        std::fs::remove_file(path).unwrap();
+
+        let r = run(&env, 10, 500).await;
+        assert_eq!(r["cwds_backfilled"], 0);
+        assert_eq!(claude_cwd(&env).await, None);
+    }
+
     async fn codex_env() -> (Env, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(tmp.path()).unwrap();
