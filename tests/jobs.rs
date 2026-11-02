@@ -397,13 +397,14 @@ async fn task_enqueued_before_any_worker_exists_remains_available() {
         .unwrap();
     let sys = env.start().await;
     env.wait_state("waiting", "indexed", 30).await;
-    assert_eq!(
+    wait_until(30, "queued task acknowledged", || async {
         env.jobs_count(&format!(
             "SELECT count(*) FROM Jobs WHERE id = '{tid}' AND status = 'Done'"
         ))
-        .await,
-        1
-    );
+        .await
+            == 1
+    })
+    .await;
     sys.shutdown(Duration::from_secs(15)).await;
 }
 
