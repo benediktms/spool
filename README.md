@@ -38,6 +38,13 @@ you choose, e.g. `--enable-source omp` or `spool sources enable omp`) and hosted
 
 No service manager? Run `spool daemon run` in a terminal instead.
 
+## Enable semantic search
+
+Semantic and hybrid search need hosted embeddings. Follow the
+[embedding setup guide](docs/operations.md#embeddings-for-semantic-search) to approve hosted
+processing, save the provider API key, restart the daemon and check vector coverage.
+Lexical search works without this setup.
+
 ## Commands
 
 ```text
