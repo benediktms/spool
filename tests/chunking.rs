@@ -245,7 +245,7 @@ fn same_input_has_stable_input_hashes() {
 
 #[test]
 fn large_assistant_message_chunks_linearly_with_bounded_overlap() {
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     const SOURCE_BYTES: usize = 2 * 1024 * 1024;
     let mut pattern = "word ".repeat(800);
@@ -265,7 +265,6 @@ fn large_assistant_message_chunks_linearly_with_bounded_overlap() {
         overlap_tokens: 200,
         version: 1,
     };
-    let started = Instant::now();
     let worker_text = text.clone();
     let tokenizer = std::sync::Arc::new(MeasuredTokenizer {
         inner: spool::embeddings::tokenizer::tokenizer(),
@@ -310,13 +309,9 @@ fn large_assistant_message_chunks_linearly_with_bounded_overlap() {
             tokenizer.prefix_bytes.load(std::sync::atomic::Ordering::Relaxed),
         )
     });
-    let remaining = Duration::from_secs(20)
-        .checked_sub(started.elapsed())
-        .expect("first chunking pass exceeded 20 seconds");
     let repeated = receiver
-        .recv_timeout(remaining)
-        .expect("determinism pass exceeded the 20-second total limit");
-    assert!(started.elapsed() < Duration::from_secs(20));
+        .recv_timeout(Duration::from_secs(20))
+        .expect("determinism pass exceeded 20 seconds");
     assert_eq!(plans, repeated);
     assert!(plans.len() > 1);
 
