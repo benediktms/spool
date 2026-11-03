@@ -1057,7 +1057,6 @@ async fn date_anchor_semantics() {
     assert_eq!(matches_of(&r, "d_b")[0]["matched_at"], f(b));
     assert_eq!(parse_rfc3339_utc(&f(b)), Some(b));
 
-    // Context before `after` is returned only as labelled context of an in-interval match.
     env.session("d_ctx", "omp", "/w", "interactive", T0).await;
     env.snapshot("d_ctx", "sn_ctx", "published").await;
     env.message(
@@ -1099,10 +1098,25 @@ async fn date_anchor_semantics() {
     )
     .await;
     env.activate("d_ctx", "sn_ctx").await;
+    let context_hit = env
+        .ok(json!({"query": "earlier", "mode": "lexical", "session_ids": ["d_ctx"]}))
+        .await;
+    assert!(
+        !matches_of(&context_hit, "d_ctx")[0]["excerpt"]
+            .as_str()
+            .unwrap()
+            .contains("earlier")
+    );
     let r = env.ok(json!({"query": "marker answer", "mode": "lexical", "after": f(T0 - 1000), "session_ids": ["d_ctx"]})).await;
+    assert!(
+        !matches_of(&r, "d_ctx")[0]["excerpt"]
+            .as_str()
+            .unwrap()
+            .contains("earlier")
+    );
     assert_eq!(
         matches_of(&r, "d_ctx")[0]["context_outside_time_filter"],
-        true
+        false
     );
     let r = env.ok(json!({"query": "marker answer", "mode": "lexical", "after": f(T0 - 200_000), "session_ids": ["d_ctx"]})).await;
     assert_eq!(
@@ -1117,6 +1131,39 @@ async fn date_anchor_semantics() {
         false,
         "no time filter, nothing to label"
     );
+    env.session("d_core", "omp", "/w", "interactive", T0).await;
+    env.snapshot("d_core", "sn_core", "published").await;
+    env.message(
+        "sn_core",
+        Message {
+            key: "old",
+            seq: 0,
+            role: "user",
+            ts: Some(T0 - 100_000),
+            parent: None,
+            text: "older selected evidence",
+        },
+    )
+    .await;
+    env.chunk(
+        "d_core",
+        "sn_core",
+        "old_chunk",
+        search_common::Chunk {
+            body: "USER: older selected evidence",
+            spans: vec![("old", 0, 0, 23, false)],
+            anchor: Some(T0),
+            run: "r",
+            ordinal: 0,
+            embed: false,
+        },
+    )
+    .await;
+    env.activate("d_core", "sn_core").await;
+    let r = env.ok(json!({"query":"older", "mode":"lexical", "after":f(T0 - 1000), "session_ids":["d_core"]})).await;
+    let m = &matches_of(&r, "d_core")[0];
+    assert!(m["excerpt"].as_str().unwrap().contains("older"));
+    assert_eq!(m["context_outside_time_filter"], true);
 }
 
 #[tokio::test]
@@ -1561,8 +1608,8 @@ async fn literal_uses_the_chunk_anchor_like_lexical() {
         );
         assert_eq!(
             matches_of(&r, "lit_a")[0]["context_outside_time_filter"],
-            true,
-            "{mode}: the returned text of m1 (t1) lies outside the interval"
+            mode == "literal",
+            "{mode}: label the time of the text actually excerpted"
         );
         assert!(
             ids(&q(query, mode, &outside).await).is_empty(),
@@ -2068,4 +2115,200 @@ async fn coverage_is_present_only_when_degraded() {
         r["coverage"]["active_chunks"].as_i64().unwrap()
             > r["coverage"]["embedded_chunks"].as_i64().unwrap()
     );
+}
+
+#[tokio::test]
+async fn merged_evidence_and_semantic_excerpt_are_bounded() {
+    let env = Env::new().await;
+    let (sid, snap) = ("bounded", "bounded_snap");
+    env.session(sid, "omp", "/w", "interactive", T0).await;
+    env.snapshot(sid, snap, "published").await;
+    let mut parent: Option<String> = None;
+    for i in 0..50 {
+        let key = format!("m{i:02}");
+        let text = format!("boundedneedle item {i:02}");
+        env.message(
+            snap,
+            Message {
+                key: &key,
+                seq: i,
+                role: "user",
+                ts: Some(T0),
+                parent: parent.as_deref(),
+                text: &text,
+            },
+        )
+        .await;
+        env.chunk(
+            sid,
+            snap,
+            &format!("c{i:02}"),
+            search_common::Chunk {
+                body: &format!("USER: {text}"),
+                spans: vec![(&key, 0, 0, text.len() as i64, false)],
+                anchor: Some(T0),
+                run: "run0",
+                ordinal: i,
+                embed: false,
+            },
+        )
+        .await;
+        parent = Some(key);
+    }
+    env.activate(sid, snap).await;
+    let r = env
+        .ok(json!({"query":"boundedneedle", "mode":"lexical"}))
+        .await;
+    let m = &matches_of(&r, sid)[0];
+    let (_, reference) = env.decode_match(m["match_ref"].as_str().unwrap()).await;
+    println!(
+        "candidate lexical sessions={} spans={} span_bytes={} response_bytes={} ref_bytes={}",
+        ids(&r).len(),
+        reference.spans.len(),
+        reference.spans.iter().map(|s| s.e - s.s).sum::<u32>(),
+        tool_result_bytes(&r, false),
+        m["match_ref"].as_str().unwrap().len()
+    );
+    assert_eq!(reference.spans.len(), 8);
+    assert_eq!(m["truncated"], true);
+    assert!(tool_result_bytes(&r, false) <= 65_536);
+    let text = format!(
+        "{} identifierneedle {}",
+        "🦀".repeat(700),
+        "b ".repeat(1200)
+    );
+    env.simple("semantic", "omp", "/w", &[(&text, Some(T0))])
+        .await;
+    let r = env
+        .ok(json!({"query":"identifierneedle", "mode":"semantic"}))
+        .await;
+    let m = &matches_of(&r, "semantic")[0];
+    let (_, reference) = env.decode_match(m["match_ref"].as_str().unwrap()).await;
+    assert_eq!(reference.spans.len(), 1);
+    let span = &reference.spans[0];
+    assert!(span.e - span.s <= 1200);
+    assert!(
+        text.get(span.s as usize..span.e as usize)
+            .unwrap()
+            .contains("identifierneedle")
+    );
+    assert!(m["excerpt"].as_str().unwrap().contains("identifierneedle"));
+    assert_eq!(m["truncated"], true);
+    println!(
+        "candidate semantic sessions={} supporting_identifier={} response_bytes={} ref_bytes={}",
+        ids(&r).len(),
+        m["excerpt"].as_str().unwrap().contains("identifierneedle"),
+        tool_result_bytes(&r, false),
+        m["match_ref"].as_str().unwrap().len()
+    );
+}
+
+#[tokio::test]
+async fn bounded_excerpt_ignores_injected_term_occurrences() {
+    let env = Env::new().await;
+    let text = format!(
+        "<system-reminder>{}</system-reminder> {} 1 < 2 needleforbound supporting",
+        "needleforbound ".repeat(40),
+        "z".repeat(1300)
+    );
+    env.simple("safe", "omp", "/w", &[(&text, Some(T0))]).await;
+    let r = env
+        .ok(json!({"query":"needleforbound", "mode":"semantic"}))
+        .await;
+    let m = &matches_of(&r, "safe")[0];
+    let (_, reference) = env.decode_match(m["match_ref"].as_str().unwrap()).await;
+    let span = &reference.spans[0];
+    assert!(
+        text.get(span.s as usize..span.e as usize)
+            .unwrap()
+            .contains("needleforbound supporting")
+    );
+    let excerpt = m["excerpt"].as_str().unwrap();
+    assert!(excerpt.contains("needleforbound supporting"), "{excerpt}");
+    assert!(!excerpt.contains("system-reminder"));
+}
+
+#[tokio::test]
+async fn later_primary_evidence_wins_before_span_and_byte_caps() {
+    let env = Env::new().await;
+    let (sid, snap) = ("later", "later_snap");
+    env.session(sid, "omp", "/w", "interactive", T0).await;
+    env.snapshot(sid, snap, "published").await;
+    let mut parent: Option<String> = None;
+    let mut keys = Vec::new();
+    let mut texts = Vec::new();
+    for i in 0..10 {
+        let key = format!("later{i}");
+        let text = if i == 0 {
+            format!("prefix{}", "🦀".repeat(400))
+        } else if i == 8 {
+            "prefix needlelater supporting evidence".to_string()
+        } else {
+            format!("prefix filler {i}")
+        };
+        env.message(
+            snap,
+            Message {
+                key: &key,
+                seq: i,
+                role: "user",
+                ts: Some(T0),
+                parent: parent.as_deref(),
+                text: &text,
+            },
+        )
+        .await;
+        parent = Some(key.clone());
+        keys.push(key);
+        texts.push(text);
+    }
+    let spans = keys
+        .iter()
+        .zip(&texts)
+        .map(|(key, text)| (key.as_str(), 0, 6, text.len() as i64, false))
+        .collect();
+    let body = texts
+        .iter()
+        .map(|text| format!("USER: {}", &text[6..]))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    env.chunk(
+        sid,
+        snap,
+        "later_chunk",
+        search_common::Chunk {
+            body: &body,
+            spans,
+            anchor: Some(T0),
+            run: "run",
+            ordinal: 0,
+            embed: true,
+        },
+    )
+    .await;
+    env.activate(sid, snap).await;
+    for mode in ["lexical", "semantic"] {
+        let r = env.ok(json!({"query":"needlelater", "mode":mode})).await;
+        let m = &matches_of(&r, sid)[0];
+        assert!(m["excerpt"].as_str().unwrap().contains("needlelater"));
+        let (_, reference) = env.decode_match(m["match_ref"].as_str().unwrap()).await;
+        assert!(reference.spans.len() <= 8);
+        assert!(reference.spans.iter().map(|s| s.e - s.s).sum::<u32>() <= 1200);
+        assert!(reference.spans.iter().any(|s| {
+            s.r == "later8"
+                && texts[8]
+                    .get(s.s as usize..s.e as usize)
+                    .unwrap()
+                    .contains("needlelater")
+        }));
+        let parts: Vec<&[u8]> = reference
+            .spans
+            .iter()
+            .map(|s| {
+                let i = keys.iter().position(|k| k == &s.r).unwrap();
+                texts[i].get(s.s as usize..s.e as usize).unwrap().as_bytes()
+            })
+            .collect();
+        assert_eq!(reference.content, frames(&parts));
+    }
 }

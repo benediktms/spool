@@ -34,6 +34,8 @@ const MAX_QUERY_BYTES: usize = 4096;
 const MAX_QUERIES: usize = 4;
 const MAX_QUERY_TOKENS: usize = 1024;
 const MAX_EXCERPT_BYTES: usize = 1200;
+const MAX_MATCH_SPANS: usize = 8;
+const MAX_MATCH_BYTES: usize = 1200;
 const MAX_FILTER_LIST: usize = 256;
 /// Retrieval is retried when a snapshot is retired / excluded between the read transaction and the lease pin.
 const MAX_ATTEMPTS: usize = 3;
@@ -86,7 +88,6 @@ struct Plan {
 
 /// The lexical side of a search: highlight terms, the FTS expression (if any) and its first candidate window.
 struct LexicalQuery {
-    terms: Vec<String>,
     expr: Option<String>,
     hits: Vec<Scored>,
 }
@@ -551,7 +552,6 @@ impl SearchService {
                         None => Vec::new(),
                     };
                     lexicals.push(LexicalQuery {
-                        terms: fts.as_ref().map(|f| f.1.clone()).unwrap_or_default(),
                         expr: fts.map(|f| f.0),
                         hits,
                     });
@@ -600,7 +600,12 @@ impl SearchService {
         sems: &[Vec<Scored>],
         max_l: usize,
     ) -> Result<Vec<SessionDraft>, AppError> {
-        let terms: Vec<String> = lexicals.iter().flat_map(|l| l.terms.clone()).collect();
+        let terms: Vec<String> = plan
+            .queries
+            .iter()
+            .filter_map(|q| query::fts_query(q))
+            .flat_map(|(_, terms)| terms)
+            .collect();
         let k = f64::from(self.cfg.search.rrf_constant);
         let mut l = self.cfg.search.candidate_limit.clamp(1, max_l);
         let mut lex_window = l;
@@ -790,13 +795,128 @@ impl SearchService {
                 _ => merged.push(s),
             }
         }
-        let last_key = merged.last().map(|s| s.record_key.clone());
-        let (span_refs, content) = span_refs_and_digest(conn, &g.snapshot_id, &merged).await?;
+        let body = retrieve::chunk_body(conn, primary.rowid).await?;
+        let visible = query::visible_ranges(&body);
+        let mut pos = 0usize;
+        let mut candidates = Vec::new();
+        for span in primary_spans {
+            let rest = body.get(pos..).unwrap_or("");
+            pos += ["USER: ", "ASSISTANT: "]
+                .iter()
+                .find(|l| rest.starts_with(**l))
+                .map_or(0, |l| l.len());
+            let end = pos.saturating_add((span.end - span.start).max(0) as usize);
+            if !span.is_context && end <= body.len() {
+                let mut first_visible = None;
+                let mut hit = None;
+                for range in &visible {
+                    let start = range.start.max(pos);
+                    let stop = range.end.min(end);
+                    if start >= stop
+                        || !body.is_char_boundary(start)
+                        || !body.is_char_boundary(stop)
+                    {
+                        continue;
+                    }
+                    first_visible.get_or_insert(start);
+                    let lower = body[start..stop].to_ascii_lowercase();
+                    for term in terms.iter().filter(|t| t.is_ascii() && !t.is_empty()) {
+                        if let Some(at) = lower.find(term) {
+                            hit = Some(hit.map_or(start + at, |old: usize| old.min(start + at)));
+                        }
+                    }
+                }
+                candidates.push((span, pos, end, first_visible, hit));
+            }
+            pos = end.saturating_add(2);
+        }
+        let chosen = candidates
+            .iter()
+            .find(|c| c.4.is_some())
+            .or_else(|| candidates.iter().find(|c| c.3.is_some()))
+            .or_else(|| candidates.first());
+        let Some((source, body_start, body_end, first_visible, hit)) = chosen.copied() else {
+            return Err(AppError::new(
+                "STORAGE_ERROR",
+                "the local index could not be read",
+            ));
+        };
+        let focus = hit.or(first_visible).unwrap_or(body_start);
+        let mut start = focus
+            .saturating_sub(200)
+            .max(body_start)
+            .min(body_end.saturating_sub(MAX_MATCH_BYTES).max(body_start));
+        while !body.is_char_boundary(start) {
+            start -= 1;
+        }
+        let mut end = start.saturating_add(MAX_MATCH_BYTES).min(body_end);
+        while !body.is_char_boundary(end) {
+            end -= 1;
+        }
+        let mut chosen_span = source.clone();
+        chosen_span.start += (start - body_start) as i64;
+        chosen_span.end = chosen_span.start + (end - start) as i64;
+        let excerpt: String = visible
+            .iter()
+            .filter_map(|r| {
+                let a = r.start.max(start);
+                let b = r.end.min(end);
+                (a < b).then(|| &body[a..b])
+            })
+            .collect();
+        let excerpt = excerpt.trim().to_string();
+        let chosen_index = merged
+            .iter()
+            .position(|span| overlaps(span, &chosen_span))
+            .unwrap_or(0);
+        let mut remaining = MAX_MATCH_BYTES - (end - start);
+        let mut clipped = start != body_start || end != body_end;
+        let mut selected = vec![(chosen_index, chosen_span.clone())];
+        for (index, mut span) in merged.into_iter().enumerate() {
+            if let Some((_, retained)) = selected
+                .iter()
+                .find(|(_, retained)| overlaps(&span, retained))
+            {
+                clipped |= span.start < retained.start || span.end > retained.end;
+                continue;
+            }
+            if selected.len() == MAX_MATCH_SPANS || remaining == 0 {
+                clipped = true;
+                continue;
+            }
+            let bytes = retrieve::block_bytes(
+                conn,
+                &g.snapshot_id,
+                &span.record_key,
+                span.block_index,
+                span.start,
+                span.end,
+            )
+            .await?;
+            let text = std::str::from_utf8(&bytes)
+                .map_err(|_| AppError::new("STORAGE_ERROR", "the local index could not be read"))?;
+            let mut len = text.len().min(remaining);
+            while !text.is_char_boundary(len) {
+                len -= 1;
+            }
+            if len == 0 {
+                clipped = true;
+                continue;
+            }
+            clipped |= len < text.len();
+            span.end = span.start + len as i64;
+            remaining -= len;
+            selected.push((index, span));
+        }
+        selected.sort_by_key(|(index, _)| *index);
+        let selected: Vec<_> = selected.into_iter().map(|(_, span)| span).collect();
+        let last_key = selected.last().map(|s| s.record_key.clone());
+        let (span_refs, content) = span_refs_and_digest(conn, &g.snapshot_id, &selected).await?;
         let branch_leaf =
             branch_leaf(conn, &g.snapshot_id, last_key.as_deref(), leaf_counts).await?;
-        let body = retrieve::chunk_body(conn, primary.rowid).await?;
-        let focus = focus_range(&body, primary_spans);
-        let (excerpt, truncated) = query::excerpt(&body, terms, focus, MAX_EXCERPT_BYTES);
+        let truncated = clipped || selected.len() > 1;
+        let excerpt_outside =
+            m.ctx_outside && !excerpt.is_empty() && outside_interval(&plan.filters, source.msg_ts);
         let debug = m
             .debug
             .filter(|_| plan.debug)
@@ -815,7 +935,7 @@ impl SearchService {
             excerpt,
             truncated,
             matched_by: m.matched_by.iter().map(|s| (*s).to_string()).collect(),
-            ctx_outside: m.ctx_outside,
+            ctx_outside: excerpt_outside,
             debug,
         })
     }
@@ -1184,25 +1304,6 @@ fn fuse(lists: &[(bool, &[Scored])], k: f64) -> Vec<Fused> {
             .then_with(|| a.rowid.cmp(&b.rowid))
     });
     v
-}
-
-/// Body byte range of the non-context spans: fragments are rendered as `LABEL: text` joined by a blank line.
-fn focus_range(body: &str, spans: &[SpanRow]) -> Option<(usize, usize)> {
-    let mut pos = 0usize;
-    let mut range: Option<(usize, usize)> = None;
-    for sp in spans {
-        let rest = body.get(pos..)?;
-        pos += ["USER: ", "ASSISTANT: "]
-            .iter()
-            .find(|l| rest.starts_with(**l))
-            .map_or(0, |l| l.len());
-        let end = pos + (sp.end - sp.start).max(0) as usize;
-        if !sp.is_context {
-            range = Some(range.map_or((pos, end), |(s, _)| (s, end)));
-        }
-        pos = end + 2;
-    }
-    range.filter(|(_, e)| *e <= body.len())
 }
 
 /// Recency only reorders near-ties: sessions within 1% of the best score of their cluster, newest first.
