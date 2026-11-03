@@ -18,8 +18,9 @@ a release binary:
 (`spool-0.1.0-aarch64-apple-darwin` and `SHA256SUMS`; verify with `cd dist && shasum -a 256 -c SHA256SUMS`). There is
 no prebuilt-binary pipeline; CI (`.github/workflows/ci.yml`) builds and tests only.
 
-For an initialized setup, run `just install` to build this checkout's release binary, register it
-with the user service, restart the daemon, and wait for readiness before running `spool doctor`.
+For a user service installed from this checkout's `target/release/spool`, run `just install` to
+rebuild the binary, restart the daemon, and wait for readiness before running `spool doctor`.
+For first-time service installation, follow the quickstart below.
 
 ## Quickstart
 
