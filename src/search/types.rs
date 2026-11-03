@@ -50,17 +50,28 @@ impl SessionKind {
 #[serde(deny_unknown_fields)]
 #[schemars(crate = "schemars")]
 pub struct SearchInput {
-    /// Non-empty query, at most 4,096 UTF-8 bytes and 1,024 provider tokens.
-    pub query: String,
+    /// Non-empty query, at most 4,096 UTF-8 bytes and 1,024 provider tokens. Exactly one of `query` or `queries`.
+    #[serde(default)]
+    pub query: Option<String>,
+    /// 1 to 4 queries run separately and fused. Each hybrid or semantic query costs one embedding and spends the query budget.
+    #[serde(default)]
+    #[schemars(length(min = 1, max = 4))]
+    pub queries: Option<Vec<String>>,
     /// Default `hybrid`.
     #[serde(default)]
     pub mode: Option<Mode>,
     /// Restrict to these configured source ids (e.g. `omp`). Empty = all.
     #[serde(default)]
     pub sources: Vec<String>,
-    /// Absolute project path; matched exactly (canonical path) against the session working directory.
+    /// Restrict to these projects (1 to 16 entries). Each entry is one of: a project name such as
+    /// `app-memberships` (case-insensitive); `owner/repo` such as `freshaengineering/app-memberships` (any host);
+    /// a git URL such as `git@github.com:freshaengineering/app-memberships.git` or
+    /// `https://github.com/freshaengineering/app-memberships`; an absolute path inside a project such as
+    /// `/Users/me/code/app-memberships/src`. An entry that matches nothing adds a `project_not_found` warning;
+    /// when no entry matches, the result is empty.
     #[serde(default)]
-    pub project_path: Option<String>,
+    #[schemars(length(min = 1, max = 16))]
+    pub projects: Option<Vec<String>>,
     /// Restrict to these session ids. Empty = all.
     #[serde(default)]
     pub session_ids: Vec<String>,
@@ -79,11 +90,13 @@ pub struct SearchInput {
     /// Reorder only near-tied sessions (scores within 1%) newest first.
     #[serde(default)]
     pub prefer_recent: bool,
-    /// Sessions to return (default 10, maximum 50).
+    /// Sessions to return (default 10, maximum 50; larger values are clamped with a `limit_clamped` warning).
     #[serde(default)]
+    #[schemars(range(min = 1, max = 50))]
     pub limit: Option<usize>,
-    /// Matches per session (default and maximum 3).
+    /// Matches per session (default and maximum 3; larger values are clamped with a `limit_clamped` warning).
     #[serde(default)]
+    #[schemars(range(min = 1, max = 3))]
     pub matches_per_session: Option<usize>,
     /// Include per-match ranking diagnostics.
     #[serde(default)]
@@ -91,6 +104,22 @@ pub struct SearchInput {
     /// Literal mode only: case-sensitive substring match (default true).
     #[serde(default)]
     pub case_sensitive: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[schemars(crate = "schemars")]
+pub struct ProjectRef {
+    pub name: String,
+    /// Normalized `host/owner/repo`, when the project has a git remote.
+    pub remote: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[schemars(crate = "schemars")]
+pub struct ResolvedProjects {
+    /// The filter entry; git URLs are shown normalized, never as given.
+    pub input: String,
+    pub projects: Vec<ProjectRef>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -168,11 +197,12 @@ pub struct SessionResult {
     pub session_id: String,
     pub source: String,
     pub session_kind: String,
-    /// Native title metadata, never generated.
+    /// Native title metadata, else the first user prompt (at most 120 bytes); never generated.
     pub title: Option<String>,
-    /// `native` when `title` is set.
+    /// `native` or `first_prompt` when `title` is set.
     pub title_origin: Option<String>,
     pub project_path: Option<String>,
+    pub project: Option<ProjectRef>,
     pub started_at: Option<String>,
     pub last_activity_at: Option<String>,
     pub source_status: String,
@@ -185,9 +215,10 @@ impl SessionResult {
             session_id: r.id,
             source: r.source_id,
             session_kind: r.kind,
-            title_origin: r.title.as_ref().map(|_| "native".to_string()),
+            title_origin: r.title_origin.map(str::to_string),
             title: r.title,
             project_path: r.cwd,
+            project: None,
             started_at: r.created_at.map(format_rfc3339),
             last_activity_at: r.last_activity_at.map(format_rfc3339),
             source_status: r.source_status,
@@ -210,9 +241,14 @@ pub struct SearchOutput {
     pub mode_requested: Mode,
     pub mode_used: Mode,
     pub index_epoch: i64,
-    pub coverage: Coverage,
+    /// Present only when the index is degraded: sessions pending, chunks without vectors, or a fallback mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<Coverage>,
     pub results: Vec<SessionResult>,
     pub warnings: Vec<Warning>,
+    /// Present only when `projects` was given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_projects: Option<Vec<ResolvedProjects>>,
     /// True when matches were dropped to fit the response size limit.
     pub truncated: bool,
     /// Set when the query had no searchable word tokens; retry with `mode: "literal"`.

@@ -48,7 +48,7 @@ pub struct Filters {
     pub sources: Vec<String>,
     pub session_ids: Vec<String>,
     pub kinds: Vec<String>,
-    pub cwds: Vec<String>,
+    pub project_ids: Option<Vec<String>>,
     pub after: Option<i64>,
     pub before: Option<i64>,
     pub include_unknown_time: bool,
@@ -70,7 +70,7 @@ impl Filters {
         (sql, binds)
     }
 
-    /// Everything except the time window: exclusion and the source/session/kind/cwd lists.
+    /// Everything except the time window: exclusion and the source/session/kind/project lists.
     fn base_clause(&self) -> (String, Vec<Bind>) {
         let mut sql = String::from("s.excluded = 0");
         let mut binds = Vec::new();
@@ -78,12 +78,19 @@ impl Filters {
             ("s.session_kind", &self.kinds),
             ("s.source_id", &self.sources),
             ("s.id", &self.session_ids),
-            ("s.cwd", &self.cwds),
         ] {
             if !vals.is_empty() {
                 sql.push_str(&format!(" AND {col} IN ({})", ph(vals.len())));
                 binds.extend(vals.iter().cloned().map(Bind::Text));
             }
+        }
+        match &self.project_ids {
+            Some(ids) if !ids.is_empty() => {
+                sql.push_str(&format!(" AND s.project_id IN ({})", ph(ids.len())));
+                binds.extend(ids.iter().cloned().map(Bind::Text));
+            }
+            Some(_) => sql.push_str(" AND 0"),
+            None => {}
         }
         (sql, binds)
     }
@@ -484,10 +491,12 @@ pub struct SessionRow {
     pub source_id: String,
     pub kind: String,
     pub title: Option<String>,
+    pub title_origin: Option<&'static str>,
     pub cwd: Option<String>,
     pub created_at: Option<i64>,
     pub last_activity_at: Option<i64>,
     pub source_status: String,
+    pub project_id: Option<String>,
 }
 
 pub async fn session_row(
@@ -495,7 +504,7 @@ pub async fn session_row(
     id: &str,
 ) -> Result<Option<SessionRow>, AppError> {
     let r = sqlx::query(
-        "SELECT id, source_id, session_kind, native_title, cwd, created_at, last_activity_at, source_status FROM sessions WHERE id = ?",
+        "SELECT id, source_id, session_kind, native_title, cwd, created_at, last_activity_at, source_status, project_id FROM sessions WHERE id = ?",
     )
     .bind(id)
     .fetch_optional(&mut *conn)
@@ -506,11 +515,55 @@ pub async fn session_row(
         source_id: r.get(1),
         kind: r.get(2),
         title: r.get(3),
+        title_origin: r.get::<Option<String>, _>(3).map(|_| "native"),
         cwd: r.get(4),
         created_at: r.get(5),
         last_activity_at: r.get(6),
         source_status: r.get(7),
+        project_id: r.get(8),
     }))
+}
+
+/// First non-empty cleaned user prompt (of each snapshot's first three user messages) as a title candidate.
+pub async fn first_prompts(
+    conn: &mut SqliteConnection,
+    snapshots: &[String],
+) -> Result<HashMap<String, String>, AppError> {
+    let mut out = HashMap::new();
+    for part in snapshots.chunks(500) {
+        let sql = format!(
+            "WITH um AS (SELECT snapshot_id, record_key, ROW_NUMBER() OVER (PARTITION BY snapshot_id ORDER BY seq) AS rn \
+             FROM messages WHERE role = 'user' AND snapshot_id IN ({})) \
+             SELECT um.snapshot_id, um.rn, b.text FROM um \
+             JOIN blocks b ON b.snapshot_id = um.snapshot_id AND b.record_key = um.record_key \
+             WHERE um.rn <= 3 ORDER BY um.snapshot_id, um.rn, b.idx",
+            ph(part.len())
+        );
+        let binds: Vec<Bind> = part.iter().map(|s| Bind::Text(s.clone())).collect();
+        let mut texts: Vec<(String, i64, String)> = Vec::new();
+        for r in build(sql, &binds)
+            .fetch_all(&mut *conn)
+            .await
+            .map_err(storage_err)?
+        {
+            let (snap, rn, text): (String, i64, String) = (r.get(0), r.get(1), r.get(2));
+            match texts.last_mut() {
+                Some(l) if l.0 == snap && l.1 == rn => {
+                    l.2.push('\n');
+                    l.2.push_str(&text);
+                }
+                _ => texts.push((snap, rn, text)),
+            }
+        }
+        for (snap, _, text) in texts {
+            if !out.contains_key(&snap)
+                && let Some(t) = super::query::title_from_prompt(&text)
+            {
+                out.insert(snap, t);
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Bytes `[start, end)` of a block's text (original span content for the match digest).

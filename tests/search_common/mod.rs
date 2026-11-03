@@ -69,6 +69,36 @@ impl Default for Seed<'_> {
 }
 
 impl Env {
+    pub async fn decode_match(
+        &self,
+        token: &str,
+    ) -> (
+        spool::transcript::refs::RefHandle,
+        spool::transcript::refs::MatchRef,
+    ) {
+        let h = spool::transcript::refs::RefHandle::decode(
+            &self.keys.current(),
+            spool::transcript::handle::HandleKind::Match,
+            token,
+        )
+        .expect("match handle decodes");
+        let payload = self
+            .leases
+            .get_ref(&h.lease, h.ref_id, "match")
+            .await
+            .expect("match payload is stored");
+        let m = serde_json::from_slice(&payload).expect("match payload decodes");
+        (h, m)
+    }
+
+    pub async fn manifest_target(&self, manifest: &str) -> (String, String) {
+        sqlx::query_as("SELECT session_id, snapshot_id FROM read_manifests WHERE id = ?")
+            .bind(manifest)
+            .fetch_one(&self.index.reader)
+            .await
+            .unwrap()
+    }
+
     pub async fn new() -> Self {
         Self::with(|_| {}).await
     }
@@ -151,6 +181,53 @@ impl Env {
         .execute(&self.index.writer)
         .await
         .unwrap();
+        let name = cwd.rsplit('/').find(|s| !s.is_empty()).unwrap_or(cwd);
+        self.link_project(id, cwd, "path", cwd, name, None).await;
+    }
+
+    pub async fn link_project(
+        &self,
+        session: &str,
+        cwd: &str,
+        kind: &str,
+        key: &str,
+        name: &str,
+        remote: Option<&str>,
+    ) {
+        let pid = format!("pj_{key}");
+        sqlx::query("INSERT OR IGNORE INTO projects(id, kind, key, name, remote, created_at) VALUES (?1, ?2, ?3, ?4, ?5, 0)")
+            .bind(&pid)
+            .bind(kind)
+            .bind(key)
+            .bind(name)
+            .bind(remote)
+            .execute(&self.index.writer)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT OR REPLACE INTO project_paths(path, project_id, resolved_at) VALUES (?, ?, 0)",
+        )
+        .bind(cwd)
+        .bind(&pid)
+        .execute(&self.index.writer)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE sessions SET project_id = ? WHERE id = ?")
+            .bind(&pid)
+            .bind(session)
+            .execute(&self.index.writer)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM project_paths WHERE project_id IN (SELECT id FROM projects WHERE kind = 'path' AND id != ?1 AND NOT EXISTS (SELECT 1 FROM sessions WHERE project_id = projects.id))")
+            .bind(&pid)
+            .execute(&self.index.writer)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM projects WHERE kind = 'path' AND id != ?1 AND NOT EXISTS (SELECT 1 FROM sessions WHERE project_id = projects.id) AND NOT EXISTS (SELECT 1 FROM project_paths WHERE project_id = projects.id)")
+            .bind(&pid)
+            .execute(&self.index.writer)
+            .await
+            .unwrap();
     }
 
     pub async fn snapshot(&self, session: &str, snap: &str, state: &str) {

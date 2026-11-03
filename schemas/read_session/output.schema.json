@@ -74,50 +74,69 @@
       "description": "One content fragment of a block. `[start_byte, end_byte)` is a half-open range over the full\ndecoded block bytes (not escaped or base64 positions).",
       "properties": {
         "block_ref": {
-          "type": "string"
+          "description": "Only when `verbose`.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "data": {
           "type": "string"
         },
         "encoding": {
-          "$ref": "#/$defs/Encoding"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Encoding"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Omitted (meaning `utf8`) unless `verbose` or the block is `base64`."
         },
         "end_byte": {
           "format": "uint64",
           "minimum": 0,
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "fidelity": {
           "$ref": "#/$defs/FidelityOut"
         },
         "is_last": {
           "description": "The fragment ends at `total_bytes` (not: the whole block is on this page).",
-          "type": "boolean"
+          "type": [
+            "boolean",
+            "null"
+          ]
         },
         "kind": {
           "$ref": "#/$defs/BlockClass"
         },
         "start_byte": {
+          "description": "The four range fields are omitted when the fragment is the whole block, unless `verbose`.",
           "format": "uint64",
           "minimum": 0,
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "total_bytes": {
           "format": "uint64",
           "minimum": 0,
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "required": [
-        "block_ref",
         "kind",
-        "encoding",
         "fidelity",
-        "data",
-        "start_byte",
-        "end_byte",
-        "total_bytes",
-        "is_last"
+        "data"
       ],
       "type": "object"
     },
@@ -304,6 +323,7 @@
       "type": "object"
     },
     "Provenance": {
+      "description": "Present only when the read is `verbose`.",
       "properties": {
         "locator": {
           "anyOf": [
@@ -339,12 +359,7 @@
         }
       },
       "required": [
-        "origin",
-        "source_ref",
-        "record_ref",
-        "record_digest",
-        "native_record_id",
-        "locator"
+        "origin"
       ],
       "type": "object"
     },

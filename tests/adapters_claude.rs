@@ -212,3 +212,16 @@ fn claude_updates_keep_verified_parent_and_reader_path() {
         Some("a1-update")
     );
 }
+
+#[test]
+fn claude_cwd_comes_from_the_first_line_that_has_one() {
+    let bytes = concat!(
+        "{\"type\":\"last-prompt\",\"sessionId\":\"s1\"}\n",
+        "{\"type\":\"mode\",\"sessionId\":\"s1\"}\n",
+        "{\"type\":\"attachment\",\"sessionId\":\"s1\",\"cwd\":\"/work/a\"}\n",
+        "{\"type\":\"user\",\"uuid\":\"u1\",\"sessionId\":\"s1\",\"cwd\":\"/work/b\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n",
+    );
+    let (manifest, _) = parse(&ClaudeAdapter, bytes.as_bytes());
+    assert_eq!(manifest.native_session_id, "s1");
+    assert_eq!(manifest.cwd.as_deref(), Some("/work/a"));
+}

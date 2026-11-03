@@ -129,3 +129,24 @@ the chunks table. `embeddings_key` occupies 40 pages (163,840 bytes) for 2,424 v
 Release executable smoke: 20 sessions × 20 messages, all 20 indexed, search hits before and
 after restart. This is functional smoke evidence, not a latency benchmark. Counts remain cached
 per epoch; this change does not interrupt SQLite statements after an outer retrieval timeout.
+
+## MCP payload sizes (2026-11-02)
+
+Measured over the real `spool mcp` stdio bridge, as an agent receives it: the byte length of each compact
+`tools/call` result. Both runs used an isolated `SPOOL_HOME`, hosted processing off and the same synthetic OMP
+corpus: 40 sessions of 30 messages of about 3.5 KB each, no native titles, and an injected `<system-reminder>`
+block in each first prompt. `main` is fe8bcff; "after" is the top of the payload and projects stack. The search
+was `{"query": "zebrafish rollout", "mode": "lexical", "limit": 8}`, and the read was a match window of
+`before: 2, after: 2` with the default `max_bytes` (32768).
+
+| | `main` | after |
+|---|---|---|
+| `search_sessions` result | 62,530 B | 27,966 B |
+| `match_ref` | 372–376 B | 74–76 B |
+| results with a null title | 8 of 8 | 0 of 8 |
+| `read_session` result | 32,398 B, 3 of 5 items, `next_cursor` 585 B | 23,647 B, all 5 items, no cursor |
+
+On `main`, the read needs a second call to get the rest of the window. With the changes, the window fits in one call.
+`coverage` is present in both runs, because with hosted processing off no chunk is embedded, which counts as degraded.
+The synthetic `match_ref` on `main` is smaller than the 1–4 KB seen on a real index, because each synthetic match has
+one short span.

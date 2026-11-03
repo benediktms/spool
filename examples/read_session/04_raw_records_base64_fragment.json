@@ -6,7 +6,8 @@
     "selection": {
       "kind": "item",
       "item_ref": "v1.i.1.eyJleGFtcGxlIjoicmVmIn0.ZXhhbXBsZS1tYWM"
-    }
+    },
+    "verbose": true
   },
   "response": {
     "session": {

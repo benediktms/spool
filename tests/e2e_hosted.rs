@@ -274,9 +274,7 @@ async fn with_consent_only_conversation_text_and_query_reach_the_provider() {
             panic!("semantic search failed");
         }
         let r: Value = serde_json::from_str(&out).unwrap();
-        if r["coverage"]["embedded_chunks"].as_i64().unwrap_or(0) > 0
-            && !r["results"].as_array().unwrap().is_empty()
-        {
+        if r["coverage"].is_null() && !r["results"].as_array().unwrap().is_empty() {
             assert_eq!(r["mode_used"], "semantic");
             break;
         }

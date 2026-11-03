@@ -58,6 +58,8 @@ pub(crate) struct SessionFacts {
     pub(crate) native_id: Option<String>,
     pub(crate) title: Option<String>,
     pub(crate) cwd: Option<String>,
+    /// Normalized `host/owner/repo` when the harness records the repository; never a raw URL.
+    pub(crate) remote: Option<String>,
     pub(crate) parent_native_session: Option<String>,
     pub(crate) kind: SessionKind,
 }
@@ -68,6 +70,7 @@ impl Default for SessionFacts {
             native_id: None,
             title: None,
             cwd: None,
+            remote: None,
             parent_native_session: None,
             kind: SessionKind::Unknown,
         }
@@ -153,6 +156,7 @@ impl<'a> ParseCx<'a> {
             native_session_id: self.session.native_id.unwrap_or_else(|| "unknown".into()),
             native_title: self.session.title,
             cwd: self.session.cwd,
+            remote: self.session.remote,
             session_kind: self.session.kind,
             parent_native_session: self.session.parent_native_session,
             lineage_verified: false,

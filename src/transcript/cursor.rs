@@ -3,23 +3,29 @@
 //! format version and the lease expiry. It is never consumed: replay yields the same position.
 
 use super::handle::{HandleError, HandleKey, HandleKind};
-use super::refs::Anchor;
 use super::selection::ResolvedSel;
 use super::types::{SourcePolicy, View};
 use serde::{Deserialize, Serialize};
 
 /// Token payload format; bump on any incompatible change (old cursors then fail explicitly).
-pub const CURSOR_FORMAT: u8 = 1;
+pub const CURSOR_FORMAT: u8 = 3;
 
+/// Stored once per read in `lease_refs` (kind `cursor`); every cursor of the read names it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct CursorPayload {
-    pub f: u8,
-    pub a: Anchor,
-    /// Lease expiry (unix ms) at issue time.
-    pub x: i64,
+pub struct CursorSel {
+    pub m: String,
     pub v: View,
     pub p: SourcePolicy,
     pub s: ResolvedSel,
+}
+
+/// Signed cursor body, serialized as the array `[format, lease, ref_id, verbose, i, b, o, n]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CursorPayload {
+    pub lease: String,
+    pub ref_id: i64,
+    /// `verbose` output of the initial read.
+    pub d: bool,
     /// Next plan item index, block ordinal within the item, byte offset within that block.
     pub i: u32,
     pub b: u32,
@@ -28,27 +34,56 @@ pub struct CursorPayload {
     pub n: String,
 }
 
+type Wire = (u8, String, i64, bool, u32, u32, u64, String);
+
 impl CursorPayload {
     pub fn encode(&self, key: &HandleKey) -> String {
+        let wire = (
+            CURSOR_FORMAT,
+            &self.lease,
+            self.ref_id,
+            self.d,
+            self.i,
+            self.b,
+            self.o,
+            &self.n,
+        );
         key.sign(
             HandleKind::Cursor,
-            &serde_json::to_vec(self).expect("cursor serializes"),
+            &serde_json::to_vec(&wire).expect("cursor serializes"),
         )
     }
 
     pub fn decode(key: &HandleKey, token: &str) -> Result<Self, HandleError> {
         let payload = key.verify(HandleKind::Cursor, token)?;
-        let c: Self = serde_json::from_slice(&payload).map_err(|_| HandleError::Malformed)?;
-        if c.f != CURSOR_FORMAT {
+        let Ok((f, lease, ref_id, d, i, b, o, n)) = serde_json::from_slice::<Wire>(&payload) else {
+            return Err(
+                match serde_json::from_slice::<serde_json::Value>(&payload) {
+                    Ok(v) if v.is_object() => HandleError::UnsupportedVersion,
+                    _ => HandleError::Malformed,
+                },
+            );
+        };
+        if f != CURSOR_FORMAT {
             return Err(HandleError::UnsupportedVersion);
         }
-        Ok(c)
+        Ok(Self {
+            lease,
+            ref_id,
+            d,
+            i,
+            b,
+            o,
+            n,
+        })
     }
 
     /// Same payload with worst-case numeric widths; its token length bounds any real cursor of
     /// this read, so budgeting with it can only be conservative.
     pub fn worst_case(&self) -> Self {
         Self {
+            ref_id: i64::MAX,
+            d: true,
             i: u32::MAX,
             b: u32::MAX,
             o: u64::MAX,
@@ -69,26 +104,9 @@ mod tests {
     fn roundtrip_and_tamper() {
         let key = HandleKey::for_test(1);
         let c = CursorPayload {
-            f: CURSOR_FORMAT,
-            a: Anchor {
-                lease: "l".into(),
-                manifest: "m".into(),
-                session: "s".into(),
-                snapshot: "n".into(),
-            },
-            x: 5,
-            v: View::Conversation,
-            p: SourcePolicy::PreferSource,
-            s: ResolvedSel {
-                kind: super::super::types::SelKind::Session,
-                leaf: None,
-                first: None,
-                last: None,
-                anchors: vec![],
-                item: None,
-                before: None,
-                after: None,
-            },
+            lease: "l".into(),
+            ref_id: 1,
+            d: false,
             i: 1,
             b: 2,
             o: 3,

@@ -18,31 +18,57 @@ pub struct SpanRef {
     pub e: u32,
 }
 
-/// Common anchor fields: which session snapshot (and lease) the ref belongs to.
+/// Common anchor fields: the lease and manifest a ref belongs to; session and snapshot derive from the manifest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Anchor {
+    #[serde(rename = "l")]
     pub lease: String,
+    #[serde(rename = "m")]
     pub manifest: String,
-    pub session: String,
-    pub snapshot: String,
 }
 
-/// View-independent: binds source identity, anchored original spans and expected content.
+/// View-independent payload stored in `lease_refs`: binds the manifest, anchored original spans
+/// and expected content. The signed handle is a `RefHandle`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MatchRef {
-    #[serde(flatten)]
-    pub anchor: Anchor,
+    #[serde(rename = "m")]
+    pub manifest: String,
     pub spans: Vec<SpanRef>,
     /// blake3 (hex, first 32 chars) of the concatenated anchored span bytes.
     pub content: String,
+}
+
+/// Signed handle to a `lease_refs` row: `[lease, ref_id]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefHandle {
+    pub lease: String,
+    pub ref_id: i64,
+}
+
+impl RefHandle {
+    pub fn encode(&self, key: &HandleKey, kind: HandleKind) -> String {
+        key.sign(
+            kind,
+            &serde_json::to_vec(&(&self.lease, self.ref_id)).expect("ref serializes"),
+        )
+    }
+
+    pub fn decode(key: &HandleKey, kind: HandleKind, token: &str) -> Result<Self, HandleError> {
+        let payload = key.verify(kind, token)?;
+        let (lease, ref_id): (String, i64) =
+            serde_json::from_slice(&payload).map_err(|_| HandleError::Malformed)?;
+        Ok(Self { lease, ref_id })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MessageRef {
     #[serde(flatten)]
     pub anchor: Anchor,
+    #[serde(rename = "r")]
     pub record: String,
     /// Record digest (hex, first 32 chars) at observation time.
+    #[serde(rename = "d")]
     pub digest: String,
 }
 
@@ -59,9 +85,13 @@ pub enum ItemKind {
 pub struct ItemRef {
     #[serde(flatten)]
     pub anchor: Anchor,
+    #[serde(rename = "k")]
     pub kind: ItemKind,
+    #[serde(rename = "r")]
     pub record: String,
+    #[serde(rename = "b")]
     pub block: Option<u32>,
+    #[serde(rename = "d")]
     pub digest: String,
 }
 
@@ -70,6 +100,7 @@ pub struct ItemRef {
 pub struct BranchRef {
     #[serde(flatten)]
     pub anchor: Anchor,
+    #[serde(rename = "f")]
     pub leaf: String,
 }
 
@@ -86,7 +117,6 @@ macro_rules! ref_codec {
         }
     };
 }
-ref_codec!(MatchRef, HandleKind::Match);
 ref_codec!(MessageRef, HandleKind::Message);
 ref_codec!(ItemRef, HandleKind::Item);
 ref_codec!(BranchRef, HandleKind::Branch);

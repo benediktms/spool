@@ -26,7 +26,10 @@ There is no HTTP listener, no TCP listener and no HTTP MCP client anywhere in Sp
 
 The index contains sensitive conversational text (user and assistant messages, chunked) and
 vectors derived from it if embeddings are enabled, plus metadata (source paths, session ids,
-titles, timestamps). Tool payloads and reasoning are not indexed. Source transcripts are opened
+titles, timestamps, working directories, and a project identity derived from them: the repository
+remote reduced to `host/owner/repo` (userinfo, port and `.git` are dropped, so credentials in a remote URL are never stored or
+logged) or the repository's git directory path. Project resolution reads only the repository's own git
+config, never the global or system config. Tool payloads and reasoning are not indexed. Source transcripts are opened
 read-only and never modified or deleted; removing a session from Spool never deletes the original.
 
 **The filter is not a secret scanner.** Excluding tool blocks and reasoning reduces what is

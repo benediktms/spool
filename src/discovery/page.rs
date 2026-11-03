@@ -2,23 +2,50 @@
 //! write transaction, then apply the plan to the catalog inside one transaction.
 
 use super::{DiscoveryService, Mode, PROBE_BYTES, PageCtx, PageState, Report, Selection};
-use crate::adapters::{ParseOptions, RecordSink, SinkError, adapter_for};
+use crate::adapters::{HarnessAdapter, ParseOptions, RecordSink, SinkError, adapter_for};
 use crate::domain::{
-    MessageEntry, ParseWarning, RecordMeta, SessionKind, ToolCallMeta, ToolResultMeta, digest,
+    HarnessKind, MessageEntry, ParseWarning, ParsedSessionManifest, RecordMeta, SessionKind,
+    ToolCallMeta, ToolResultMeta, digest,
 };
 use crate::ids;
+use crate::projects::{self, ProjectKey};
 use crate::source::SourceFileInfo;
+use crate::sources::SourceRegistry;
 use crate::storage::catalog::{self, KnownFile, NewSession};
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 struct Probe {
     native_id: String,
     kind: SessionKind,
     cwd: Option<String>,
+    remote: Option<String>,
+    project: Option<ProjectKey>,
     activity: Option<i64>,
+}
+
+fn probe_manifest(
+    reg: &SourceRegistry,
+    source_id: &str,
+    adapter: &dyn HarnessAdapter,
+    path: &Path,
+    max_record: u64,
+    cancel: &AtomicBool,
+) -> Option<(ParsedSessionManifest, u64)> {
+    let opened = reg.open(source_id, path).ok()?;
+    let opts = ParseOptions {
+        max_record_bytes: max_record,
+        max_source_bytes: PROBE_BYTES,
+        observe_len: PROBE_BYTES,
+        include_subagents: true,
+        blob_roots: Vec::new(),
+    };
+    let mut r = (&opened.file).take(PROBE_BYTES);
+    let mut sink = Discard(cancel);
+    let m = adapter.parse_snapshot(&mut r, &opts, &mut sink).ok()?;
+    (!m.native_session_id.is_empty()).then_some((m, opened.info.len))
 }
 
 struct Discard<'a>(&'a AtomicBool);
@@ -233,6 +260,31 @@ impl DiscoveryService {
         Ok(seen)
     }
 
+    /// Re-read the bounded header of each cataloged file of `kind` and return its manifest.
+    /// Missing or unreadable files yield `None`.
+    pub async fn probe_headers(
+        &self,
+        kind: HarnessKind,
+        files: Vec<(String, PathBuf)>,
+    ) -> anyhow::Result<Vec<Option<ParsedSessionManifest>>> {
+        let reg = self.sources.clone();
+        let max_record = self.cfg.ingestion.max_record_bytes;
+        let permit = self.cpu.clone().acquire_owned().await?;
+        Ok(tokio::task::spawn_blocking(move || {
+            let _p = permit;
+            let cancel = AtomicBool::new(false);
+            let adapter = adapter_for(kind);
+            files
+                .into_iter()
+                .map(|(source_id, path)| {
+                    probe_manifest(&reg, &source_id, adapter, &path, max_record, &cancel)
+                        .map(|(m, _)| m)
+                })
+                .collect()
+        })
+        .await?)
+    }
+
     async fn probe_blocking(
         &self,
         ctx: &PageCtx<'_>,
@@ -251,31 +303,28 @@ impl DiscoveryService {
             let _p = permit;
             let adapter = adapter_for(kind);
             let mut out = Vec::with_capacity(files.len());
+            let mut resolved: HashMap<(String, Option<String>), ProjectKey> = HashMap::new();
             for info in files {
                 if cancel.load(Ordering::Relaxed) {
                     break;
                 }
                 let probe = (|| {
-                    let opened = reg.open(&source_id, &info.path).ok()?;
-                    let opts = ParseOptions {
-                        max_record_bytes: max_record,
-                        max_source_bytes: PROBE_BYTES,
-                        observe_len: PROBE_BYTES,
-                        include_subagents: true,
-                        blob_roots: Vec::new(),
-                    };
-                    let mut r = (&opened.file).take(PROBE_BYTES);
-                    let mut sink = Discard(&cancel);
-                    let m = adapter.parse_snapshot(&mut r, &opts, &mut sink).ok()?;
-                    if m.native_session_id.is_empty() {
-                        return None;
-                    }
+                    let (m, len) =
+                        probe_manifest(&reg, &source_id, adapter, &info.path, max_record, &cancel)?;
                     // Native last activity is "reliable" only when the probe saw the whole file.
-                    let whole = m.prefix_end >= opened.info.len;
+                    let whole = m.prefix_end >= len;
+                    let project = m.cwd.as_ref().map(|cwd| {
+                        resolved
+                            .entry((cwd.clone(), m.remote.clone()))
+                            .or_insert_with(|| projects::resolve(cwd, m.remote.as_deref()))
+                            .clone()
+                    });
                     Some(Probe {
                         native_id: m.native_session_id,
                         kind: m.session_kind,
                         cwd: m.cwd,
+                        remote: m.remote,
+                        project,
                         activity: if whole { m.last_activity_at } else { None },
                     })
                 })();
@@ -497,6 +546,13 @@ impl DiscoveryService {
             ctx.now,
         )
         .await?;
+        if let (Some(cwd), Some(project)) = (cwd.as_deref(), probe.and_then(|p| p.project.as_ref()))
+        {
+            catalog::assign_project(tx, &sid, cwd, project, ctx.now).await?;
+        }
+        if let Some(remote) = probe.and_then(|p| p.remote.as_deref()) {
+            catalog::set_session_remote(tx, &sid, remote).await?;
+        }
         catalog::upsert_source_file(tx, &sid, f, ctx.now).await?;
         if created {
             rep.new_sessions += 1;

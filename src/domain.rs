@@ -204,6 +204,9 @@ pub struct ParsedSessionManifest {
     pub native_session_id: String,
     pub native_title: Option<String>,
     pub cwd: Option<String>,
+    /// Normalized `host/owner/repo` recorded by the harness, if any. Never a raw URL.
+    #[serde(default)]
+    pub remote: Option<String>,
     pub session_kind: SessionKind,
     /// Raw native parent-session value (lineage evidence). Never inferred.
     pub parent_native_session: Option<String>,

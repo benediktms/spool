@@ -135,10 +135,10 @@ async fn call(c: &Client, tool: &'static str, args: Value) -> (bool, Value) {
     let mut p = CallToolRequestParams::new(tool);
     p.arguments = args.as_object().cloned();
     let r = c.call_tool(p).await.unwrap();
-    (
-        r.is_error == Some(true),
-        r.structured_content.expect("structured content"),
-    )
+    (r.is_error == Some(true), {
+        assert!(r.structured_content.is_none(), "one copy only");
+        serde_json::from_str(&r.content[0].as_text().expect("text content").text).unwrap()
+    })
 }
 
 fn kinds(v: &Value) -> Vec<String> {

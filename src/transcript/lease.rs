@@ -1,12 +1,22 @@
 //! Bounded read leases (spec 14.2.8). A lease pins manifests (and, through them, retired
 //! conversational snapshots) until it expires. Limits: active lease count and charged bytes.
 
+use super::selection::app_err;
 use crate::clock::SharedClock;
 use crate::config::ReaderConfig;
 use crate::ids::new_id;
 use crate::ipc::AppError;
 use crate::storage::index::Index;
-use sqlx::Row;
+use sqlx::{QueryBuilder, Row, Sqlite};
+
+const REF_ROWS_PER_INSERT: usize = 100;
+
+#[derive(Debug, Clone)]
+pub struct NewRef {
+    pub ref_id: i64,
+    pub kind: &'static str,
+    pub payload: Vec<u8>,
+}
 
 #[derive(Clone)]
 pub struct LeaseManager {
@@ -176,6 +186,97 @@ impl LeaseManager {
             Some(r) => LeaseState::Live {
                 expires_at_ms: r.get("expires_at"),
             },
+        })
+    }
+
+    /// Store ref payloads under a lease in batches and charge their bytes to it.
+    pub async fn put_refs(&self, lease_id: &str, refs: &[NewRef]) -> Result<(), AppError> {
+        if refs.is_empty() {
+            return Ok(());
+        }
+        let mut tx = self.index.writer.begin().await.map_err(storage_err)?;
+        for batch in refs.chunks(REF_ROWS_PER_INSERT) {
+            let mut qb = QueryBuilder::<Sqlite>::new(
+                "INSERT INTO lease_refs(lease_id, ref_id, kind, payload) ",
+            );
+            qb.push_values(batch, |mut b, r| {
+                b.push_bind(lease_id)
+                    .push_bind(r.ref_id)
+                    .push_bind(r.kind)
+                    .push_bind(&r.payload[..]);
+            });
+            qb.build().execute(&mut *tx).await.map_err(storage_err)?;
+        }
+        let bytes: usize = refs.iter().map(|r| r.payload.len()).sum();
+        sqlx::query("UPDATE read_leases SET bytes_charged = bytes_charged + ? WHERE id = ?")
+            .bind(bytes as i64)
+            .bind(lease_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage_err)?;
+        tx.commit().await.map_err(storage_err)
+    }
+
+    /// Store one payload under the next free ref id of the lease.
+    pub async fn add_ref(
+        &self,
+        lease_id: &str,
+        kind: &'static str,
+        payload: &[u8],
+    ) -> Result<i64, AppError> {
+        let mut tx = self.index.writer.begin().await.map_err(storage_err)?;
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO lease_refs(lease_id, ref_id, kind, payload)              SELECT ?1, COALESCE(max(ref_id), 0) + 1, ?2, ?3 FROM lease_refs WHERE lease_id = ?1              RETURNING ref_id",
+        )
+        .bind(lease_id)
+        .bind(kind)
+        .bind(payload)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(storage_err)?;
+        sqlx::query("UPDATE read_leases SET bytes_charged = bytes_charged + ? WHERE id = ?")
+            .bind(payload.len() as i64)
+            .bind(lease_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage_err)?;
+        tx.commit().await.map_err(storage_err)?;
+        Ok(id)
+    }
+
+    /// Payload of a stored ref. A missing row is `CURSOR_EXPIRED` when its lease is gone or no
+    /// longer live, `STALE_REFERENCE` otherwise.
+    pub async fn get_ref(
+        &self,
+        lease_id: &str,
+        ref_id: i64,
+        kind: &str,
+    ) -> Result<Vec<u8>, AppError> {
+        let row: Option<Vec<u8>> = sqlx::query_scalar(
+            "SELECT payload FROM lease_refs WHERE lease_id = ? AND ref_id = ? AND kind = ?",
+        )
+        .bind(lease_id)
+        .bind(ref_id)
+        .bind(kind)
+        .fetch_optional(&self.index.reader)
+        .await
+        .map_err(storage_err)?;
+        if let Some(p) = row {
+            return Ok(p);
+        }
+        Err(match self.state(lease_id).await? {
+            LeaseState::Live { .. } => app_err(
+                "STALE_REFERENCE",
+                "the reference is no longer retained; start a new read or re-run the search",
+                false,
+                "new_read",
+            ),
+            _ => app_err(
+                "CURSOR_EXPIRED",
+                "the read lease for this reference has expired; start a new read or re-run the search",
+                false,
+                "new_read",
+            ),
         })
     }
 

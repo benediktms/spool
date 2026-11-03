@@ -434,31 +434,31 @@ fn queries() -> Vec<Q> {
         Q {
             cat: "project",
             q: "state management and rendering",
-            mode_filters: f(json!({"project_path":"/proj/web"})),
+            mode_filters: f(json!({"projects":["/proj/web"]})),
             relevant: &["s_react"],
         },
         Q {
             cat: "project",
             q: "token refresh",
-            mode_filters: f(json!({"project_path":"/proj/billing"})),
+            mode_filters: f(json!({"projects":["/proj/billing"]})),
             relevant: &["s_oauth"],
         },
         Q {
             cat: "project",
             q: "slow search under load",
-            mode_filters: f(json!({"project_path":"/proj/search"})),
+            mode_filters: f(json!({"projects":["/proj/search"]})),
             relevant: &["s_perf"],
         },
         Q {
             cat: "project",
             q: "rollback",
-            mode_filters: f(json!({"project_path":"/proj/billing"})),
+            mode_filters: f(json!({"projects":["/proj/billing"]})),
             relevant: &["s_migrations"],
         },
         Q {
             cat: "project",
             q: "probe rollout",
-            mode_filters: f(json!({"project_path":"/proj/infra"})),
+            mode_filters: f(json!({"projects":["/proj/infra"]})),
             relevant: &["s_k8s"],
         },
         // old reopened session (older than the default bootstrap window but indexed)

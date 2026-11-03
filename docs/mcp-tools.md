@@ -40,22 +40,29 @@ Searches indexed user/assistant conversation (not tool payloads or reasoning). R
 from a partial, explicitly scoped corpus: configured bootstrap window, later activity, and manual
 backfills.
 
-Input (unknown fields are rejected; only `query` is required):
+Input (unknown fields are rejected; exactly one of `query` or `queries` is required):
 
 | Field | Meaning |
 |---|---|
 | `query` | non-empty, at most 4,096 UTF-8 bytes and 1,024 provider tokens |
+| `queries` | 1 to 4 such queries, run separately and fused by reciprocal rank; each `hybrid` or `semantic` query costs one embedding and spends the query budget |
 | `mode` | `hybrid` (default), `lexical`, `semantic`, `literal` |
-| `sources`, `project_path`, `session_ids`, `session_kinds` | filters (default kind: interactive) |
+| `sources`, `session_ids`, `session_kinds` | filters (default kind: interactive) |
+| `projects` | 1 to 16 entries, each a project name (`app-memberships`, case-insensitive), `owner/repo` (any host), a git URL, or an absolute path inside a project. Matches of several entries are unioned |
 | `after`, `before`, `include_unknown_time` | absolute RFC 3339 timestamps only; relative dates exist only in the CLI |
-| `prefer_recent`, `limit`, `matches_per_session`, `debug_scores` | ranking and size controls |
+| `prefer_recent`, `limit`, `matches_per_session`, `debug_scores` | ranking and size controls; `limit` above 50 and `matches_per_session` above 3 are clamped with a `limit_clamped` warning, zero is rejected |
 
-Output: `mode_requested`, `mode_used`, `index_epoch`, `coverage` (indexed sessions, active/embedded
-chunks, pending sessions, last discovery), `results` (session identity and native title, `matches`
+Output: `mode_requested`, `mode_used`, `index_epoch`, `coverage` (only when degraded: pending sessions, chunks without vectors, or a fallback mode; indexed sessions, active/embedded
+chunks, pending sessions, last discovery), `results` (session identity and title, `matches`
 with `match_ref`, `match_ref_expires_at`, optional `branch_ref`, excerpt of at most 1,200 bytes,
-`matched_by`), `warnings`, `truncated`. Default response cap 64 KiB.
+`matched_by`) and `project` (`name`, `remote`; null when unknown) per session, `warnings`, `truncated`, and `resolved_projects` (per `projects` entry, the projects it matched; absent without the filter). An entry that matches nothing adds a `project_not_found` warning; when no entry matches, the result is empty (the search never widens to all projects). Default response cap 64 KiB.
 
 Behaviour worth knowing:
+
+* `title` is the native title (`title_origin = "native"`), else the first user prompt cut to 120 bytes
+  (`title_origin = "first_prompt"`). Excerpts are centred on the matched span; injected blocks
+  (`<oai-mem-citation>`, `<environment_context>`, `<system-reminder>`, `<user_instructions>`, the
+  `# AGENTS.md instructions` preamble) are removed from excerpts and titles, never from the index.
 
 * `hybrid` falls back to `lexical` when a query embedding cannot be obtained and says so with a
   `query_embedding_unavailable` warning and `mode_used = "lexical"`.
@@ -77,9 +84,15 @@ sources). Normative contract: `docs/read-session-contract.md`; machine-readable 
 valid exchanges: `examples/read_session/*.json`.
 
 **Two call shapes.** An initial read (`session_id` plus optional `selection`, `view`,
-`source_policy`, `max_bytes` 4096..=262144 default 32768, `max_items` 1..=200 default 50) or a
+`source_policy`, `verbose` default false, `max_bytes` 4096..=262144 default 32768, `max_items` 1..=200 default 50) or a
 cursor-only continuation (`cursor` plus optional `max_bytes`/`max_items`). Unknown fields and
 mixed forms are `INVALID_ARGUMENT`.
+
+**Result shape.** Every tool result is one compact JSON text block (`content[0].text`); there is no
+`structuredContent` and no declared `outputSchema`. `schemas/read_session/*.schema.json` remain the
+written contract for that JSON. By default (`verbose: false`) `provenance` carries only `origin`,
+fragments omit `block_ref`, a `utf8` `encoding`, and the range fields when they cover the whole
+block; `verbose: true` returns everything. A cursor continuation keeps the initial read's choice.
 
 **Selections.** `session` (+ optional `branch_ref`: root to the branch leaf), `match`, `message`
 (both with `before`/`after` context messages, 0..=20, default 2), inclusive `range`, and `item`.
@@ -111,8 +124,8 @@ snapshot (nothing is published, no embedding request is made); `indexed_only` on
 file (size, mtime, identity, record digests) and stages a fresh observation when the file moved on.
 
 **Pagination.** Pages are measured with the same budget function as the MCP bridge
-(`mcp::budget::tool_result_bytes`: structured value + the JSON-escaped compatibility text copy +
-wrapper), so effective payload capacity is roughly half of `max_bytes`; each reference is a few
+(`mcp::budget::tool_result_bytes`: the single JSON-escaped text copy + wrapper), so payload capacity
+is close to `max_bytes` minus JSON escaping; each reference is a few
 hundred bytes, so very small budgets (near 4096) can be too small for even one item and return
 `RESOURCE_LIMIT` (recovery `increase_max_bytes`) rather than an unchanged cursor. Oversized
 conversational text, tool arguments/results and raw records are fragmented as half-open
@@ -124,7 +137,8 @@ policy and position. The local I/O and time budgets (`reader.max_source_read_byt
 
 **Handles and leases.** Every reference/cursor is signed (integrity only, not authentication) and
 anchored to a lease (`reader.lease_ttl_seconds`); the expiry is exposed as
-`snapshot.lease_expires_at`. Expired or swept leases give `CURSOR_EXPIRED`; a rotated signing key
+`snapshot.lease_expires_at`. `match_ref` and cursor tokens are short (under 150 bytes): they name a
+lease and a stored payload (`lease_refs`) that is released with the lease. Expired or swept leases give `CURSOR_EXPIRED`; a rotated signing key
 gives `STALE_REFERENCE` (references) or `CURSOR_EXPIRED` (cursors); an altered signature is
 `INVALID_ARGUMENT`. Retired snapshots stay readable while a live lease pins them. Exclusion, session
 removal and source disablement are re-checked on every call, including continuations, and beat any

@@ -237,6 +237,13 @@
       ],
       "description": "Default `prefer_source` for `conversation`, `require_source` for other views."
     },
+    "verbose": {
+      "description": "Include provenance details, fragment byte ranges and block refs. Default false; a cursor\ncontinuation keeps the initial read's choice.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
     "view": {
       "anyOf": [
         {

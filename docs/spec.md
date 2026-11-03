@@ -277,7 +277,7 @@ Anthropic documents local JSONL transcripts under `~/.claude/projects/<encoded-c
 
 Extract conversational text blocks only. A `tool_result` inside a user message remains excluded. Preserve UUID/parent relationships where present. Handle accumulated assistant updates according to fixture-backed native identity: select the authoritative saved version, rather than appending every streamed representation as new text.
 
-Known synthetic summary/compaction markers and injected hook content remain outside the corpus. Detect subagent sessions and classify them separately.
+Known synthetic summary/compaction markers and injected hook content remain outside the corpus. Detect subagent sessions and classify them separately. The session working directory is the first non-null `cwd` on any line, independent of which line first carries the session id: current transcripts open with `last-prompt`, `mode` and `permission-mode` lines that have a session id but no `cwd`.
 
 ### 5.6 Subagents
 
@@ -449,7 +449,9 @@ The following is the required logical model; names may change if the migration a
 | Table | Purpose and important fields |
 |---|---|
 | `sources` | Stable ID, adapter, roots, enabled flag, configuration revision, bootstrap cutoff, discovery watermark, last successful scan, last scan error |
-| `sessions` | Internal ID, source ID, native ID, lineage, native title, project/cwd, session kind, creation/activity times, active snapshot ID, exclusion flag, observed fingerprint, parser/coverage status |
+| `sessions` | Internal ID, source ID, native ID, lineage, native title, cwd, normalized git remote (first non-null value kept), project ID, session kind, creation/activity times, active snapshot ID, exclusion flag, observed fingerprint, parser/coverage status |
+| `projects` | Stable ID, kind (`git_remote`, `git_dir`, `path`), unique key, display name, normalized remote, creation time. Identity, first match wins: normalized `host/owner/repo` (Codex `session_meta.git.repository_url`, else the cwd repository's `remote.origin.url`); the canonical common git directory (groups linked worktrees of a repository without a remote); the exact cwd |
+| `project_paths` | Working directory, project ID, resolution time, `dead_at` (set when the path no longer exists; rows are never deleted) |
 | `source_files` | Session ID, canonical path, native file identity, observed size/mtime, format/compression, existence status |
 | `snapshots` | ID, session ID, observed source revision, pipeline fingerprint, generation, staging/published/retired state (a retired snapshot that a live lease pins is `retired_leased`), source-prefix endpoint, counts and parse warnings |
 | `records` | Snapshot ID, record key, native ID, parent key, kind, timestamp, locator, raw-record digest; no raw tool payload |
@@ -463,7 +465,8 @@ The following is the required logical model; names may change if the migration a
 | `exclusions` | Source/session inclusion overrides and reasons, without transcript content |
 | `app_meta` | Schema version, active embedding profile, index epoch, persisted application settings needed for reconciliation |
 | `read_manifests` | Manifest ID, session ID, snapshot ID, snapshot kind (`indexed` or `source_read`), observed source identity and prefix endpoint, record-graph and locator references needed for pinned reads, pinned serializer versions, creation time, retained bytes |
-| `read_leases` | Lease ID, manifest ID, expiry, state, bytes charged. Search match handles and read cursors reference a lease. |
+| `read_leases` | Lease ID, manifest ID, expiry, state, bytes charged (pinned retained bytes plus `lease_refs` payload bytes). Search match handles and read cursors reference a lease. |
+| `lease_refs` | Lease ID, reference ID, kind (`match` or `cursor`), payload. Holds the span list of a match reference and the resolved selection of a cursor; rows are removed with their lease. |
 
 Only persist record-graph metadata needed for conversational ancestry and source resolution. Do not copy every raw record body into SQLite. Tool retrieval can seek or scan the original source on demand.
 
@@ -725,13 +728,13 @@ Keep default ordering relevance-first, with deterministic ID tie-breaks. An expl
 
 Default: ten sessions, maximum fifty, at most three matches each. Bound excerpts and the entire response; do not return the complete transcript as part of search. If limits truncate a response, report it and preserve valid read references.
 
-Return lexical/vector coverage counts, index epoch, scan freshness, and any provider fallback. `coverage.pending_sessions` counts present, policy-eligible sessions in pending or deferred state; it excludes missing sources, excluded sessions, disabled subagent kinds, and inert manual-backfill candidates. Do not claim "no such conversation exists" when the index contains only the configured recent/backfilled subset.
+Return the index epoch always. Return `coverage` (lexical/vector counts, scan freshness) only when degraded: `pending_sessions > 0`, `embedded_chunks < active_chunks`, or `mode_used` differs from `mode_requested`; `index_status` always reports full numbers. `coverage.pending_sessions` counts present, policy-eligible sessions in pending or deferred state; it excludes missing sources, excluded sessions, disabled subagent kinds, and inert manual-backfill candidates. Do not claim "no such conversation exists" when the index contains only the configured recent/backfilled subset.
 
 A nearest-neighbor result is not proof of relevance. Do not invent a universal cosine cutoff or display an uncalibrated score as a confidence percentage. The agent verifies the excerpt and original context.
 
 ## 14. MCP API contract
 
-Use `rmcp` for protocol handling, schema generation, the stdio transport, and protocol-version negotiation. Do not hand-implement version-specific behavior. Expose structured tool outputs with JSON schemas and concise tool descriptions. Only advertise capabilities actually implemented. Do not enable sampling, roots-based arbitrary access, prompts, elicitation, or remote task extensions merely because the SDK supports them. [S3]
+Use `rmcp` for protocol handling, schema generation, the stdio transport, and protocol-version negotiation. Do not hand-implement version-specific behavior. Return each tool result as one compact JSON text copy (no structured duplicate, no declared output schema) and keep the JSON Schemas as the written contract; keep tool descriptions concise. Only advertise capabilities actually implemented. Do not enable sampling, roots-based arbitrary access, prompts, elicitation, or remote task extensions merely because the SDK supports them. [S3]
 
 The MCP surface contains exactly three tools: `search_sessions`, `read_session`, and `index_status`. Administration is CLI-only (section 14.4). The surface is read-oriented, but semantic and hybrid `search_sessions` calls send the query text to the hosted provider and spend the approved interactive query budget. Tool descriptions and annotations MUST NOT present those modes as purely local. Routine agents receive no deletion, key-management, indexing, or daemon-control tools. Clients reach the tools through `spool mcp` (stdio), which forwards to the daemon over local IPC (section 15).
 
@@ -748,7 +751,7 @@ Input:
   "query": "implementing a local GitHub review bot",
   "mode": "hybrid",
   "sources": ["omp"],
-  "project_path": null,
+  "projects": null,
   "session_ids": [],
   "session_kinds": ["interactive"],
   "after": "2026-10-01T00:00:00Z",
@@ -761,7 +764,7 @@ Input:
 }
 ```
 
-Required field: nonempty `query`. Query limit: 4,096 UTF-8 bytes and 1,024 provider tokens. Empty optional lists mean no additional filter except the default interactive-session kind. Reject unknown enum values and unrecognized fields to catch client mistakes.
+Required: exactly one of nonempty `query` or `queries` (1 to 4 entries; each is retrieved separately and the chunk lists are fused by reciprocal rank, each hybrid or semantic entry costing one embedding and query-budget unit). `limit` and `matches_per_session` above their maximum are clamped and reported with a `limit_clamped` warning; zero is rejected. Query limit: 4,096 UTF-8 bytes and 1,024 provider tokens. `projects` takes 1 to 16 entries (an empty list is an error); each entry is detected deterministically: a leading `/` is an absolute path, `://` or scp-style `user@host:` is a git URL, exactly one `/` is `owner/repo`, anything else is a project name. A name matches `projects.name` case-insensitively; `owner/repo` matches `git_remote` keys ending in `/owner/repo` on any host; a URL is normalized and matched exactly against `key`; a path takes the nearest `project_paths` row equal to the path or one of its parents, else a live project resolution of the path. Entries that match several projects contribute all of them. An entry without a match adds a `project_not_found` warning that names the entry (URLs are shown normalized, never as given); when no entry matches, the response has no results and the search never widens to all projects. The output then carries `resolved_projects` (`input` and the matched `name`/`remote` pairs per entry), and every result carries `project` (`name`, `remote`, or null) next to the working directory `project_path`. Empty optional lists mean no additional filter except the default interactive-session kind. Reject unknown enum values and unrecognized fields to catch client mistakes.
 
 Output:
 
@@ -787,6 +790,7 @@ Output:
       "title": "Local review bot",
       "title_origin": "native",
       "project_path": "/Users/example/projects/review-bot",
+      "project": { "name": "review-bot", "remote": "github.com/example/review-bot" },
       "started_at": "2026-09-08T09:00:00Z",
       "last_activity_at": "2026-10-10T15:10:00Z",
       "source_status": "present",
@@ -811,9 +815,9 @@ Output:
 
 The title is native metadata, not generated by this application. When unavailable, return null or a deterministic display label, never an invented topic.
 
-A hybrid fallback returns `mode_used = "lexical"` and a typed warning such as `query_embedding_unavailable`. Semantic-only failure is a tool error. Search output is limited to 64 KiB by default, with individual excerpts limited to 1,200 UTF-8 bytes.
+A hybrid fallback returns `mode_used = "lexical"` and a typed warning such as `query_embedding_unavailable`. Semantic-only failure is a tool error. Search output is limited to 64 KiB by default, with individual excerpts limited to 1,200 UTF-8 bytes. Excerpts are centred on the matched span and exclude injected blocks. When no native title exists, `title` is the first user prompt (at most 120 bytes) with `title_origin = "first_prompt"`.
 
-Each `match_ref` is view-independent. It binds source identity, anchored original spans, and expected content, but no representation (section 14.2.3). Each match exposes `match_ref_expires_at`, the expiry of the lease that retains the manifest and indexed material the handle needs. All handles from one response MAY share one lease. If the lease bounds are exhausted (section 14.2.8), search returns `RESOURCE_LIMIT` instead of handles that cannot be read. `branch_ref` is present whenever branch information is needed to resolve or disambiguate the read path.
+Each `match_ref` is view-independent. It binds source identity, anchored original spans, and expected content, but no representation (section 14.2.3). The signed handle carries only the lease and a lease-scoped reference id and stays under 150 bytes; the spans and content digest are stored with the lease. Each match exposes `match_ref_expires_at`, the expiry of the lease that retains the manifest and indexed material the handle needs. All handles from one response MAY share one lease. If the lease bounds are exhausted (section 14.2.8), search returns `RESOURCE_LIMIT` instead of handles that cannot be read. `branch_ref` is present whenever branch information is needed to resolve or disambiguate the read path.
 
 ### 14.2 `read_session`
 
@@ -848,6 +852,7 @@ The tool accepts either an initial read or a cursor-only continuation. Reject un
 | `source_policy` | No | Default `prefer_source` for conversation, `require_source` for other views. |
 | `max_bytes` | No | Default 32,768; permitted 4,096 through 262,144. |
 | `max_items` | No | Default 50; permitted 1 through 200. |
+| `verbose` | No | Default `false`. When `false`, provenance keeps only `origin`; fragments omit `block_ref`, `encoding` when `utf8`, and the range fields (`start_byte`, `end_byte`, `total_bytes`, `is_last`) when the fragment is the whole block. When `true`, every field is returned. A cursor keeps the initial read's choice; a continuation does not accept `verbose`. |
 
 All references must belong to `session_id`. References from other sessions or incompatible snapshots are errors. Do not merge or relocate a read to make them work.
 
@@ -936,9 +941,9 @@ To change views or context, issue a new initial read with the original match, me
 
 `session_id` identifies a catalogued session. Message, item, branch, block, record, and match references also identify a particular observed snapshot or verified source identity. Native IDs are metadata. Native tool-call IDs alone are not safe unique selectors.
 
-A **match reference is view-independent**. It binds source identity, anchored original spans, and the expected content. It does not bind a representation.
+A **match reference is view-independent**. It binds source identity, anchored original spans, and the expected content. It does not bind a representation. The signed handle holds only the lease and a lease-scoped reference id (under 150 bytes); the payload lives in lease-retained storage and is released with the lease.
 
-A **cursor is read-dependent**. It binds the resolved selection, frozen snapshot, branch, view, source policy, the next item, block, and byte offset, the token format version, and the expiry.
+A **cursor is read-dependent**. It binds the resolved selection, frozen snapshot, branch, view, source policy, the next item, block, and byte offset, the token format version, and the expiry. The signed handle holds the lease, a reference id naming the lease-retained resolved selection, the verbose flag, the next position, and the format version (under 150 bytes). Message, item and branch references carry only the lease and manifest as anchor; session and snapshot derive from the manifest. A reference whose lease expired or was swept fails with `CURSOR_EXPIRED`.
 
 A branch reference selects a persisted path through a frozen record graph. It is not a physical file-order interval. Parent and control records take part in ancestry even when the conversation view excludes them. Adapters must not use an indexing run ID as though it were automatically a complete branch path.
 
@@ -1082,7 +1087,7 @@ Example success (illustrative IDs; shortened; the formal shape is a required fut
 
 All variants contain `item_ref`, a timestamp or null, a turn reference or null, `blocks`, `item_end`, and provenance. A null metadata value means unknown or unavailable. It is not a guessed value.
 
-Every content-bearing item contains `provenance.origin`, either `verified_source` or `indexed_snapshot`. It also contains opaque source and record references, the expected record digest, an optional native record ID, and an optional raw source-byte locator. Offsets are validated hints. They are not sufficient identity on their own.
+Every content-bearing item contains `provenance.origin`, either `verified_source` or `indexed_snapshot`. When `verbose` is true it also contains opaque source and record references, the expected record digest, an optional native record ID, and an optional raw source-byte locator. Offsets are validated hints. They are not sufficient identity on their own.
 
 Conversation source fallback can produce items from different origins in the same page. Their individual provenance must make that explicit. Do not label cached text as a fresh source read.
 
@@ -1128,7 +1133,7 @@ Ranges are half-open `[start_byte, end_byte)`. They refer to the full decoded bl
 
 For UTF-8, never split inside a code point. For base64, decode `data` before you compare its length to the byte range. The response remains valid JSON even when its string holds only part of an original JSON tool payload.
 
-`is_last` means the fragment ends at `total_bytes`. It does not mean the full block is present on this page. `item_end` means this page reaches the final block's end for that item.
+Unless `verbose` is true, a fragment that is the whole block omits the four range fields, `block_ref` and a `utf8` `encoding`; partial fragments always carry the range fields. `is_last` means the fragment ends at `total_bytes`. It does not mean the full block is present on this page. `item_end` means this page reaches the final block's end for that item.
 
 One logical item can therefore appear on consecutive pages with the same `item_ref`, while its emitted content fragments advance without overlap. Metadata repetition is allowed. Following the returned cursors MUST NOT skip or repeat decoded content bytes.
 
@@ -1136,7 +1141,7 @@ One logical item can therefore appear on consecutive pages with the same `item_r
 
 ##### 14.2.7.2 Budget and progress
 
-`max_bytes` caps the final serialized tool result, including wrapping, escaping, metadata, cursors, branch options, and any compatibility text copy. The MCP bridge and the IPC layer MUST share the budget calculation with the reader. Do not budget only plaintext.
+`max_bytes` caps the final serialized tool result, including wrapping, escaping, metadata, cursors and branch options. Every tool result is one compact JSON text copy of the output (`content[0].text`) with no `structuredContent` and no declared output schema, so the value is counted once. The MCP bridge and the IPC layer MUST share the budget calculation with the reader. Do not budget only plaintext.
 
 If the next item's mandatory envelope plus even one valid fragment cannot fit, return `RESOURCE_LIMIT`. Never issue a success page with an unchanged cursor that can loop forever. An empty success is valid only at genuine selection exhaustion.
 
@@ -1488,6 +1493,8 @@ At the configured warning threshold, surface a warning. At the hard storage thre
 
 Maintenance uses bounded transactions to delete retired snapshots whose leases expired, remove unreferenced embeddings, prune old completed job records through supported backend APIs, and request nonblocking checkpoints when appropriate. Large compaction or VACUUM is explicit maintenance with documented impact.
 
+The routine maintenance step also correlates projects, at most 500 distinct paths per run and idempotently. It assigns a project to sessions that have none (a stored remote wins over the working directory; Codex sessions with neither a stored remote nor a project are re-probed from the bounded source header, skipping missing files; indexed Claude sessions without a working directory are re-probed the same way first, at most 500 per run, behind a cursor so a header with no working directory is not read again), moves the sessions of a `path` project to the git project that holds their working directory's `project_paths` row and deletes the emptied `path` project, and sets `dead_at` on `project_paths` rows whose path no longer exists (a plain existence check). The job never runs git discovery on an existing path: discovering a new session in a directory that is now a repository is what re-points the row, and the next run does the move. It never deletes `project_paths` rows, never re-checks dead rows, never reassigns sessions of git-backed projects and never changes eligibility.
+
 Use SQLite's backup facilities or a controlled offline procedure for consistent backups. Do not copy only a live `.sqlite` file while ignoring its WAL. Backups and support bundles exclude secrets by default. Logical purge is not a forensic secure-erasure guarantee for old disk pages, filesystem snapshots, or prior backups.
 
 ## 18. Observability and operator diagnostics
@@ -1631,7 +1638,7 @@ Pagination and consistency:
 
 - Fragment a 2 MiB assistant response, tool result, and raw record under 32 KiB.
 - Reassemble decoded fragments with no missing or duplicated content.
-- Account for JSON escaping and any compatibility text copy in the limit.
+- Account for JSON escaping of the single text copy in the limit.
 - Reject a nonprogressing too-small budget.
 - Replay a cursor from the same position, and reject new selection or view fields.
 - Permit safe append-only growth while excluding new records from old cursors.

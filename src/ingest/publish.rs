@@ -175,7 +175,8 @@ pub async fn publish(
         .await?;
     sqlx::query(
         "UPDATE sessions SET active_snapshot_id=?, generation=?, native_title=?, cwd=?, session_kind=?, lineage_native_id=?, lineage_verified=?, \
-         created_at=?, last_activity_at=?, coverage_status=?, index_state='indexed', index_error=NULL, observed_fingerprint=? WHERE id=?",
+         created_at=?, last_activity_at=?, coverage_status=?, index_state='indexed', index_error=NULL, observed_fingerprint=?, remote=COALESCE(?, remote), \
+         project_id=CASE WHEN cwd IS NOT ? AND project_id IN (SELECT id FROM projects WHERE kind='path') THEN NULL ELSE project_id END WHERE id=?",
     )
     .bind(snapshot_id)
     .bind(new_generation)
@@ -188,6 +189,8 @@ pub async fn publish(
     .bind(meta.last_activity_at)
     .bind(coverage)
     .bind(fingerprint)
+    .bind(&meta.remote)
+    .bind(&meta.cwd)
     .bind(session_id)
     .execute(&mut *tx)
     .await?;

@@ -55,8 +55,8 @@ fn start_daemon() -> Daemon {
     )
     .unwrap();
     let log = tmp.path().join("daemon.log");
-    let mut child = Command::new(BIN)
-        .args(["daemon", "run"])
+    let mut child = Command::new("sh")
+        .args(["-c", "umask 022; exec \"$@\"", "sh", BIN, "daemon", "run"])
         .env("SPOOL_HOME", &home)
         .stdout(Stdio::null())
         .stderr(std::fs::File::create(&log).unwrap())
@@ -112,6 +112,11 @@ async fn stdio_client_reaches_daemon_tool_over_ipc() {
     assert_eq!(mode(&d.home.join("state/spool.sock")), 0o600);
     assert_eq!(mode(&d.home.join("state/index.sqlite")), 0o600);
     assert_eq!(mode(&d.home.join("state/jobs.sqlite")), 0o600);
+    for db in ["index.sqlite", "jobs.sqlite"] {
+        for suffix in ["-wal", "-shm"] {
+            assert_eq!(mode(&d.home.join(format!("state/{db}{suffix}"))), 0o600);
+        }
+    }
 
     let mut cmd = tokio::process::Command::new(BIN);
     cmd.arg("mcp").env("SPOOL_HOME", &d.home);
@@ -132,7 +137,10 @@ async fn stdio_client_reaches_daemon_tool_over_ipc() {
         .await
         .unwrap();
     assert_eq!(r.is_error, Some(false));
-    let v = r.structured_content.expect("structured content");
+    assert!(r.structured_content.is_none(), "one copy only");
+    assert_eq!(r.content.len(), 1);
+    let v: serde_json::Value =
+        serde_json::from_str(&r.content[0].as_text().expect("text content").text).unwrap();
     eprintln!("TOOL RESULT {v}");
     assert_eq!(v["embedding"]["state"], "not_approved");
     assert_eq!(v["queue"]["queued"], 0);

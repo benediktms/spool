@@ -4,12 +4,12 @@
 
 use crate::ipc::AppError;
 use crate::ipc::client::{self, ClientError};
-use crate::mcp::budget::tool_result_bytes;
+use crate::mcp::budget::{tool_result, tool_result_bytes};
 use rmcp::{
     RoleServer, ServerHandler,
     model::{
-        CallToolRequestParams, CallToolResponse, CallToolResult, ErrorData as McpError,
-        ListToolsResult, ServerCapabilities, ServerConfig, Tool,
+        CallToolRequestParams, CallToolResponse, ErrorData as McpError, ListToolsResult,
+        ServerCapabilities, ServerConfig, Tool,
     },
     service::RequestContext,
 };
@@ -64,13 +64,6 @@ fn clean(mut t: Tool) -> Tool {
     if let Value::Object(m) = input {
         t.input_schema = Arc::new(m);
     }
-    if let Some(o) = t.output_schema.take() {
-        let mut out = Value::Object((*o).clone());
-        strip_nonstandard_formats(&mut out);
-        if let Value::Object(m) = out {
-            t.output_schema = Some(Arc::new(m));
-        }
-    }
     t
 }
 
@@ -102,7 +95,7 @@ impl Bridge {
     }
 
     fn error_result(e: &AppError) -> CallToolResponse {
-        CallToolResult::structured_error(e.to_tool_json()).into()
+        tool_result(&e.to_tool_json(), true).into()
     }
 }
 
@@ -159,7 +152,7 @@ impl ServerHandler for Bridge {
                     e.recovery = Some("change_request".into());
                     return Ok(Self::error_result(&e));
                 }
-                Ok(CallToolResult::structured(v).into())
+                Ok(tool_result(&v, false).into())
             }
             Err(ClientError::App(e)) => Ok(Self::error_result(&e)),
             Err(e @ ClientError::Unavailable { .. }) => {

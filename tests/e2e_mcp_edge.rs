@@ -201,6 +201,16 @@ impl Drop for Bridge {
     }
 }
 
+fn tool_json(r: &Value) -> Value {
+    assert!(
+        r["result"].get("structuredContent").is_none(),
+        "one copy only"
+    );
+    let c = r["result"]["content"].as_array().expect("content");
+    assert_eq!(c.len(), 1);
+    serde_json::from_str(c[0]["text"].as_str().expect("text")).unwrap()
+}
+
 const T: Duration = Duration::from_secs(30);
 
 #[test]
@@ -263,7 +273,8 @@ fn daemon_down_is_a_typed_error_and_the_same_bridge_recovers_after_restart() {
     h.kill_daemon();
     let r = call(&mut b, 2);
     assert_eq!(r["result"]["isError"], true);
-    let e = &r["result"]["structuredContent"]["error"];
+    let sc = tool_json(&r);
+    let e = &sc["error"];
     assert_eq!(
         (e["code"].as_str(), e["retryable"].as_bool()),
         (Some("DAEMON_NOT_READY"), Some(true)),
@@ -292,14 +303,14 @@ fn large_read_pages_within_budget_survive_restart_and_cancellation() {
         "search_sessions",
         json!({"query":"long answer","mode":"lexical"}),
     );
-    let session = r["result"]["structuredContent"]["results"][0]["session_id"]
+    let session = tool_json(&r)["results"][0]["session_id"]
         .as_str()
         .expect("session found")
         .to_string();
 
     const MAX: usize = 4096 + 28 * 1024; // 32768
     let mut assembled: Vec<u8> = Vec::new();
-    let mut args = json!({"session_id": session, "max_bytes": MAX});
+    let mut args = json!({"session_id": session, "max_bytes": MAX, "verbose": true});
     let mut pages = 0;
     let mut biggest = 0;
     let mut restarted = false;
@@ -312,7 +323,7 @@ fn large_read_pages_within_budget_survive_restart_and_cancellation() {
             frame_len <= MAX,
             "page frame is {frame_len} bytes, over max_bytes {MAX}"
         );
-        let sc = &r["result"]["structuredContent"];
+        let sc = &tool_json(&r);
         for item in sc["items"].as_array().unwrap() {
             if item["role"] == "assistant" {
                 for blk in item["blocks"].as_array().unwrap() {

@@ -127,15 +127,30 @@ async fn call(
     let mut p = CallToolRequestParams::new(tool);
     p.arguments = args.as_object().cloned();
     let r = c.call_tool(p).await.unwrap();
-    (
-        r.is_error == Some(true),
-        r.structured_content.expect("structured content"),
-    )
+    (r.is_error == Some(true), text_json(&r))
 }
 
-fn validate(tools: &[rmcp::model::Tool], name: &str, v: &Value) {
-    let t = tools.iter().find(|t| t.name == name).unwrap();
-    let schema = Value::Object((**t.output_schema.as_ref().expect("output schema")).clone());
+fn text_json(r: &rmcp::model::CallToolResult) -> Value {
+    assert!(r.structured_content.is_none(), "one copy only");
+    assert_eq!(r.content.len(), 1);
+    serde_json::from_str(&r.content[0].as_text().expect("text content").text).unwrap()
+}
+
+fn schema_of<T: rmcp::schemars::JsonSchema + 'static>() -> Value {
+    serde_json::to_value(
+        rmcp::schemars::generate::SchemaSettings::draft2020_12()
+            .into_generator()
+            .into_root_schema_for::<T>(),
+    )
+    .unwrap()
+}
+
+fn validate(name: &str, v: &Value) {
+    let schema = match name {
+        "search_sessions" => schema_of::<spool::search::SearchOutput>(),
+        "read_session" => schema_of::<spool::transcript::types::ReadSessionOutput>(),
+        _ => schema_of::<spool::control::IndexStatusOutput>(),
+    };
     let validator = jsonschema::validator_for(&schema).unwrap();
     let errs: Vec<String> = validator.iter_errors(v).map(|e| e.to_string()).collect();
     assert!(
@@ -161,8 +176,8 @@ async fn real_daemon_index_search_read_with_three_concurrent_clients() {
     );
     for t in &tools {
         assert!(
-            t.output_schema.is_some() || t.name == "x",
-            "{} has an output schema",
+            t.output_schema.is_none(),
+            "{} declares no output schema",
             t.name
         );
         assert!(
@@ -195,7 +210,7 @@ async fn real_daemon_index_search_read_with_three_concurrent_clients() {
         ("index_status", &c),
     ] {
         assert!(!err, "{name}: {v}");
-        validate(&tools, name, v);
+        validate(name, v);
     }
     assert_eq!(a.1["results"][0]["title"], "Webhook review bot", "{}", a.1);
     assert!(
@@ -214,7 +229,7 @@ async fn real_daemon_index_search_read_with_three_concurrent_clients() {
         .to_string();
     let (err, r) = call(&c2, "read_session", json!({"session_id": session, "selection": {"kind":"match","match_ref": match_ref, "before":0, "after":3}})).await;
     assert!(!err, "{r}");
-    validate(&tools, "read_session", &r);
+    validate("read_session", &r);
     let text: String = r["items"]
         .as_array()
         .unwrap()
@@ -230,7 +245,7 @@ async fn real_daemon_index_search_read_with_three_concurrent_clients() {
 
     let (err, r) = call(&c2, "read_session", json!({"session_id": session, "selection": {"kind":"match","match_ref": match_ref, "before":0, "after":3}, "view":"with_tools"})).await;
     assert!(!err, "{r}");
-    validate(&tools, "read_session", &r);
+    validate("read_session", &r);
     let all = r.to_string();
     assert!(
         all.contains("TOOLSENTINEL_ARGS") && all.contains("TOOLSENTINEL_RESULT"),

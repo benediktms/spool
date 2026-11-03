@@ -972,3 +972,31 @@ async fn source_read_snapshot_is_read_only_without_chunks() {
         1
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn publish_clears_a_path_project_when_cwd_changes_but_keeps_git_projects() {
+    for (kind, expected) in [("path", None), ("git_dir", Some("pj_x"))] {
+        let env = Env::new().await;
+        let (sid, _) = env.add("omp", "v3.jsonl", &fixture("omp/v3.jsonl")).await;
+        sqlx::query("INSERT INTO projects(id, kind, key, name, created_at) VALUES ('pj_x', ?, '/old', 'old', 0)")
+            .bind(kind)
+            .execute(&env.index.writer)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE sessions SET cwd = '/old', project_id = 'pj_x' WHERE id = ?")
+            .bind(&sid)
+            .execute(&env.index.writer)
+            .await
+            .unwrap();
+
+        env.index(&sid).await.unwrap();
+
+        let project: Option<String> =
+            sqlx::query_scalar("SELECT project_id FROM sessions WHERE id = ?")
+                .bind(&sid)
+                .fetch_one(&env.index.writer)
+                .await
+                .unwrap();
+        assert_eq!(project.as_deref(), expected, "{kind}");
+    }
+}

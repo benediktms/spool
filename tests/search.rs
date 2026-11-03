@@ -9,7 +9,7 @@ use spool::embeddings::provider::Purpose;
 use spool::mcp::budget::tool_result_bytes;
 use spool::search::{SearchService, format_rfc3339, parse_rfc3339_utc};
 use spool::transcript::lease::LeaseState;
-use spool::transcript::refs::{BranchRef, MatchRef, short_digest};
+use spool::transcript::refs::{BranchRef, short_digest};
 use std::time::Duration;
 
 fn matches_of<'a>(v: &'a Value, sid: &str) -> &'a Vec<Value> {
@@ -112,7 +112,7 @@ async fn punctuation_distinct_literal_matches() {
     let r = env.ok(lit("foo.bar()")).await;
     let m = &matches_of(&r, "l1")[0];
     assert_eq!(m["matched_by"], json!(["literal"]));
-    let mr = MatchRef::decode(&env.keys.current(), m["match_ref"].as_str().unwrap()).unwrap();
+    let (_, mr) = env.decode_match(m["match_ref"].as_str().unwrap()).await;
     assert_eq!(
         (
             mr.spans[0].r.as_str(),
@@ -179,13 +179,19 @@ async fn invalid_arguments_are_rejected() {
         json!({"query": "x", "mode": "fuzzy"}),
         json!({"query": "x", "session_kinds": ["weird"]}),
         json!({"query": "x", "limit": 0}),
-        json!({"query": "x", "limit": 51}),
-        json!({"query": "x", "matches_per_session": 4}),
+        json!({"query": "x", "matches_per_session": 0}),
+        json!({"query": "x", "queries": ["y"]}),
+        json!({"queries": []}),
+        json!({"queries": ["a", "b", "c", "d", "e"]}),
+        json!({"queries": ["a", " "]}),
         json!({"query": "x", "after": "yesterday"}),
         json!({"query": "x", "after": "2026-10-01T00:00:00+02:00"}),
         json!({"query": "x", "after": "2026-10-02T00:00:00Z", "before": "2026-10-01T00:00:00Z"}),
         json!({"query": "x", "after": "2026-10-01T00:00:00Z", "before": "2026-10-01T00:00:00Z"}),
-        json!({"query": "x", "project_path": "relative/path"}),
+        json!({"query": "x", "project_path": "/w"}),
+        json!({"query": "x", "projects": []}),
+        json!({"query": "x", "projects": [""]}),
+        json!({"query": "x", "projects": (0..17).map(|i| format!("p{i}")).collect::<Vec<_>>()}),
         json!({"query": "x", "sources": "omp"}),
         json!({"mode": "lexical"}),
         json!({"query": "y".repeat(4097), "mode": "lexical"}),
@@ -356,11 +362,8 @@ async fn filters_apply_before_candidate_limits() {
             json!({"session_ids": ["codex_target"]}),
             vec!["codex_target"],
         ),
-        (json!({"project_path": "/w/target"}), vec!["codex_target"]),
-        (
-            json!({"project_path": "/w/target/./"}),
-            vec!["codex_target"],
-        ),
+        (json!({"projects": ["/w/target"]}), vec!["codex_target"]),
+        (json!({"projects": ["/w/target/./"]}), vec!["codex_target"]),
         (
             json!({"sources": ["codex"], "session_kinds": ["subagent"]}),
             vec!["sub"],
@@ -394,7 +397,7 @@ async fn filters_apply_before_candidate_limits() {
         .await;
     assert_eq!(
         ids(&env
-            .ok(json!({"query": "gadget", "mode": "lexical", "project_path": "/w/alpha"}))
+            .ok(json!({"query": "gadget", "mode": "lexical", "projects": ["/w/alpha"]}))
             .await),
         ["alpha"]
     );
@@ -605,17 +608,11 @@ async fn duplicate_spans_are_merged_and_context_not_duplicated() {
         3,
         "adjacent chunks merge, the cap is 3 distinct spans"
     );
-    let mut shapes: Vec<Vec<String>> = ms
-        .iter()
-        .map(|m| {
-            MatchRef::decode(&env.keys.current(), m["match_ref"].as_str().unwrap())
-                .unwrap()
-                .spans
-                .into_iter()
-                .map(|s| s.r)
-                .collect()
-        })
-        .collect();
+    let mut shapes: Vec<Vec<String>> = Vec::new();
+    for m in ms {
+        let (_, mr) = env.decode_match(m["match_ref"].as_str().unwrap()).await;
+        shapes.push(mr.spans.into_iter().map(|s| s.r).collect());
+    }
     shapes.sort();
     assert!(
         shapes.iter().any(|s| s == &["m0", "m1"]),
@@ -838,9 +835,9 @@ async fn inactive_staging_retired_and_excluded_never_leak() {
     let r = env
         .ok(json!({"query": "leaktoken", "mode": "lexical"}))
         .await;
-    assert_eq!(
-        r["coverage"]["indexed_sessions"], 4,
-        "excluded and snapshot-less sessions are not counted"
+    assert!(
+        r["coverage"].is_null() || r["coverage"]["indexed_sessions"] == 4,
+        "excluded and snapshot-less sessions are not counted: {r}"
     );
 }
 
@@ -889,7 +886,7 @@ async fn embedding_profiles_are_separated() {
         .ok(json!({"query": "driving a sedan", "mode": "semantic"}))
         .await;
     assert_eq!(ids(&r), ["s_a"]);
-    assert_eq!(r["coverage"]["embedded_chunks"], 1);
+    assert!(r["coverage"].is_null(), "healthy index omits coverage: {r}");
 }
 
 #[tokio::test]
@@ -990,7 +987,7 @@ async fn output_is_bounded_including_text_copy() {
             assert!(m["excerpt"].as_str().unwrap().len() <= 1200);
             assert_eq!(m["truncated"], true);
             // refs of the kept matches stay valid
-            MatchRef::decode(&env.keys.current(), m["match_ref"].as_str().unwrap()).unwrap();
+            env.decode_match(m["match_ref"].as_str().unwrap()).await;
         }
     }
     // Default budget: 10 sessions x 3 matches of long excerpts still fit 64 KiB.
@@ -1219,28 +1216,22 @@ async fn match_refs_round_trip_with_one_lease() {
     assert_eq!(s1["project_path"], "/w/one");
     assert_eq!(s1["session_kind"], "interactive");
     assert_eq!(s1["source_status"], "present");
-    assert_eq!(r["coverage"]["indexed_sessions"], 2);
-    assert_eq!(r["coverage"]["active_chunks"], 3);
-    assert_eq!(r["coverage"]["pending_sessions"], 0);
-    assert_eq!(
-        r["coverage"]["last_successful_discovery_at"],
-        format_rfc3339(T0 - 1000)
-    );
-    assert!(!r["coverage"]["scope"].as_str().unwrap().is_empty());
+    assert!(r["coverage"].is_null(), "healthy index omits coverage: {r}");
 
-    let key = env.keys.current();
     let mut lease_ids = std::collections::BTreeSet::new();
     let mut manifests = std::collections::BTreeSet::new();
     for s in r["results"].as_array().unwrap() {
         for m in s["matches"].as_array().unwrap() {
-            let mr = MatchRef::decode(&key, m["match_ref"].as_str().unwrap()).unwrap();
-            assert_eq!(mr.anchor.session, s["session_id"]);
+            assert!(m["match_ref"].as_str().unwrap().len() < 150);
+            let (h, mr) = env.decode_match(m["match_ref"].as_str().unwrap()).await;
+            let (session, snapshot) = env.manifest_target(&mr.manifest).await;
+            assert_eq!(session, s["session_id"]);
             assert_eq!(
-                mr.anchor.snapshot,
+                snapshot,
                 format!("sn_{}", s["session_id"].as_str().unwrap())
             );
-            lease_ids.insert(mr.anchor.lease.clone());
-            manifests.insert(mr.anchor.manifest.clone());
+            lease_ids.insert(h.lease.clone());
+            manifests.insert(mr.manifest.clone());
             let expect_len = if s["session_id"] == "s1" {
                 "alpha omega".len()
             } else {
@@ -1261,16 +1252,11 @@ async fn match_refs_round_trip_with_one_lease() {
                 b"omega again"
             };
             assert_eq!(mr.content, frames(&[text]));
-            assert!(
-                env.leases
-                    .covers(&mr.anchor.lease, &mr.anchor.manifest)
-                    .await
-                    .unwrap()
-            );
+            assert!(env.leases.covers(&h.lease, &mr.manifest).await.unwrap());
             let want_exp = T0 + env.leases.ttl_ms();
             assert_eq!(m["match_ref_expires_at"], format_rfc3339(want_exp));
             assert_eq!(
-                env.leases.state(&mr.anchor.lease).await.unwrap(),
+                env.leases.state(&h.lease).await.unwrap(),
                 LeaseState::Live {
                     expires_at_ms: want_exp
                 }
@@ -1288,7 +1274,7 @@ async fn match_refs_round_trip_with_one_lease() {
         .as_str()
         .unwrap()
         .to_string();
-    assert!(MatchRef::decode(&key, &tok).is_ok());
+    assert!(!env.decode_match(&tok).await.1.spans.is_empty());
 }
 
 #[tokio::test]
@@ -1388,7 +1374,7 @@ async fn branch_ref_is_issued_only_when_needed() {
     )
     .unwrap();
     assert_eq!(br.leaf, "m2a");
-    assert_eq!(br.anchor.snapshot, "sn_fork");
+    assert_eq!(env.manifest_target(&br.anchor.manifest).await.1, "sn_fork");
     assert!(matches_of(&r, "s_lin")[0].get("branch_ref").is_none());
     // Before the fork the match belongs to two branches: omitted, the reader answers BRANCH_REQUIRED.
     let r = env
@@ -1438,20 +1424,17 @@ async fn tool_definition_is_honest_about_hosted_modes() {
     assert_eq!(a.read_only_hint, Some(true));
     let input = serde_json::to_value(&*t.input_schema).unwrap();
     assert_eq!(input["additionalProperties"], false);
-    assert!(
-        input["required"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|r| r == "query")
-    );
-    let out = serde_json::to_value(t.output_schema.as_ref().unwrap().as_ref()).unwrap();
+    assert!(input.get("required").is_none());
+    assert!(input["properties"].get("queries").is_some());
+    assert_eq!(input["properties"]["limit"]["maximum"], 50);
+    assert_eq!(input["properties"]["matches_per_session"]["maximum"], 3);
+    assert!(t.output_schema.is_none(), "results are one JSON text copy");
+    let out = output_schema();
     for f in [
         "schema_version",
         "mode_requested",
         "mode_used",
         "index_epoch",
-        "coverage",
         "results",
         "warnings",
         "truncated",
@@ -1463,10 +1446,18 @@ async fn tool_definition_is_honest_about_hosted_modes() {
     }
 }
 
+fn output_schema() -> Value {
+    serde_json::to_value(
+        rmcp::schemars::generate::SchemaSettings::draft2020_12()
+            .into_generator()
+            .into_root_schema_for::<spool::search::SearchOutput>(),
+    )
+    .unwrap()
+}
+
 #[tokio::test]
 async fn real_outputs_validate_against_the_output_schema() {
-    let t = SearchService::tool_definition();
-    let schema = serde_json::to_value(t.output_schema.as_ref().unwrap().as_ref()).unwrap();
+    let schema = output_schema();
     let v = jsonschema::validator_for(&schema).unwrap();
     let env = Env::new().await;
     env.simple(
@@ -1814,5 +1805,267 @@ async fn profile_migration_queries_the_old_profile_until_the_current_corpus_is_c
         fake_old.calls_for(Purpose::Query),
         1,
         "the old provider is no longer asked"
+    );
+}
+
+async fn remote_session(env: &Env, id: &str, cwd: &str, remote: &str) {
+    env.simple(id, "omp", cwd, &[("zebra crossing", Some(T0))])
+        .await;
+    let name = remote.rsplit('/').next().unwrap();
+    env.link_project(id, cwd, "git_remote", remote, name, Some(remote))
+        .await;
+}
+
+#[tokio::test]
+async fn projects_filter_accepts_each_entry_form() {
+    let env = Env::new().await;
+    let repo = tempfile::tempdir().unwrap();
+    let repo_dir = std::fs::canonicalize(repo.path()).unwrap();
+    std::fs::create_dir_all(repo_dir.join(".git/objects")).unwrap();
+    std::fs::create_dir_all(repo_dir.join(".git/refs")).unwrap();
+    std::fs::write(repo_dir.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+    std::fs::write(
+        repo_dir.join(".git/config"),
+        "[remote \"origin\"]\n\turl = git@github.com:acme/live.git\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(repo_dir.join("src")).unwrap();
+    remote_session(&env, "widgets", "/w/widgets", "github.com/acme/widgets").await;
+    remote_session(&env, "live", "/elsewhere/live", "github.com/acme/live").await;
+    remote_session(&env, "other", "/w/other", "github.com/acme/other").await;
+    let q = |p: Value| json!({"query": "zebra", "mode": "lexical", "projects": p});
+    for (entry, want) in [
+        ("Widgets", "widgets"),
+        ("acme/widgets", "widgets"),
+        ("ACME/Widgets.git", "widgets"),
+        ("git@github.com:acme/widgets.git", "widgets"),
+        ("https://user:secret@GitHub.com/acme/widgets.git", "widgets"),
+        ("/w/widgets/src/deep", "widgets"),
+        (repo_dir.join("src").to_str().unwrap(), "live"),
+    ] {
+        let r = env.ok(q(json!([entry]))).await;
+        assert_eq!(ids(&r), [want], "{entry}");
+        assert!(r["warnings"].as_array().unwrap().is_empty(), "{entry}");
+        assert_eq!(
+            r["resolved_projects"][0]["projects"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+    let r = env.ok(q(json!(["widgets"]))).await;
+    assert_eq!(r["results"][0]["project"]["name"], "widgets");
+    assert_eq!(
+        r["results"][0]["project"]["remote"],
+        "github.com/acme/widgets"
+    );
+    assert_eq!(r["results"][0]["project_path"], "/w/widgets");
+    let r = env.ok(json!({"query": "zebra", "mode": "lexical"})).await;
+    assert!(r.get("resolved_projects").is_none());
+}
+
+#[tokio::test]
+async fn projects_filter_unions_and_reports_unmatched_entries() {
+    let env = Env::new().await;
+    remote_session(&env, "a", "/w/a", "github.com/acme/alpha").await;
+    remote_session(&env, "b", "/w/b", "gitlab.com/acme/beta").await;
+    remote_session(&env, "c", "/w/c", "github.com/acme/gamma").await;
+    remote_session(&env, "a2", "/x/a2", "gitlab.com/other/alpha").await;
+    let search = |p: Value| env.ok(json!({"query": "zebra", "mode": "lexical", "projects": p}));
+
+    let r = search(json!(["alpha", "acme/beta"])).await;
+    let mut got = ids(&r);
+    got.sort();
+    assert_eq!(got, ["a", "a2", "b"]);
+    assert_eq!(
+        r["resolved_projects"][0]["projects"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+
+    let r = search(json!([
+        "beta",
+        "nope",
+        "https://tok:secret@github.com/no/such.git"
+    ]))
+    .await;
+    assert_eq!(ids(&r), ["b"]);
+    let w: Vec<&Value> = r["warnings"].as_array().unwrap().iter().collect();
+    assert_eq!(w.len(), 2);
+    assert!(w.iter().all(|w| w["code"] == "project_not_found"));
+    assert!(w[0]["message"].as_str().unwrap().contains("nope"));
+    assert!(
+        w[1]["message"]
+            .as_str()
+            .unwrap()
+            .contains("github.com/no/such")
+    );
+    assert!(!r.to_string().contains("secret"));
+
+    let r = search(json!(["nope", "also/nope", "not a url://"])).await;
+    assert!(ids(&r).is_empty());
+    assert_eq!(r["warnings"].as_array().unwrap().len(), 3);
+    assert_eq!(env.provider.calls(), 0);
+    let r = env
+        .ok(json!({"query": "zebra", "mode": "hybrid", "projects": ["nope"]}))
+        .await;
+    assert!(ids(&r).is_empty());
+    assert_eq!(
+        env.provider.calls(),
+        0,
+        "an unmatched filter never reaches the provider"
+    );
+}
+
+#[tokio::test]
+async fn linked_worktree_sessions_are_found_by_project_name() {
+    let env = Env::new().await;
+    remote_session(&env, "main", "/code/app", "github.com/acme/app").await;
+    remote_session(
+        &env,
+        "tree",
+        "/code/app-worktrees/feat",
+        "github.com/acme/app",
+    )
+    .await;
+    let r = env
+        .ok(json!({"query": "zebra", "mode": "lexical", "projects": ["app"]}))
+        .await;
+    let mut got = ids(&r);
+    got.sort();
+    assert_eq!(got, ["main", "tree"]);
+    assert_eq!(
+        r["resolved_projects"][0]["projects"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+fn has_warning(r: &Value, code: &str) -> bool {
+    r["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|w| w["code"] == code)
+}
+
+#[tokio::test]
+async fn limits_are_clamped_with_a_warning() {
+    let env = Env::new().await;
+    env.simple(
+        "s1",
+        "omp",
+        "/w",
+        &[
+            ("alpha one", Some(T0)),
+            ("alpha two", Some(T0)),
+            ("alpha three", Some(T0)),
+            ("alpha four", Some(T0)),
+        ],
+    )
+    .await;
+    let r = env
+        .ok(json!({"query": "alpha", "mode": "lexical", "limit": 500, "matches_per_session": 9}))
+        .await;
+    assert!(has_warning(&r, "limit_clamped"), "{r}");
+    let n = r["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|w| w["code"] == "limit_clamped")
+        .count();
+    assert_eq!(n, 2, "{r}");
+    let r = env.ok(json!({"query": "alpha", "mode": "lexical"})).await;
+    assert!(!has_warning(&r, "limit_clamped"));
+}
+
+#[tokio::test]
+async fn multiple_queries_fuse_and_dedup_sessions() {
+    let env = Env::new().await;
+    env.simple("s_a", "omp", "/w", &[("zebra crossing notes", Some(T0))])
+        .await;
+    env.simple("s_b", "omp", "/w", &[("giraffe habitat notes", Some(T0))])
+        .await;
+    env.simple(
+        "s_c",
+        "omp",
+        "/w",
+        &[("zebra and giraffe together", Some(T0))],
+    )
+    .await;
+    let r = env
+        .ok(json!({"queries": ["zebra", "giraffe"], "mode": "lexical"}))
+        .await;
+    let got = ids(&r);
+    assert_eq!(got.len(), 3, "{got:?}");
+    assert_eq!(got[0], "s_c", "chunk found by both queries ranks first");
+    let r = env
+        .ok(json!({"queries": ["zebra", "zebra"], "mode": "lexical"}))
+        .await;
+    assert_eq!(ids(&r).len(), 2);
+    let r = env
+        .ok(json!({"queries": ["zebra", "giraffe"], "mode": "literal"}))
+        .await;
+    assert_eq!(ids(&r).len(), 3);
+}
+
+#[tokio::test]
+async fn excerpts_are_centred_and_stripped() {
+    let env = Env::new().await;
+    let text = format!(
+        "<oai-mem-citation>SECRETCITE</oai-mem-citation>{}needle{}",
+        "a ".repeat(1500),
+        "b ".repeat(1500)
+    );
+    let text = text.replace("needle", " needle ");
+    env.simple("s1", "omp", "/w", &[(&text, Some(T0))]).await;
+    let r = env.ok(json!({"query": "needle", "mode": "lexical"})).await;
+    let ex = r["results"][0]["matches"][0]["excerpt"].as_str().unwrap();
+    assert!(
+        ex.contains("needle") && !ex.contains("SECRETCITE") && !ex.contains("oai-mem"),
+        "{ex}"
+    );
+    assert!(ex.len() <= 1200);
+    let r = env.ok(json!({"query": "needle", "mode": "semantic"})).await;
+    let ex = r["results"][0]["matches"][0]["excerpt"].as_str().unwrap();
+    assert!(!ex.contains("SECRETCITE") && ex.len() <= 1200, "{ex}");
+}
+
+#[tokio::test]
+async fn title_falls_back_to_the_first_prompt() {
+    let env = Env::new().await;
+    let long = format!(
+        "<environment_context>noise</environment_context>Fix the parser {}",
+        "x".repeat(300)
+    );
+    env.simple("s1", "omp", "/w", &[(&long, Some(T0))]).await;
+    sqlx::query("UPDATE sessions SET native_title = NULL WHERE id = 's1'")
+        .execute(&env.index.writer)
+        .await
+        .unwrap();
+    let r = env.ok(json!({"query": "parser", "mode": "lexical"})).await;
+    let s = &r["results"][0];
+    assert_eq!(s["title_origin"], "first_prompt");
+    let t = s["title"].as_str().unwrap();
+    assert!(t.starts_with("Fix the parser") && t.len() <= 120, "{t}");
+}
+
+#[tokio::test]
+async fn coverage_is_present_only_when_degraded() {
+    let env = Env::new().await;
+    env.simple("s1", "omp", "/w", &[("alpha", Some(T0))]).await;
+    let r = env.ok(json!({"query": "alpha", "mode": "lexical"})).await;
+    assert!(r.get("coverage").is_none(), "{r}");
+    env.simple_with("s2", &Seed::default(), &[("beta", Some(T0))])
+        .await;
+    let r = env.ok(json!({"query": "beta", "mode": "lexical"})).await;
+    assert!(
+        r["coverage"]["active_chunks"].as_i64().unwrap()
+            > r["coverage"]["embedded_chunks"].as_i64().unwrap()
     );
 }

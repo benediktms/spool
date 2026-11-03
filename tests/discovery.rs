@@ -859,3 +859,502 @@ async fn cancelled_discovery_is_incomplete() {
     assert!(!rep.complete);
     assert_eq!(source_row(&env).await.discovery_watermark, None);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn discovery_assigns_a_path_project_to_a_non_git_cwd() {
+    let env = Env::new().await;
+    env.omp("a.jsonl", "a", &["hello"], T0 - DAY);
+    env.omp("b.jsonl", "b", &["hello"], T0 - DAY);
+    auto(&svc(&env)).await;
+
+    let rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT p.kind, p.key, p.name FROM sessions s JOIN projects p ON p.id = s.project_id",
+    )
+    .fetch_all(&env.index.reader)
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(
+        rows.iter()
+            .all(|r| *r == ("path".into(), "/tmp/project".into(), "project".into()))
+    );
+    assert_eq!(env.count("SELECT count(*) FROM projects").await, 1);
+    assert_eq!(
+        env.count(
+            "SELECT count(*) FROM project_paths WHERE path = '/tmp/project' AND dead_at IS NULL"
+        )
+        .await,
+        1
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_path_held_by_a_git_project_is_not_repointed() {
+    use spool::projects::{ProjectKey, ProjectKind};
+    let env = Env::new().await;
+    env.omp("a.jsonl", "a", &["hello"], T0 - DAY);
+    auto(&svc(&env)).await;
+    let sid = env.session_by_native("a").await.unwrap().id;
+    let key = |kind, key: &str| ProjectKey {
+        kind,
+        key: key.into(),
+        name: "n".into(),
+        remote: None,
+    };
+    let git = key(ProjectKind::GitDir, "/g/.git");
+    let other = key(ProjectKind::GitRemote, "github.com/o/r");
+
+    let mut conn = env.index.writer.acquire().await.unwrap();
+    catalog::assign_project(&mut conn, &sid, "/tmp/project", &git, 1)
+        .await
+        .unwrap();
+    catalog::assign_project(&mut conn, &sid, "/tmp/project", &other, 2)
+        .await
+        .unwrap();
+    drop(conn);
+
+    let held: String =
+        sqlx::query_scalar("SELECT project_id FROM project_paths WHERE path = '/tmp/project'")
+            .fetch_one(&env.index.reader)
+            .await
+            .unwrap();
+    assert_eq!(held, git.id());
+}
+
+mod correlate {
+    use super::*;
+    use spool::jobs::handlers::correlate_projects;
+
+    fn init_repo(dir: &std::path::Path) {
+        let git = dir.join(".git");
+        std::fs::create_dir_all(git.join("objects")).unwrap();
+        std::fs::create_dir_all(git.join("refs")).unwrap();
+        std::fs::write(git.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(git.join("config"), "").unwrap();
+    }
+
+    async fn seed(env: &Env, natives: &[&str]) {
+        for n in natives {
+            env.omp(&format!("{n}.jsonl"), n, &["hello"], T0 - DAY);
+        }
+        auto(&svc(env)).await;
+    }
+
+    async fn set_cwd(env: &Env, native: &str, cwd: &str, project: Option<&str>) {
+        sqlx::query("UPDATE sessions SET cwd = ?1, project_id = ?2 WHERE native_id = ?3")
+            .bind(cwd)
+            .bind(project)
+            .bind(native)
+            .execute(&env.index.writer)
+            .await
+            .unwrap();
+    }
+
+    async fn run(env: &Env, now: i64, limit: usize) -> serde_json::Value {
+        correlate_projects(&env.index, &svc(env), now, limit, &AtomicBool::new(false))
+            .await
+            .unwrap()
+    }
+
+    async fn project_of(env: &Env, native: &str) -> Option<String> {
+        sqlx::query_scalar("SELECT project_id FROM sessions WHERE native_id = ?")
+            .bind(native)
+            .fetch_one(&env.index.reader)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn sessions_without_a_project_get_one_and_a_second_run_changes_nothing() {
+        let env = Env::new().await;
+        seed(&env, &["a", "b"]).await;
+        let dir = env.tmp.path().join("plain");
+        std::fs::create_dir_all(&dir).unwrap();
+        let cwd = dir.to_str().unwrap();
+        sqlx::query("UPDATE sessions SET project_id = NULL, cwd = ?")
+            .bind(cwd)
+            .execute(&env.index.writer)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM project_paths")
+            .execute(&env.index.writer)
+            .await
+            .unwrap();
+
+        let r = run(&env, 10, 500).await;
+        assert_eq!(r["sessions_assigned"], 2);
+        assert_eq!(
+            env.count("SELECT count(*) FROM sessions WHERE project_id IS NULL")
+                .await,
+            0
+        );
+        let r = run(&env, 20, 500).await;
+        assert_eq!(r["sessions_assigned"], 0);
+        assert_eq!(r["sessions_merged"], 0);
+        assert_eq!(r["paths_dead"], 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_path_project_merges_only_after_ingestion_attaches_a_git_project_to_its_cwd() {
+        let env = Env::new().await;
+        seed(&env, &["a", "b"]).await;
+        let dir = env.tmp.path().join("repo");
+        std::fs::create_dir_all(&dir).unwrap();
+        let cwd = dir.to_str().unwrap();
+        set_cwd(&env, "a", cwd, None).await;
+        set_cwd(&env, "b", cwd, None).await;
+        sqlx::query("DELETE FROM project_paths")
+            .execute(&env.index.writer)
+            .await
+            .unwrap();
+        run(&env, 10, 500).await;
+        let old = project_of(&env, "a").await.unwrap();
+        assert_eq!(project_of(&env, "b").await.as_ref(), Some(&old));
+
+        init_repo(&dir);
+        let r = run(&env, 20, 500).await;
+        assert_eq!(r["sessions_merged"], 0, "the job does not re-resolve paths");
+        assert_eq!(project_of(&env, "a").await.as_ref(), Some(&old));
+
+        let key = spool::projects::resolve(cwd, None);
+        let sid = env.session_by_native("b").await.unwrap().id;
+        sqlx::query("UPDATE sessions SET project_id = NULL WHERE native_id = 'b'")
+            .execute(&env.index.writer)
+            .await
+            .unwrap();
+        let mut conn = env.index.writer.acquire().await.unwrap();
+        catalog::assign_project(&mut conn, &sid, cwd, &key, 25)
+            .await
+            .unwrap();
+        drop(conn);
+        assert_eq!(project_of(&env, "b").await, Some(key.id()));
+        assert_eq!(project_of(&env, "a").await.as_ref(), Some(&old));
+
+        let r = run(&env, 30, 500).await;
+        assert_eq!(r["sessions_merged"], 1);
+        assert_eq!(r["path_projects_deleted"], 1);
+        assert_eq!(project_of(&env, "a").await, Some(key.id()));
+        assert_eq!(
+            env.count(&format!("SELECT count(*) FROM projects WHERE id = '{old}'"))
+                .await,
+            0
+        );
+
+        let r = run(&env, 40, 500).await;
+        assert_eq!(r["sessions_merged"], 0);
+        assert_eq!(r["path_projects_deleted"], 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_removed_path_is_marked_dead_once_and_keeps_its_rows() {
+        let env = Env::new().await;
+        seed(&env, &["a"]).await;
+        let dir = env.tmp.path().join("gone");
+        std::fs::create_dir_all(&dir).unwrap();
+        let cwd = dir.to_str().unwrap();
+        set_cwd(&env, "a", cwd, None).await;
+        run(&env, 10, 500).await;
+        let project = project_of(&env, "a").await;
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        let r = run(&env, 20, 500).await;
+        assert_eq!(r["paths_dead"], 1);
+        let dead: Option<i64> =
+            sqlx::query_scalar("SELECT dead_at FROM project_paths WHERE path = ?")
+                .bind(cwd)
+                .fetch_one(&env.index.reader)
+                .await
+                .unwrap();
+        assert_eq!(dead, Some(20));
+        assert_eq!(project_of(&env, "a").await, project);
+
+        let r = run(&env, 30, 500).await;
+        assert_eq!(r["paths_dead"], 0);
+        let dead: Option<i64> =
+            sqlx::query_scalar("SELECT dead_at FROM project_paths WHERE path = ?")
+                .bind(cwd)
+                .fetch_one(&env.index.reader)
+                .await
+                .unwrap();
+        assert_eq!(dead, Some(20));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn git_backed_sessions_are_never_reassigned() {
+        let env = Env::new().await;
+        seed(&env, &["a"]).await;
+        let dir = env.tmp.path().join("repo");
+        std::fs::create_dir_all(&dir).unwrap();
+        init_repo(&dir);
+        let cwd = dir.to_str().unwrap();
+        let held = spool::projects::ProjectKey {
+            kind: spool::projects::ProjectKind::GitRemote,
+            key: "github.com/o/r".into(),
+            name: "r".into(),
+            remote: Some("github.com/o/r".into()),
+        };
+        let sid = env.session_by_native("a").await.unwrap().id;
+        sqlx::query("UPDATE sessions SET cwd = ?, project_id = NULL")
+            .bind(cwd)
+            .execute(&env.index.writer)
+            .await
+            .unwrap();
+        let mut conn = env.index.writer.acquire().await.unwrap();
+        catalog::assign_project(&mut conn, &sid, cwd, &held, 1)
+            .await
+            .unwrap();
+        drop(conn);
+
+        let r = run(&env, 10, 500).await;
+        assert_eq!(r["sessions_merged"], 0);
+        assert_eq!(project_of(&env, "a").await, Some(held.id()));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn one_run_handles_at_most_the_limit_of_paths() {
+        let env = Env::new().await;
+        seed(&env, &["a", "b", "c"]).await;
+        for n in ["a", "b", "c"] {
+            let dir = env.tmp.path().join(n);
+            std::fs::create_dir_all(&dir).unwrap();
+            set_cwd(&env, n, dir.to_str().unwrap(), None).await;
+        }
+        let r = run(&env, 10, 2).await;
+        assert_eq!(r["sessions_assigned"], 2);
+        assert_eq!(
+            env.count("SELECT count(*) FROM sessions WHERE project_id IS NULL")
+                .await,
+            1
+        );
+        run(&env, 20, 2).await;
+        assert_eq!(
+            env.count("SELECT count(*) FROM sessions WHERE project_id IS NULL")
+                .await,
+            0
+        );
+    }
+
+    async fn claude_env() -> (Env, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let env = Env::with(move |c| {
+            c.sources.push(SourceConfig {
+                id: "cl".into(),
+                kind: HarnessKind::Claude,
+                enabled: true,
+                roots: vec![root.to_string_lossy().into_owned()],
+                include_subagents: false,
+            })
+        })
+        .await;
+        (env, tmp)
+    }
+
+    fn write_claude(dir: &tempfile::TempDir, cwd: &str) -> std::path::PathBuf {
+        let path = dir.path().join("proj").join("c1.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                "{{\"type\":\"last-prompt\",\"sessionId\":\"c1\"}}\n\
+{{\"type\":\"mode\",\"sessionId\":\"c1\"}}\n\
+{{\"type\":\"user\",\"uuid\":\"u1\",\"sessionId\":\"c1\",\"cwd\":\"{cwd}\",\"message\":{{\"role\":\"user\",\"content\":\"hello\"}}}}\n"
+            ),
+        )
+        .unwrap();
+        set_mtime(&path, T0 - DAY);
+        path
+    }
+
+    async fn claude_cwd(env: &Env) -> Option<String> {
+        sqlx::query_scalar("SELECT cwd FROM sessions WHERE native_id = 'c1'")
+            .fetch_one(&env.index.reader)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn discovery_probe_takes_a_claude_cwd_from_a_later_line() {
+        let (env, cl) = claude_env().await;
+        let dir = cl.path().join("work");
+        std::fs::create_dir_all(&dir).unwrap();
+        write_claude(&cl, dir.to_str().unwrap());
+        svc(&env).run_auto("cl", flag()).await.unwrap();
+        assert_eq!(claude_cwd(&env).await.as_deref(), dir.to_str());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_indexed_claude_session_without_a_cwd_is_backfilled_and_linked_to_a_project() {
+        let (env, cl) = claude_env().await;
+        let dir = cl.path().join("work");
+        std::fs::create_dir_all(&dir).unwrap();
+        write_claude(&cl, dir.to_str().unwrap());
+        svc(&env).run_auto("cl", flag()).await.unwrap();
+        sqlx::query("UPDATE sessions SET cwd = NULL, project_id = NULL, index_state = 'indexed'")
+            .execute(&env.index.writer)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM project_paths")
+            .execute(&env.index.writer)
+            .await
+            .unwrap();
+
+        let r = run(&env, 10, 500).await;
+        assert_eq!(r["cwds_backfilled"], 1);
+        assert_eq!(claude_cwd(&env).await.as_deref(), dir.to_str());
+        assert_eq!(r["sessions_assigned"], 1);
+        assert_eq!(
+            env.count("SELECT count(*) FROM sessions WHERE project_id IS NULL")
+                .await,
+            0
+        );
+        let r = run(&env, 20, 500).await;
+        assert_eq!(r["cwds_backfilled"], 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_claude_session_whose_file_is_missing_is_skipped() {
+        let (env, cl) = claude_env().await;
+        let path = write_claude(&cl, "/gone/worktree");
+        svc(&env).run_auto("cl", flag()).await.unwrap();
+        sqlx::query("UPDATE sessions SET cwd = NULL, project_id = NULL, index_state = 'indexed'")
+            .execute(&env.index.writer)
+            .await
+            .unwrap();
+        std::fs::remove_file(path).unwrap();
+
+        let r = run(&env, 10, 500).await;
+        assert_eq!(r["cwds_backfilled"], 0);
+        assert_eq!(claude_cwd(&env).await, None);
+    }
+
+    async fn codex_env() -> (Env, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let env = Env::with(move |c| {
+            c.sources.push(SourceConfig {
+                id: "cx".into(),
+                kind: HarnessKind::Codex,
+                enabled: true,
+                roots: vec![root.to_string_lossy().into_owned()],
+                include_subagents: false,
+            })
+        })
+        .await;
+        (env, tmp)
+    }
+
+    fn write_codex(dir: &tempfile::TempDir, repo: Option<&str>) -> std::path::PathBuf {
+        let dir = dir.path();
+        let git = repo
+            .map(|r| format!(",\"git\":{{\"repository_url\":\"{r}\"}}"))
+            .unwrap_or_default();
+        let path = dir.join("rollout-x.jsonl");
+        std::fs::write(
+            &path,
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"cx1\",\"cwd\":\"/gone/worktree\"{git}}}}}\n\
+{{\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"id\":\"u\",\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"hello\"}}]}}}}\n"
+            ),
+        )
+        .unwrap();
+        set_mtime(&path, T0 - DAY);
+        path
+    }
+
+    async fn discover_codex(env: &Env) {
+        svc(env).run_auto("cx", flag()).await.unwrap();
+    }
+
+    async fn codex_project(env: &Env) -> (String, String) {
+        sqlx::query_as(
+            "SELECT p.kind, p.key FROM sessions s JOIN projects p ON p.id = s.project_id WHERE s.native_id = 'cx1'",
+        )
+        .fetch_one(&env.index.reader)
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_stored_remote_places_a_session_with_a_dead_cwd_in_its_repository_project() {
+        let (env, cx) = codex_env().await;
+        write_codex(&cx, Some("git@github.com:Acme/widgets.git"));
+        discover_codex(&env).await;
+        let remote: Option<String> =
+            sqlx::query_scalar("SELECT remote FROM sessions WHERE native_id = 'cx1'")
+                .fetch_one(&env.index.reader)
+                .await
+                .unwrap();
+        assert_eq!(remote.as_deref(), Some("github.com/Acme/widgets"));
+
+        sqlx::query("UPDATE sessions SET project_id = NULL")
+            .execute(&env.index.writer)
+            .await
+            .unwrap();
+        run(&env, 10, 500).await;
+        assert_eq!(
+            codex_project(&env).await,
+            ("git_remote".into(), "github.com/Acme/widgets".into())
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_codex_session_without_a_stored_remote_gets_it_from_its_source_header() {
+        let (env, cx) = codex_env().await;
+        write_codex(&cx, Some("https://github.com/Acme/widgets"));
+        discover_codex(&env).await;
+        sqlx::query("UPDATE sessions SET project_id = NULL, remote = NULL")
+            .execute(&env.index.writer)
+            .await
+            .unwrap();
+
+        let r = run(&env, 10, 500).await;
+        assert_eq!(r["remotes_backfilled"], 1);
+        assert_eq!(
+            codex_project(&env).await,
+            ("git_remote".into(), "github.com/Acme/widgets".into())
+        );
+
+        std::fs::remove_file(cx.path().join("rollout-x.jsonl")).unwrap();
+        sqlx::query("UPDATE sessions SET project_id = NULL, remote = NULL")
+            .execute(&env.index.writer)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM project_paths")
+            .execute(&env.index.writer)
+            .await
+            .unwrap();
+        let r = run(&env, 20, 500).await;
+        assert_eq!(r["remotes_backfilled"], 0);
+        assert_eq!(codex_project(&env).await.0, "path");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_later_parse_without_a_remote_keeps_the_stored_one() {
+        use spool::ingest::engine::IndexRequest;
+        let (env, cx) = codex_env().await;
+        write_codex(&cx, Some("https://github.com/Acme/widgets"));
+        discover_codex(&env).await;
+        let sid = env.session_by_native("cx1").await.unwrap().id;
+
+        write_codex(&cx, None);
+        env.engine
+            .index_session(
+                IndexRequest {
+                    session_id: sid,
+                    observed_source_revision: None,
+                    fingerprint: None,
+                },
+                flag(),
+            )
+            .await
+            .unwrap();
+        let (state, remote): (String, Option<String>) =
+            sqlx::query_as("SELECT index_state, remote FROM sessions WHERE native_id = 'cx1'")
+                .fetch_one(&env.index.reader)
+                .await
+                .unwrap();
+        assert_eq!(state, "indexed");
+        assert_eq!(remote.as_deref(), Some("github.com/Acme/widgets"));
+    }
+}

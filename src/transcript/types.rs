@@ -57,6 +57,10 @@ pub struct ReadSessionInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1, max = 200))]
     pub max_items: Option<u32>,
+    /// Include provenance details, fragment byte ranges and block refs. Default false; a cursor
+    /// continuation keeps the initial read's choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verbose: Option<bool>,
     /// Opaque continuation. When present, only `max_bytes` and `max_items` may accompany it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
@@ -227,6 +231,13 @@ pub struct Locator {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Provenance {
     pub origin: Origin,
+    #[serde(flatten, default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<ProvenanceDetails>,
+}
+
+/// Present only when the read is `verbose`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ProvenanceDetails {
     /// Opaque reference to the source file identity (never a path).
     pub source_ref: String,
     /// Opaque reference to the original record in this snapshot.
@@ -269,16 +280,25 @@ pub enum FidelityOut {
 /// decoded block bytes (not escaped or base64 positions).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Fragment {
-    pub block_ref: String,
+    /// Only when `verbose`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_ref: Option<String>,
     pub kind: BlockClass,
-    pub encoding: Encoding,
+    /// Omitted (meaning `utf8`) unless `verbose` or the block is `base64`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoding: Option<Encoding>,
     pub fidelity: FidelityOut,
     pub data: String,
-    pub start_byte: u64,
-    pub end_byte: u64,
-    pub total_bytes: u64,
+    /// The four range fields are omitted when the fragment is the whole block, unless `verbose`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_byte: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_byte: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_bytes: Option<u64>,
     /// The fragment ends at `total_bytes` (not: the whole block is on this page).
-    pub is_last: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_last: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

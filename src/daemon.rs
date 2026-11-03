@@ -18,7 +18,7 @@ use crate::transcript::handle::KeyStore;
 use crate::transcript::lease::LeaseManager;
 use anyhow::{Context, Result, bail};
 use sqlx::SqlitePool;
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -138,6 +138,15 @@ impl Daemon {
                 paths.signing_key.display()
             )
         })?;
+        for f in [&paths.index_db, &paths.jobs_db] {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .mode(0o600)
+                .open(f)
+                .with_context(|| format!("creating {}", f.display()))?;
+        }
         let busy = Duration::from_millis(cfg.storage.busy_timeout_ms);
         let index = Index::open(&paths.index_db, busy)
             .await

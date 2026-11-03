@@ -324,8 +324,7 @@ async fn profile_change_keeps_old_queries_until_the_published_corpus_is_covered(
         |home: &Path, q: &str| json_cli(home, &["search", q, "--mode", "semantic", "--json"]);
     wait_for("profile A vectors", 40, || {
         let r = search(&env.home, "memoized lookup table");
-        r["coverage"]["embedded_chunks"].as_i64().unwrap_or(0) >= 2
-            && !r["results"].as_array().unwrap().is_empty()
+        r["coverage"].is_null() && !r["results"].as_array().unwrap().is_empty()
     });
     let (id_a, active_a) = embedding_ids(&env.home);
     assert_eq!(id_a, active_a);
@@ -403,9 +402,9 @@ async fn profile_change_keeps_old_queries_until_the_published_corpus_is_covered(
         hit,
         "the appended text is searchable semantically after the switch: {r}"
     );
-    assert_eq!(
-        r["coverage"]["embedded_chunks"], r["coverage"]["active_chunks"],
-        "full coverage at the switch: {r}"
+    assert!(
+        r["coverage"].is_null(),
+        "full coverage at the switch omits coverage: {r}"
     );
     // Each model was only ever asked for its own dimensions, and the new model now answers queries.
     let seen = log.lock();

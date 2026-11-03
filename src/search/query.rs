@@ -169,21 +169,110 @@ fn floor_boundary(s: &str, mut i: usize) -> usize {
     i
 }
 
-/// A window of at most `max` bytes of `body` (char boundaries), starting a little before the first occurrence of
-/// any lowercase ASCII term when one exists. Returns `(excerpt, truncated)`.
-pub fn excerpt(body: &str, terms: &[String], max: usize) -> (String, bool) {
+const INJECTED_TAGS: [&str; 4] = [
+    "oai-mem-citation",
+    "environment_context",
+    "system-reminder",
+    "user_instructions",
+];
+const AGENTS_PREAMBLE: &str = "# AGENTS.md instructions";
+
+fn remove_blocks(text: &str, open: &str, close: &str, is_tag: bool) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find(open) {
+        let after = &rest[i + open.len()..];
+        if is_tag && !after.starts_with(|c: char| c == '>' || c.is_whitespace()) {
+            out.push_str(&rest[..i + open.len()]);
+            rest = after;
+            continue;
+        }
+        out.push_str(&rest[..i]);
+        rest = match after.find(close) {
+            Some(j) => &after[j + close.len()..],
+            None if is_tag => "",
+            None => after.find('\n').map_or("", |n| &after[n..]),
+        };
+    }
+    out.push_str(rest);
+    out
+}
+
+fn strip_raw(text: &str) -> String {
+    let mut cur = text.to_string();
+    for tag in INJECTED_TAGS {
+        let close = format!("</{tag}>");
+        let open = format!("<{tag}");
+        if let Some(i) = cur.find(&close)
+            && !cur[..i].contains(&open)
+        {
+            cur.drain(..i + close.len());
+        }
+        cur = remove_blocks(&cur, &open, &close, true);
+    }
+    remove_blocks(&cur, AGENTS_PREAMBLE, "</INSTRUCTIONS>", false)
+}
+
+/// Remove injected blocks (tag and content) and the AGENTS.md preamble; returns the input when nothing remains.
+pub fn strip_injected(text: &str) -> String {
+    let cur = strip_raw(text);
+    if cur.trim().is_empty() {
+        text.to_string()
+    } else {
+        cur
+    }
+}
+
+/// Title candidate from a user prompt: injected blocks removed, trimmed, at most 120 bytes; `None` when empty.
+pub fn title_from_prompt(text: &str) -> Option<String> {
+    let cleaned = strip_raw(text);
+    let t = cleaned.trim();
+    (!t.is_empty()).then(|| t[..floor_boundary(t, 120)].trim_end().to_string())
+}
+
+/// A window of at most `max` bytes of the cleaned `body` (char boundaries), centred on `focus` (byte range of the
+/// matched span in `body`) when given, else on the first occurrence of a lowercase ASCII term.
+/// Returns `(excerpt, truncated)`.
+pub fn excerpt(
+    body: &str,
+    terms: &[String],
+    focus: Option<(usize, usize)>,
+    max: usize,
+) -> (String, bool) {
+    let focus = focus.map(|(s, e)| {
+        let s = floor_boundary(body, s);
+        let e = floor_boundary(body, e).max(s);
+        let cs = strip_raw(&body[..s]).len();
+        (cs, cs + strip_raw(&body[s..e]).len())
+    });
+    let body = strip_injected(body);
+    let body = body.as_str();
     if body.len() <= max {
-        return (body.to_string(), false);
+        return (body.trim().to_string(), false);
     }
     let lower = body.to_ascii_lowercase(); // ASCII lowering keeps byte offsets
-    let hit = terms
-        .iter()
-        .filter(|t| t.is_ascii())
-        .filter_map(|t| lower.find(t.as_str()))
-        .min();
-    let start = floor_boundary(body, hit.map_or(0, |h| h.saturating_sub(200)));
+    let term_hit = |from: usize, to: usize| {
+        terms
+            .iter()
+            .filter(|t| t.is_ascii())
+            .filter_map(|t| lower.get(from..to).and_then(|w| w.find(t.as_str())))
+            .min()
+            .map(|h| h + from)
+    };
+    let start = match focus {
+        Some((s, e)) if e > s => {
+            let (s, e) = (s.min(body.len()), e.min(body.len()));
+            if e - s >= max {
+                term_hit(s, e).map_or(s, |h| h.saturating_sub(200).max(s))
+            } else {
+                (s + (e - s) / 2).saturating_sub(max / 2)
+            }
+        }
+        _ => term_hit(0, body.len()).map_or(0, |h| h.saturating_sub(200)),
+    };
+    let start = floor_boundary(body, start.min(body.len().saturating_sub(max)));
     let end = floor_boundary(body, start + max);
-    (body[start..end].to_string(), true)
+    (body[start..end].trim().to_string(), true)
 }
 
 #[cfg(test)]
@@ -230,11 +319,32 @@ mod tests {
     #[test]
     fn excerpt_respects_char_boundaries() {
         let body = "é".repeat(1000);
-        let (e, t) = excerpt(&body, &[], 1200);
+        let (e, t) = excerpt(&body, &[], None, 1200);
         assert!(t && e.len() <= 1200 && e.is_char_boundary(e.len()));
         let long = format!("{}needle{}", "a".repeat(5000), "b".repeat(5000));
-        let (e, _) = excerpt(&long, &["needle".into()], 1200);
+        let (e, _) = excerpt(&long, &["needle".into()], None, 1200);
         assert!(e.contains("needle"));
+    }
+
+    #[test]
+    fn excerpt_centres_on_focus_and_strips_injected() {
+        let body = format!(
+            "USER: {}<system-reminder>junk</system-reminder>ASSISTANT: mid{}",
+            "c".repeat(3000),
+            "d".repeat(3000)
+        );
+        let at = body.find("mid").unwrap();
+        let (e, t) = excerpt(&body, &[], Some((at, at + 3)), 1200);
+        assert!(t && e.contains("mid") && !e.contains("junk"), "{e}");
+        let kept =
+            strip_injected("<oai-mem-citation>x</oai-mem-citation>real <user_instructions>y");
+        assert_eq!(kept.trim(), "real");
+        let doc = "# AGENTS.md instructions for /w\n\n<INSTRUCTIONS>\nrules\n</INSTRUCTIONS>\nask";
+        assert_eq!(title_from_prompt(doc).as_deref(), Some("ask"));
+        assert_eq!(
+            title_from_prompt(&"é".repeat(100)).map(|t| t.len()),
+            Some(120)
+        );
     }
 
     #[test]
