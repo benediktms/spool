@@ -566,6 +566,31 @@ async fn raw_records_are_byte_exact_with_line_terminators() {
 }
 
 #[tokio::test]
+async fn codex_injected_blocks_are_excluded_from_conversation_but_raw_is_verbatim() {
+    let env = Env::with(|c| c.mcp.allow_raw_records = true).await;
+    let source = concat!(
+        "{\"type\":\"session_meta\",\"payload\":{\"id\":\"provenance\"}}\r\n",
+        "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"m1\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"injected marker\"},{\"type\":\"input_text\",\"text\":\"retained marker\"}],\"internal_chat_message_metadata_passthrough\":{\"content_item_kinds\":[\"agents_md.instructions\",\"user.goal\"]}}}\r\n"
+    );
+    let (sid, _) = env
+        .add("codex", "provenance.jsonl", source.as_bytes())
+        .await;
+    env.index(&sid).await.unwrap();
+    let conversation = env.ok(json!({"session_id": sid})).await;
+    assert_eq!(items(&conversation).len(), 1);
+    assert_eq!(text_of(&items(&conversation)[0]), "retained marker");
+    assert!(!conversation.to_string().contains("injected marker"));
+    let raw = env
+        .ok(json!({"session_id": sid, "view": "raw_records"}))
+        .await;
+    let bytes: Vec<u8> = items(&raw)
+        .iter()
+        .flat_map(|item| frag_bytes(&item["blocks"][0]))
+        .collect();
+    assert_eq!(bytes, source.as_bytes());
+}
+
+#[tokio::test]
 async fn raw_view_of_a_malformed_record_is_verbatim_never_normalized() {
     let env = Env::with(|c| c.mcp.allow_raw_records = true).await;
     // a complete but invalid record is kept as an unknown record; raw access returns its exact bytes

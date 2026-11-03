@@ -171,20 +171,50 @@ fn reconcile_canonical(cx: &mut ParseCx<'_>, meta: &mut RecordMeta, ty: &str) {
     }
 }
 
-fn text_blocks(cx: &mut ParseCx<'_>, content: Option<Vec<Content>>) -> Vec<TextBlock> {
+fn text_blocks(
+    cx: &mut ParseCx<'_>,
+    content: Option<Vec<Content>>,
+    role: Role,
+    metadata: Option<&Value>,
+) -> (Vec<TextBlock>, bool) {
     let mut blocks = Vec::new();
-    for (i, c) in content.unwrap_or_default().into_iter().enumerate() {
+    let content = content.unwrap_or_default();
+    let kinds = metadata
+        .and_then(|m| m.get("content_item_kinds"))
+        .and_then(Value::as_array)
+        .filter(|kinds| {
+            kinds.len() == content.len()
+                && kinds.iter().all(|kind| kind.is_null() || kind.is_string())
+        });
+    let mut had_text = false;
+    for (i, c) in content.into_iter().enumerate() {
         if !matches!(c.ty.as_deref(), Some("input_text" | "output_text" | "text")) {
             cx.counts.unknown_blocks += 1;
         } else if let Some(text) = c.text {
+            had_text = true;
+            let kind = kinds.and_then(|kinds| kinds[i].as_str());
+            if role == Role::User
+                && matches!(
+                    kind,
+                    Some("agents_md.instructions" | "environments.environment_context")
+                )
+            {
+                continue;
+            }
             blocks.push(TextBlock {
                 index: i as u32,
-                origin: BlockOrigin::Authored,
+                origin: if role == Role::Assistant
+                    || matches!(kind, Some("user.goal" | "user.goal.omitted"))
+                {
+                    BlockOrigin::Authored
+                } else {
+                    BlockOrigin::Unknown
+                },
                 text,
             });
         }
     }
-    blocks
+    (blocks, had_text)
 }
 
 fn retain_message(
@@ -240,6 +270,7 @@ impl ParseState {
             role,
             phase,
             content,
+            turn_metadata,
             call_id,
             name,
             is_error,
@@ -247,7 +278,14 @@ impl ParseState {
         } = p;
 
         match ty.as_deref() {
-            Some("message") => self.response_message(cx, rec, role.as_deref(), phase, content),
+            Some("message") => self.response_message(
+                cx,
+                rec,
+                role.as_deref(),
+                phase,
+                content,
+                turn_metadata.as_ref(),
+            ),
             Some("compaction" | "context_compaction") => rec.meta.kind = RecordKind::Summary,
             Some("function_call") => tool_call(rec, call_id, name),
             Some("function_call_output") => self.tool_result(rec, call_id, is_error),
@@ -272,19 +310,22 @@ impl ParseState {
         role: Option<&str>,
         phase: Option<String>,
         content: Option<Vec<Content>>,
+        metadata: Option<&Value>,
     ) {
         let role = match role {
             Some("user") => Role::User,
             Some("assistant") => Role::Assistant,
             _ => return,
         };
-        let blocks = text_blocks(cx, content);
-        if blocks.is_empty() {
+        let (blocks, had_text) = text_blocks(cx, content, role, metadata);
+        if !had_text {
             return;
         }
 
-        rec.meta.kind = RecordKind::Message;
-        if self.claim_message(&rec.meta) {
+        if !blocks.is_empty() {
+            rec.meta.kind = RecordKind::Message;
+        }
+        if self.claim_message(&rec.meta) && !blocks.is_empty() {
             retain_message(cx, rec, role, phase, blocks);
         }
     }
@@ -385,6 +426,8 @@ fn record_turn(ty: Option<&str>, line_turn: Option<String>, p: &Payload) -> Opti
     line_turn.or_else(|| p.turn_id.clone()).or_else(|| {
         p.turn_metadata
             .as_ref()
-            .and_then(|metadata| metadata.turn_id.clone())
+            .and_then(|metadata| metadata.get("turn_id"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
     })
 }
