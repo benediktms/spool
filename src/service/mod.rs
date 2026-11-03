@@ -5,10 +5,11 @@
 //! label, a temporary definition directory and a recording runner.
 
 use anyhow::{Context, Result, bail};
-use std::io;
+use std::io::{self, Read};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 pub const DEFAULT_LABEL: &str = "com.spool.daemon";
 pub const SYSTEMD_UNIT: &str = "spool-daemon.service";
@@ -49,20 +50,89 @@ pub struct CmdOutput {
 
 pub trait CommandRunner: Send + Sync {
     fn run(&self, program: &str, args: &[String]) -> io::Result<CmdOutput>;
+
+    fn run_with_timeout(
+        &self,
+        program: &str,
+        args: &[String],
+        _timeout: Duration,
+    ) -> io::Result<CmdOutput> {
+        self.run(program, args)
+    }
 }
 
 pub struct SystemRunner;
 
 impl CommandRunner for SystemRunner {
     fn run(&self, program: &str, args: &[String]) -> io::Result<CmdOutput> {
-        let o = std::process::Command::new(program)
+        self.run_with_timeout(program, args, Duration::from_secs(30))
+    }
+
+    fn run_with_timeout(
+        &self,
+        program: &str,
+        args: &[String],
+        timeout: Duration,
+    ) -> io::Result<CmdOutput> {
+        let mut child = std::process::Command::new(program)
             .args(args)
             .stdin(std::process::Stdio::null())
-            .output()?;
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()?;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let pipes: [Box<dyn Read + Send>; 2] = [
+            Box::new(child.stdout.take().unwrap()),
+            Box::new(child.stderr.take().unwrap()),
+        ];
+        for (index, mut pipe) in pipes.into_iter().enumerate() {
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                let mut output = Vec::new();
+                let result = pipe.read_to_end(&mut output).map(|_| output);
+                let _ = tx.send((index, result));
+            });
+        }
+        drop(tx);
+        let deadline = Instant::now() + timeout;
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) => {}
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(error);
+                }
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                child.wait()?;
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("{program} timed out"),
+                ));
+            }
+            std::thread::sleep(
+                Duration::from_millis(10).min(deadline.saturating_duration_since(Instant::now())),
+            );
+        };
+        let mut output = [Vec::new(), Vec::new()];
+        for _ in 0..2 {
+            let (index, bytes) = rx
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!("{program} output timed out"),
+                    )
+                })?;
+            output[index] = bytes?;
+        }
         Ok(CmdOutput {
-            success: o.status.success(),
-            stdout: String::from_utf8_lossy(&o.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&o.stderr).into_owned(),
+            success: status.success(),
+            stdout: String::from_utf8_lossy(&output[0]).into_owned(),
+            stderr: String::from_utf8_lossy(&output[1]).into_owned(),
         })
     }
 }
@@ -291,7 +361,15 @@ impl ServiceManager {
     }
 
     fn ctl_ok(&self, program: &str, args: &[&str]) -> Result<()> {
-        let o = self.ctl(program, args)?;
+        self.ctl_ok_with_timeout(program, args, Duration::from_secs(30))
+    }
+
+    fn ctl_ok_with_timeout(&self, program: &str, args: &[&str], timeout: Duration) -> Result<()> {
+        let owned_args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        let o = self
+            .runner
+            .run_with_timeout(program, &owned_args, timeout)
+            .with_context(|| format!("running {program}"))?;
         if !o.success {
             bail!("`{program} {}` failed: {}", args.join(" "), o.stderr.trim());
         }
@@ -383,6 +461,10 @@ impl ServiceManager {
     /// Write the definition and register it. launchd: `bootstrap` starts the job at load
     /// (`RunAtLoad`); systemd: the unit is enabled for the user session but not started.
     pub fn install(&self) -> Result<String> {
+        self.install_with_budget(Duration::from_secs(30))
+    }
+
+    fn install_with_budget(&self, budget: Duration) -> Result<String> {
         self.refuse_root()?;
         let path = self.definition_path();
         match self.cfg.platform {
@@ -393,14 +475,56 @@ impl ServiceManager {
                         path.display()
                     );
                 }
-                if self.state()?.registered == Some(true) {
+                let replacing = self.state()?.registered == Some(true);
+                if replacing {
                     self.ctl_ok("launchctl", &["bootout", &self.target()])?;
                 }
                 self.write_definition()?;
-                self.ctl_ok(
-                    "launchctl",
-                    &["bootstrap", &self.domain(), &path.to_string_lossy()],
-                )?;
+                let domain = self.domain();
+                let args = vec![
+                    "bootstrap".to_string(),
+                    domain,
+                    path.to_string_lossy().into_owned(),
+                ];
+                let deadline = Instant::now() + budget;
+                let mut previous_failure = None;
+                loop {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    let output = self
+                        .runner
+                        .run_with_timeout("launchctl", &args, remaining)
+                        .with_context(|| match &previous_failure {
+                            Some(stderr) => {
+                                format!("running launchctl after bootstrap failed: {stderr}")
+                            }
+                            None => "running launchctl".to_string(),
+                        })?;
+                    if output.success {
+                        break;
+                    }
+                    if !replacing
+                        || !output.stderr.contains("Bootstrap failed: 5:")
+                        || Instant::now() >= deadline
+                    {
+                        bail!(
+                            "`launchctl {}` failed: {}",
+                            args.join(" "),
+                            output.stderr.trim()
+                        );
+                    }
+                    previous_failure = Some(output.stderr.trim().to_string());
+                    std::thread::sleep(
+                        Duration::from_millis(100)
+                            .min(deadline.saturating_duration_since(Instant::now())),
+                    );
+                    if Instant::now() >= deadline {
+                        bail!(
+                            "`launchctl {}` failed: {}",
+                            args.join(" "),
+                            output.stderr.trim()
+                        );
+                    }
+                }
                 Ok(format!(
                     "installed {} and loaded it into {} (RunAtLoad starts the daemon)",
                     path.display(),
@@ -481,7 +605,11 @@ impl ServiceManager {
         match self.cfg.platform {
             Platform::Launchd => {
                 if self.state()?.registered == Some(true) {
-                    self.ctl_ok("launchctl", &["kickstart", "-k", &self.target()])?;
+                    self.ctl_ok_with_timeout(
+                        "launchctl",
+                        &["kickstart", "-k", &self.target()],
+                        Duration::from_secs(u64::from(THROTTLE_SECS + EXIT_TIMEOUT_SECS) + 30),
+                    )?;
                     Ok(format!("restarted {}", self.cfg.label))
                 } else {
                     self.start()
@@ -539,5 +667,175 @@ impl ServiceManager {
             "removed {}; configuration, index, keys and credentials were left in place",
             path.display()
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct RetryRunner {
+        failures: AtomicUsize,
+        bootout_fails: bool,
+        loaded: bool,
+        bootstraps: AtomicUsize,
+    }
+
+    impl CommandRunner for RetryRunner {
+        fn run(&self, _program: &str, args: &[String]) -> io::Result<CmdOutput> {
+            let mut success = true;
+            let mut stderr = "";
+            match args[0].as_str() {
+                "print" => success = self.loaded,
+                "bootout" if self.bootout_fails => {
+                    success = false;
+                    stderr = "bootout error";
+                }
+                "bootstrap" => {
+                    self.bootstraps.fetch_add(1, Ordering::SeqCst);
+                    if self
+                        .failures
+                        .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                        .is_ok()
+                    {
+                        success = false;
+                        stderr = "Bootstrap failed: 5: Input/output error";
+                    }
+                }
+                _ => {}
+            }
+            Ok(CmdOutput {
+                success,
+                stdout: String::new(),
+                stderr: stderr.into(),
+            })
+        }
+    }
+
+    fn retry_manager(dir: &std::path::Path, runner: Arc<RetryRunner>) -> ServiceManager {
+        ServiceManager::new(
+            ServiceConfig {
+                platform: Platform::Launchd,
+                label: "com.spool.test.retry".into(),
+                binary: "/tmp/spool".into(),
+                definition_dir: dir.join("defs"),
+                log_dir: dir.join("logs"),
+                spool_home: None,
+                home: Some(dir.into()),
+                uid: 501,
+            },
+            runner,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn replacement_retries_transient_bootstrap_and_preserves_failure() {
+        for failures in [2, usize::MAX] {
+            let dir = tempfile::tempdir().unwrap();
+            let runner = Arc::new(RetryRunner {
+                failures: AtomicUsize::new(failures),
+                bootout_fails: false,
+                loaded: true,
+                bootstraps: AtomicUsize::new(0),
+            });
+            let manager = retry_manager(dir.path(), runner.clone());
+            let start = Instant::now();
+            let budget = if failures == 2 {
+                Duration::from_secs(5)
+            } else {
+                Duration::from_millis(250)
+            };
+            let result = manager.install_with_budget(budget);
+            if failures == 2 {
+                assert!(result.is_ok(), "{result:?}");
+            } else {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("Bootstrap failed: 5: Input/output error")
+                );
+                assert!(start.elapsed() < Duration::from_secs(2));
+            }
+            assert!(runner.bootstraps.load(Ordering::SeqCst) > 1);
+        }
+    }
+
+    #[test]
+    fn first_install_and_bootout_failure_do_not_retry_or_write() {
+        for loaded in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let runner = Arc::new(RetryRunner {
+                failures: AtomicUsize::new(5),
+                bootout_fails: true,
+                loaded,
+                bootstraps: AtomicUsize::new(0),
+            });
+            let manager = retry_manager(dir.path(), runner.clone());
+            assert!(
+                manager
+                    .install_with_budget(Duration::from_millis(250))
+                    .is_err()
+            );
+            assert_eq!(
+                runner.bootstraps.load(Ordering::SeqCst),
+                usize::from(!loaded)
+            );
+            if loaded {
+                assert!(!manager.definition_path().exists());
+            }
+        }
+    }
+
+    #[test]
+    fn system_runner_bounds_output_held_by_descendant() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("pid");
+        let start = Instant::now();
+        let result = SystemRunner.run_with_timeout(
+            "sh",
+            &[
+                "-c".into(),
+                "sleep 10 & echo $! > \"$1\"".into(),
+                "sh".into(),
+                pid_file.to_string_lossy().into_owned(),
+            ],
+            Duration::from_millis(200),
+        );
+        let elapsed = start.elapsed();
+        let pid = std::fs::read_to_string(pid_file).unwrap();
+        let cleanup = std::process::Command::new("kill")
+            .arg(pid.trim())
+            .status()
+            .unwrap();
+        assert!(cleanup.success());
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
+        assert!(elapsed < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn system_runner_times_out_and_drains_large_output() {
+        let runner = SystemRunner;
+        let start = Instant::now();
+        let error = runner
+            .run_with_timeout("sleep", &["5".into()], Duration::from_millis(100))
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(start.elapsed() < Duration::from_secs(2));
+        let result = runner
+            .run_with_timeout(
+                "sh",
+                &[
+                    "-c".into(),
+                    "head -c 131072 /dev/zero; head -c 131072 /dev/zero >&2".into(),
+                ],
+                Duration::from_secs(5),
+            )
+            .unwrap();
+        assert!(result.success);
+        assert_eq!(result.stdout.len(), 131072);
+        assert_eq!(result.stderr.len(), 131072);
     }
 }

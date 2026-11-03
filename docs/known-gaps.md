@@ -10,20 +10,19 @@ suite and run actually covered, read `docs/smoke-results.md`, `docs/dependency-b
 | Item | Why | What exists instead |
 |---|---|---|
 | Real Linux systemd user-service lifecycle (spec 17.4) | The host is macOS; no systemd | Unit text is generated and compared in tests; the command sequences are checked with a recording runner. Not run against a real `systemctl --user`. |
-| Live OpenAI provider contract and retrieval evaluation with a real model | Needs a provider key and the user's hosted-processing consent; none was given | Local fake HTTP provider on 127.0.0.1 (tests/e2e_hosted.rs, tests/embeddings), opt-in `tests/live_provider.rs` (ignored unless `SPOOL_LIVE_PROVIDER_KEY` is set) that has never been run. |
+| Direct OpenAI provider contract and judged retrieval evaluation with a real model | The ignored direct OpenAI test and a judged evaluation remain unrun. | A synthetic OpenRouter smoke used the configured real model on 2026-11-03. See `docs/smoke-results.md`. Local fake HTTP provider tests also cover hosted behavior. |
 | Retrieval evaluation on a real corpus; the spec 20.1 goal of 90% Recall@5 | Needs real transcripts and a real embedding model | `docs/retrieval-eval.md`: 50 synthetic queries, fake concept-table embeddings; no claim about the goal. |
 | Search latency during ingestion within 2x idle p95 (spec 20) | Not met: measured 2.22x to 2.63x on a synthetic 300-session, 24,600-chunk corpus (absolute p95 about 60 ms); cause not isolated, no code changed for it | `docs/performance-results.md`: startup on a populated index, ten-minute idle CPU, ingestion time, RSS, WAL and parse cost of excluded tool payloads are measured. |
 | Reference hardware (Apple Silicon, 16 GiB) | Benchmarks ran on an M3 Max, 36 GiB | Hardware is stated with the results. |
 | Per-client cancellation and reconnection with the real Claude Code / Codex / OMP binaries | Those clients do not expose a scripted cancel/reconnect | Both negotiation paths those clients use (initialize 2025-06-18 and 2025-11-25, stateless 2026-07-28) are driven with raw recorded-shape JSON-RPC frames in `tests/e2e_mcp_edge.rs`, including daemon down, daemon restart between calls, cancellation, and stdout cleanliness. Real clients were verified for handshake, `tools/list` and one `tools/call` each. |
-| Real-launchd lifecycle for the production label `com.spool.daemon` | Never installed (the user did not ask for a persistent service) | Isolated label `com.spool.test.*` lifecycle test (opt-in `SPOOL_TEST_LAUNCHD=1`), passed. |
+| Full production launchd lifecycle (spec 19) | The complete install, kill, recovery, stop and uninstall sequence was not verified for the production label. | The installed `com.spool.daemon` was restarted and healthy on 2026-11-03. The isolated label `com.spool.test.*` lifecycle test passed twice on 2026-11-03, after two first-install socket timeouts of unknown cause. See `docs/smoke-results.md`. |
 
 ## Functional limits and deviations
 
-* **Minimum practical `max_bytes`.** The contract permits `max_bytes` from 4,096. `read_session` counts the
-  single JSON-escaped text copy of the result plus signed references (each 350 to 430
-  bytes), so a page that carries even one message usually needs about 8 KiB; below that the reader returns
-  `RESOURCE_LIMIT` with recovery `increase_max_bytes`, as the contract requires for a non-progressing budget.
-  Shrinking the reference encoding would lower the floor.
+* **Read byte budget.** The contract permits `max_bytes` from 4,096. The result includes JSON escaping and
+  signed references. Match references and cursors are tested below 150 bytes (`tests/reader.rs`). A budget
+  that cannot fit the next fragment returns `RESOURCE_LIMIT` with recovery `increase_max_bytes`. The required
+  budget depends on the result; the minimum accepted input does not guarantee every read can progress.
 * **Tool item selection and sibling branches.** Fixed. A tool-call `item_ref` lists linked results along one path
   only; results on several branches return `BRANCH_REQUIRED` unless `branch_ref` picks one (tests/reader.rs).
 * **Codex and Claude `with_tools`** is covered end to end through the daemon and MCP in `tests/e2e_cross_harness.rs`.
