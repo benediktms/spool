@@ -361,7 +361,15 @@ impl ServiceManager {
     }
 
     fn ctl_ok(&self, program: &str, args: &[&str]) -> Result<()> {
-        let o = self.ctl(program, args)?;
+        self.ctl_ok_with_timeout(program, args, Duration::from_secs(30))
+    }
+
+    fn ctl_ok_with_timeout(&self, program: &str, args: &[&str], timeout: Duration) -> Result<()> {
+        let owned_args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        let o = self
+            .runner
+            .run_with_timeout(program, &owned_args, timeout)
+            .with_context(|| format!("running {program}"))?;
         if !o.success {
             bail!("`{program} {}` failed: {}", args.join(" "), o.stderr.trim());
         }
@@ -597,7 +605,11 @@ impl ServiceManager {
         match self.cfg.platform {
             Platform::Launchd => {
                 if self.state()?.registered == Some(true) {
-                    self.ctl_ok("launchctl", &["kickstart", "-k", &self.target()])?;
+                    self.ctl_ok_with_timeout(
+                        "launchctl",
+                        &["kickstart", "-k", &self.target()],
+                        Duration::from_secs(u64::from(THROTTLE_SECS + EXIT_TIMEOUT_SECS) + 30),
+                    )?;
                     Ok(format!("restarted {}", self.cfg.label))
                 } else {
                     self.start()

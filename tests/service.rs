@@ -21,6 +21,7 @@ const BIN: &str = env!("CARGO_BIN_EXE_spool");
 #[derive(Default)]
 struct Recorder {
     calls: Mutex<Vec<String>>,
+    timeouts: Mutex<Vec<(String, Duration)>>,
     loaded: AtomicBool,
 }
 
@@ -31,6 +32,18 @@ impl Recorder {
 }
 
 impl CommandRunner for Recorder {
+    fn run_with_timeout(
+        &self,
+        program: &str,
+        args: &[String],
+        timeout: Duration,
+    ) -> io::Result<CmdOutput> {
+        self.timeouts
+            .lock()
+            .push((format!("{program} {}", args.join(" ")), timeout));
+        self.run(program, args)
+    }
+
     fn run(&self, program: &str, args: &[String]) -> io::Result<CmdOutput> {
         let line = format!("{program} {}", args.join(" "));
         self.calls.lock().push(line);
@@ -276,6 +289,10 @@ fn launchd_install_start_stop_restart_uninstall_sequence() {
 
     rec.calls.lock().clear();
     m.restart().unwrap();
+    assert!(rec.timeouts.lock().iter().any(|(command, timeout)| {
+        command == &format!("launchctl kickstart -k gui/501/{label}")
+            && *timeout > Duration::from_secs(30 + 20)
+    }));
     assert!(
         rec.calls()
             .contains(&format!("launchctl kickstart -k gui/501/{label}")),
