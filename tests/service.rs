@@ -503,6 +503,8 @@ fn launchd_lifecycle_with_an_isolated_label() {
 
     m.install().unwrap();
     wait_for("daemon socket after install", 30, connects);
+    m.install().unwrap();
+    wait_for("daemon socket after reinstall", 30, connects);
     let st = m.state().unwrap();
     assert_eq!(
         (st.definition, st.registered, st.running),

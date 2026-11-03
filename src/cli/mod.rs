@@ -123,7 +123,13 @@ pub async fn execute(cli: Cli, paths: Paths, clock: SharedClock) -> Result<(), C
         }
         Cmd::Status { json } => {
             stderr_logging("warn");
-            let v = remote_for(&paths)?.control("status", json!({})).await?;
+            let remote = remote_for(&paths)?;
+            let v = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                remote.control("status", json!({})),
+            )
+            .await
+            .map_err(|_| CliError::new("daemon status timed out after 5 s"))??;
             if json {
                 print_json(&v);
             } else {

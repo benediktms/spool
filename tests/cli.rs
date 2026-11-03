@@ -1374,3 +1374,24 @@ async fn retryable_daemon_not_ready_is_retried_then_succeeds() {
     assert!(out(&o).contains("ready"));
     assert_eq!(n.load(Ordering::SeqCst), 4);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn status_times_out_when_daemon_does_not_reply() {
+    let (_t, home) = temp_home();
+    std::fs::create_dir_all(home.join("state")).unwrap();
+    let listener = tokio::net::UnixListener::bind(home.join("state/spool.sock")).unwrap();
+    let server = tokio::spawn(async move {
+        let (_stream, _) = listener.accept().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    });
+    let start = std::time::Instant::now();
+    let o = run_async(home, vec!["status".into(), "--json".into()]).await;
+    assert_eq!(o.status.code(), Some(1));
+    assert!(
+        err(&o).contains("status timed out after 5 s"),
+        "{}",
+        err(&o)
+    );
+    assert!(start.elapsed() < std::time::Duration::from_secs(8));
+    server.abort();
+}

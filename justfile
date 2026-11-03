@@ -1,14 +1,20 @@
 # Rebuild this checkout's installed binary and restart its existing user service.
 install:
-    #!/usr/bin/env sh
-    set -eu
-    cargo build --release --locked --bin spool --target-dir target
-    ./target/release/spool service restart
-    for attempt in $(seq 1 30); do
-        if ./target/release/spool status --json >/dev/null 2>&1; then
-            exec ./target/release/spool doctor
-        fi
-        sleep 1
-    done
-    echo "Daemon did not become ready within 30 seconds" >&2
-    exit 1
+    #!/usr/bin/env python3
+    import subprocess
+    import sys
+    import time
+
+    subprocess.run(["cargo", "build", "--release", "--locked", "--bin", "spool", "--target-dir", "target"], check=True)
+    spool = "./target/release/spool"
+    subprocess.run([spool, "service", "restart"], check=True)
+    deadline = time.monotonic() + 30
+    while (remaining := deadline - time.monotonic()) > 0:
+        try:
+            result = subprocess.run([spool, "status", "--json"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=min(5, remaining))
+            if result.returncode == 0:
+                sys.exit(subprocess.call([spool, "doctor"]))
+        except subprocess.TimeoutExpired:
+            pass
+        time.sleep(min(1, max(0, deadline - time.monotonic())))
+    sys.exit("Daemon did not become ready within 30 seconds")
