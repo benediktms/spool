@@ -2,31 +2,56 @@ name: ci
 
 on:
   push:
+    branches: [main]
   pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  test:
-    name: fmt, clippy, tests (offline, deterministic)
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets --all-features --locked -- -D warnings
-      # Unit, conformance, integration, migration, schema-snapshot and offline retrieval tests.
-      # No test needs the network except a loopback fake provider on 127.0.0.1; no hosted call happens.
-      - run: cargo test --locked --all-targets
+
+  test:
+    name: tests (${{ matrix.os }}, ${{ matrix.group }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+        group: [core, reader, mcp-edge, migration-chunking]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: python3 scripts/ci-tests.py '${{ matrix.group }}'
       - name: Schema snapshots are current
+        if: matrix.os == 'macos-latest' && matrix.group == 'core'
         run: |
           UPDATE_SCHEMAS=1 cargo test --locked --test reader_schemas
           git diff --exit-code schemas/
       - name: License inventory is current
+        if: matrix.os == 'macos-latest' && matrix.group == 'core'
         run: |
           ./scripts/license-inventory.sh
           git diff --exit-code docs/licenses.md
@@ -34,21 +59,11 @@ jobs:
   launchd-lifecycle:
     name: isolated launchd lifecycle (opt-in label com.spool.test.*)
     runs-on: macos-latest
-    needs: test
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: SPOOL_TEST_LAUNCHD=1 cargo test --locked --test service
-
-  linux-unit:
-    name: linux build and unit tests (no systemd lifecycle)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo test --locked --all-targets
 
   live-provider-contract:
     name: live provider contract test (manual, one fixed harmless request)
