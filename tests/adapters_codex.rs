@@ -9,6 +9,78 @@ use spool::{
 use std::io::Cursor;
 
 #[test]
+fn codex_content_kinds_are_conservative_and_claim_excluded_messages() {
+    use serde_json::json;
+    let message = |id: &str, metadata: serde_json::Value| {
+        json!({"type":"response_item","payload":{
+            "type":"message","id":id,"role":"user",
+            "content":[{"type":"input_text","text":"injected"},{"type":"input_text","text":"<environment_context> real discussion"},{"type":"input_text","text":"goal"},{"type":"input_text","text":"omitted goal"}],
+            "internal_chat_message_metadata_passthrough":metadata
+        }})
+    };
+    let kinds = json!({"content_item_kinds":["agents_md.instructions","future.kind","user.goal","user.goal.omitted"]});
+    let mut lines = vec![message("mixed", kinds)];
+    for (id, metadata) in [
+        ("missing", json!({})),
+        ("null", json!(null)),
+        (
+            "malformed",
+            json!({"content_item_kinds":["agents_md.instructions", 5, null, null]}),
+        ),
+        (
+            "short",
+            json!({"content_item_kinds":["agents_md.instructions"]}),
+        ),
+        (
+            "long",
+            json!({"content_item_kinds":["agents_md.instructions",null,null,null,null]}),
+        ),
+    ] {
+        lines.push(message(id, metadata));
+    }
+    lines.push(json!({"type":"response_item","payload":{"type":"message","id":"excluded","role":"user","content":[{"type":"input_text","text":"environment injected"}],"internal_chat_message_metadata_passthrough":{"content_item_kinds":["environments.environment_context"]}}}));
+    lines.push(json!({"type":"event_msg","payload":{"type":"UserMessage","id":"excluded","message":"must not reappear"}}));
+    lines.push(json!({"type":"response_item","payload":{"type":"message","id":"excluded","role":"user","content":[{"type":"input_text","text":"must not reappear"}]}}));
+    let bytes = lines
+        .iter()
+        .map(|line| format!("{line}\n"))
+        .collect::<String>();
+    let (_, sink) = parse(&CodexAdapter, bytes.as_bytes());
+    let mixed = &sink.messages[0].blocks;
+    assert_eq!(mixed.iter().map(|b| b.index).collect::<Vec<_>>(), [1, 2, 3]);
+    assert_eq!(
+        mixed.iter().map(|b| b.origin).collect::<Vec<_>>(),
+        [
+            BlockOrigin::Unknown,
+            BlockOrigin::Authored,
+            BlockOrigin::Authored
+        ]
+    );
+    assert!(mixed[0].text.contains("real discussion"));
+    for message in &sink.messages[1..] {
+        assert_eq!(message.blocks.len(), 4);
+        assert!(
+            message
+                .blocks
+                .iter()
+                .all(|b| b.origin == BlockOrigin::Unknown)
+        );
+    }
+    assert_eq!(sink.messages.len(), 6);
+    let record = &sink.records[0];
+    let resolved = CodexAdapter
+        .resolve_locator(
+            &mut Cursor::new(bytes.as_bytes()),
+            &record.locator,
+            &record.digest,
+            1024 * 1024,
+        )
+        .unwrap();
+    assert_eq!(resolved.raw, format!("{}\n", lines[0]).as_bytes());
+    assert!(resolved.blocks.iter().any(|block| block.index == 1));
+}
+
+#[test]
 fn codex_turn_ids_scope_calls_and_outputs_and_locators_round_trip() {
     let bytes = include_bytes!("../fixtures/codex/tool_turns.jsonl");
     let (manifest, sink) = parse(&CodexAdapter, bytes);

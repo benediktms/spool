@@ -21,10 +21,6 @@ pub(crate) struct Line {
     _rest: HashMap<String, IgnoredAny>,
 }
 #[derive(Deserialize, Default)]
-struct TurnMetadata {
-    turn_id: Option<String>,
-}
-#[derive(Deserialize, Default)]
 struct Payload {
     id: Option<String>,
     thread_id: Option<String>,
@@ -46,7 +42,7 @@ struct Payload {
     is_error: Option<bool>,
     turn_id: Option<String>,
     #[serde(rename = "internal_chat_message_metadata_passthrough")]
-    turn_metadata: Option<TurnMetadata>,
+    turn_metadata: Option<Value>,
     history_mode: Option<String>,
     git: Option<CodexGit>,
     #[serde(flatten)]
@@ -66,7 +62,7 @@ struct Content {
 }
 impl JsonlHarness for CodexAdapter {
     const KIND: HarnessKind = HarnessKind::Codex;
-    const PARSER_VERSION: &'static str = "codex-rollout-cab328f2+git-remote";
+    const PARSER_VERSION: &'static str = "codex-rollout-cab328f2+git-remote+content-kinds";
     const MALFORMED_DETAIL: &'static str = "invalid complete JSONL rollout line";
     type Parser = parse::ParseState;
 
