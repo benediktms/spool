@@ -177,40 +177,67 @@ const INJECTED_TAGS: [&str; 4] = [
 ];
 const AGENTS_PREAMBLE: &str = "# AGENTS.md instructions";
 
-fn remove_blocks(text: &str, open: &str, close: &str, is_tag: bool) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(i) = rest.find(open) {
-        let after = &rest[i + open.len()..];
-        if is_tag && !after.starts_with(|c: char| c == '>' || c.is_whitespace()) {
-            out.push_str(&rest[..i + open.len()]);
-            rest = after;
+fn remove_blocks(text: &str, open: &str, close: &str, is_tag: bool) -> Vec<std::ops::Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut pos = 0;
+    while let Some(i) = text[pos..].find(open) {
+        let begin = pos + i;
+        let after = begin + open.len();
+        if is_tag && !text[after..].starts_with(|c: char| c == '>' || c.is_whitespace()) {
+            ranges.push(pos..after);
+            pos = after;
             continue;
         }
-        out.push_str(&rest[..i]);
-        rest = match after.find(close) {
-            Some(j) => &after[j + close.len()..],
-            None if is_tag => "",
-            None => after.find('\n').map_or("", |n| &after[n..]),
+        ranges.push(pos..begin);
+        pos = match text[after..].find(close) {
+            Some(j) => after + j + close.len(),
+            None if is_tag => text.len(),
+            None => text[after..].find('\n').map_or(text.len(), |n| after + n),
         };
     }
-    out.push_str(rest);
+    ranges.push(pos..text.len());
+    ranges
+}
+
+pub(super) fn visible_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
+    let mut cur = text.to_string();
+    let mut offsets: Vec<usize> = (0..text.len()).collect();
+    let mut apply = |open: &str, close: &str, is_tag: bool| {
+        let drop_prefix = if is_tag {
+            cur.find(close)
+                .filter(|&i| !cur[..i].contains(open))
+                .map_or(0, |i| i + close.len())
+        } else {
+            0
+        };
+        let ranges = remove_blocks(&cur[drop_prefix..], open, close, is_tag);
+        let mut next = String::new();
+        let mut mapped = Vec::new();
+        for range in ranges {
+            let range = range.start + drop_prefix..range.end + drop_prefix;
+            next.push_str(&cur[range.clone()]);
+            mapped.extend_from_slice(&offsets[range]);
+        }
+        cur = next;
+        offsets = mapped;
+    };
+    for tag in INJECTED_TAGS {
+        apply(&format!("<{tag}"), &format!("</{tag}>"), true);
+    }
+    apply(AGENTS_PREAMBLE, "</INSTRUCTIONS>", false);
+    let mut out: Vec<std::ops::Range<usize>> = Vec::new();
+    for offset in offsets {
+        if let Some(last) = out.last_mut().filter(|r| r.end == offset) {
+            last.end += 1;
+        } else {
+            out.push(offset..offset + 1);
+        }
+    }
     out
 }
 
 fn strip_raw(text: &str) -> String {
-    let mut cur = text.to_string();
-    for tag in INJECTED_TAGS {
-        let close = format!("</{tag}>");
-        let open = format!("<{tag}");
-        if let Some(i) = cur.find(&close)
-            && !cur[..i].contains(&open)
-        {
-            cur.drain(..i + close.len());
-        }
-        cur = remove_blocks(&cur, &open, &close, true);
-    }
-    remove_blocks(&cur, AGENTS_PREAMBLE, "</INSTRUCTIONS>", false)
+    visible_ranges(text).into_iter().map(|r| &text[r]).collect()
 }
 
 /// Remove injected blocks (tag and content) and the AGENTS.md preamble; returns the input when nothing remains.
@@ -278,6 +305,28 @@ pub fn excerpt(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn visible_ranges_preserve_original_utf8_offsets() {
+        let text = format!(
+            "🦀before<system-reminder>{}</system-reminder>after 1 < 2",
+            "needle ".repeat(40)
+        );
+        let ranges = visible_ranges(&text);
+        let kept: String = ranges.iter().map(|r| &text[r.clone()]).collect();
+        assert_eq!(kept, "🦀beforeafter 1 < 2");
+        assert!(
+            ranges
+                .iter()
+                .all(|r| text.is_char_boundary(r.start) && text.is_char_boundary(r.end))
+        );
+        assert_eq!(&text[ranges[1].clone()], "after 1 < 2");
+        assert_eq!(strip_raw("prefix</system-reminder>visible"), "visible");
+        assert_eq!(
+            strip_raw("a # AGENTS.md instructions secret</INSTRUCTIONS> b"),
+            "a  b"
+        );
+    }
 
     #[test]
     fn fts_is_safe_and_keeps_identifiers() {
