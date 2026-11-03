@@ -829,7 +829,7 @@ async fn curated_retrieval_evaluation() {
                 }
             }
         }
-        report.push_str(&format!("\n{mode}: per-category Recall@5 {:?}", cat));
+        report.push_str(&format!("\n{mode}: per-category Hit@5 {:?}", cat));
         by_mode.push((mode, sc));
     }
 
@@ -862,7 +862,7 @@ async fn curated_retrieval_evaluation() {
         "\n=== retrieval evaluation: 50 queries ({} judged, {} negative) ===",
         by_mode[0].1.n, by_mode[0].1.n_neg
     );
-    println!("| mode | Recall@5 | Recall@10 | MRR | negative queries returning nothing |");
+    println!("| mode | Hit@5 | Hit@10 | MRR | negative queries returning nothing |");
     println!("|---|---|---|---|---|");
     for (m, s) in &by_mode {
         println!(

@@ -15,7 +15,7 @@ evaluate a real embedding model. Specifically:
   concept groups were written by the same author as the queries (`GROUPS` in the test). Semantic and hybrid
   numbers therefore show that the *machinery* (exact scan, fusion, grouping, filters, branch handling) works when
   the vectors are good. They say nothing about how `text-embedding-3-small` ranks real conversations.
-* Not run: a live-provider evaluation (needs a provider key and the user's hosted-processing consent) and any
+* Not run: a judged live-provider evaluation and any
   evaluation on a real transcript corpus. The 90% Recall@5 goal of spec 20.1 is a goal for *curated real
   supported-corpus queries*; it is **not** claimed as met here.
 
@@ -24,7 +24,7 @@ queries, paraphrase disjointness, literal exactness, branch hygiene, lexical sil
 
 ## Results (observed 2026-10-12, 45 judged queries + 5 negatives)
 
-| mode | Recall@5 | Recall@10 | MRR | negative queries returning nothing |
+| mode | Hit@5 | Hit@10 | MRR | negative queries returning nothing |
 |---|---|---|---|---|
 | lexical | 0.822 (37/45) | 0.844 (38/45) | 0.734 | 5/5 |
 | semantic (fake concepts) | 0.933 (42/45) | 1.000 (45/45) | 0.876 | 0/5 (nearest neighbour is returned by design: no similarity cutoff, spec 13.6) |
@@ -33,7 +33,11 @@ queries, paraphrase disjointness, literal exactness, branch hygiene, lexical sil
 Literal mode: exact retrieval on all 10 symbol/error-text queries (10/10), including `Arc<Mutex<HashMap<..>>>`,
 `verify_signature()`, `X-Hub-Signature-256` and a CSS function with commas and parentheses.
 
-Per-category Recall@5 (hits/queries):
+Hit@k is the fraction of judged queries with at least one relevant session in the top k results.
+Recall@k measures the fraction of all relevant sessions retrieved, so these hit rates do not establish
+the spec’s Recall@5 goal when a query has multiple relevant sessions.
+
+Per-category Hit@5 (hits/queries):
 
 | category | lexical | semantic | hybrid |
 |---|---|---|---|
@@ -57,5 +61,4 @@ contain text from the sibling branch.
   made here because the spec asks for tuning decisions to come from real-corpus failures.
 * Semantic-only scores identifiers worse than lexical/literal (8/10 symbol queries), which is why literal mode and
   hybrid fusion exist.
-* Provider/model changes must re-run this evaluation (spec 20.1) before the default profile changes; with a real
-  model this file's numbers must be regenerated and the fake-provider caveat removed.
+* Provider/model changes must re-run this evaluation (spec 20.1) before the default profile changes; a real-model evaluation must report its own results and retain the fake-provider caveat for these numbers.

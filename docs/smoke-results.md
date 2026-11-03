@@ -1,6 +1,6 @@
 # End-to-end smoke results (observed 2026-10-12, macOS arm64)
 
-All runs use the real `spool` binary built from this repository, an isolated `SPOOL_HOME`
+The 2026-10-12 runs below use the real `spool` binary built from this repository, an isolated `SPOOL_HOME`
 under `/tmp`, and **synthetic** session files only (`fixtures/omp/*` and a small hand-written OhMyPi
 session containing a fork, a tool call and a tool result). No hosted provider was involved except the
 local fake on `127.0.0.1`. Nothing was installed persistently and no harness configuration was modified:
@@ -75,3 +75,33 @@ reconnection, with the real Claude Code / Codex / OMP binaries, which expose no 
 - Frozen profile/zone/context source: `CARGO_TARGET_DIR=/tmp/spool-core-target cargo test --locked --no-fail-fast --test embeddings --test search --test e2e_profile_migration --test e2e_hosted --test jobs --test ingest --test control --test cli --test e2e` passed all 9 targets (183 tests); log: `/tmp/spool-release-profile-zone.log`.
 - Native `target/release/spool`, SHA-256 `70415e678d9f53a99daba22b5efd47ddab5041c49c441fc87f72f29d58fa6c89`: isolated CLI/MCP smoke passed 57 assertions covering date-anchored lexical/literal results, `context_outside_time_filter=true` when returned context text comes from an out-of-window message, source-verified tool reads, append/cursor behavior, stale rewrite handling, and daemon restart/reconnect; log: `/tmp/spool-release-cli-smoke-frozen.log`.
 - The same release binary passed the profile-change/append/coverage/switch/query flow against a local fake HTTP embeddings endpoint on loopback. Both profiles used only their configured dimensions; no paid provider or real transcript roots; log: `/tmp/spool-release-migration-smoke.log`.
+
+## Current verification (2026-11-03)
+
+- Release `cd1cf49` / `78bab5f` was installed through `~/bin/spool`, a symlink to the repository release binary.
+  The production `com.spool.daemon` launchd service restarted. Doctor passed all six permission checks, including
+  database, WAL, and SHM mode 0600. Workers were healthy and status was ready.
+- A fresh isolated hosted-disabled CLI smoke passed ingestion, search, read, and restart checks. Its results are
+  in `/tmp/sp-manual-cr8vyxkz/results.json`.
+- A synthetic hosted smoke used the configured OpenRouter endpoint and `openai/text-embedding-3-small` with
+  768 dimensions. Three conversations produced three vector-covered chunks. Semantic paraphrase search returned
+  the cached result first. Hybrid and lexical search, source-verified read, append and new embedding, and restart
+  persistence passed. MCP stdio protocol `2025-11-25` passed tools/list, status, semantic search, and read.
+  Artifacts are in `/tmp/splive-g8efq0fr/`.
+- The initial smoke found a permissions bug. Merged PR #10 fixed it and added regression coverage.
+
+These are functional smoke checks, not a judged retrieval accuracy evaluation, the ignored direct OpenAI test,
+or a Linux service lifecycle test.
+
+The isolated opt-in launchd lifecycle test passed on 2026-11-03 in 33.73 seconds and again in 35.08 seconds. Each run covered two installs,
+stop, start, restart, and uninstall. Two earlier first-install runs timed out after 30 seconds waiting for the
+socket, although launchd reported the service as registered and running. The cause is unknown, so the passing
+runs do not establish consistent first-install reliability. The isolated labels were cleaned up. The production
+service and providers were not touched by this test.
+
+The current development binary (`cargo build --locked --bin spool`) also passed a fresh isolated smoke with
+hosted processing disabled. It covered readiness, all six SQLite file modes under umask 022, doctor,
+indexing with `--wait`, lexical BM25 search, source-verified reads, append, reindexing, restart persistence,
+and graceful shutdown. Results are in `/tmp/sp-dev-4yfmjifk/results.json`.
+Against an isolated socket that accepted but did not answer, the development CLI returned a status timeout
+in 5.02 seconds with exit code 1. Results are in `/tmp/sp-hung-0jh9_ipt/results.json`.
