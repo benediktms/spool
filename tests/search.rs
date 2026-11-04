@@ -2318,7 +2318,7 @@ async fn grouped_excerpt_uses_nonprimary_core_evidence() {
     let env = Env::new().await;
     let (sid, snap) = ("grouped_excerpt", "grouped_excerpt_snap");
     let evidence = format!("{} {}", "filler ".repeat(700), "evidenceneedle ".repeat(5));
-    let successor = "unrelated ".repeat(150);
+    let successor = "and unrelated ".repeat(150);
     env.session(sid, "omp", "/w", "interactive", T0).await;
     env.snapshot(sid, snap, "published").await;
     for (seq, key, text, parent) in [
@@ -2378,7 +2378,7 @@ async fn grouped_excerpt_uses_nonprimary_core_evidence() {
     .await;
     env.activate(sid, snap).await;
     let r = env
-        .ok(json!({"query":"evidenceneedle", "mode":"lexical", "debug_scores":true, "after":format_rfc3339(T0 + 500)}))
+        .ok(json!({"query":"why evidenceneedle and", "mode":"lexical", "matches_per_session":1, "debug_scores":true, "after":format_rfc3339(T0 + 500)}))
         .await;
     let m = &matches_of(&r, sid)[0];
     assert!(
@@ -2485,7 +2485,7 @@ async fn grouped_excerpt_match_reads_original_source() {
         env.keys.clone(),
     );
     let result = search
-        .call(json!({"query":"evidenceneedle", "mode":"lexical", "debug_scores":true}))
+        .call(json!({"query":"evidenceneedle", "mode":"lexical", "matches_per_session":1, "debug_scores":true}))
         .await
         .unwrap();
     let m = &matches_of(&result, &sid)[0];
@@ -2506,4 +2506,115 @@ async fn grouped_excerpt_match_reads_original_source() {
         }
     }
     assert_eq!(String::from_utf8(text).unwrap(), evidence);
+}
+
+#[tokio::test]
+async fn capped_group_prefers_distinct_support_in_adjacent_chunk() {
+    let env = Env::new().await;
+    let (sid, snap) = ("support_selection", "support_selection_snap");
+    let weak = format!("{} {}", "workers and ".repeat(40), "padding ".repeat(180));
+    let strong = "worker lease_refs match_ref continuation cursors explain the answer";
+    let disjoint = "worker lease_refs unrelated disjoint result";
+    env.session(sid, "omp", "/w", "interactive", T0).await;
+    env.snapshot(sid, snap, "published").await;
+    for (seq, key, text, ordinal) in [
+        (0, "weak", weak.as_str(), 0),
+        (1, "strong", strong, 1),
+        (2, "disjoint", disjoint, 5),
+    ] {
+        env.message(
+            snap,
+            Message {
+                key,
+                seq,
+                role: "user",
+                ts: Some(T0),
+                parent: None,
+                text,
+            },
+        )
+        .await;
+        env.chunk(
+            sid,
+            snap,
+            key,
+            search_common::Chunk {
+                body: &format!("USER: {text}"),
+                spans: vec![(key, 0, 0, text.len() as i64, false)],
+                anchor: Some(T0),
+                run: "run",
+                ordinal,
+                embed: false,
+            },
+        )
+        .await;
+    }
+    env.activate(sid, snap).await;
+    let r = env.ok(json!({"query":"Why did worker and lease_refs match_ref continuation cursors?", "mode":"lexical", "matches_per_session":1})).await;
+    let matches = matches_of(&r, sid);
+    assert_eq!(matches.len(), 1);
+    let m = &matches[0];
+    assert!(
+        m["excerpt"]
+            .as_str()
+            .unwrap()
+            .contains("explain the answer"),
+        "{m}"
+    );
+    let (_, reference) = env.decode_match(m["match_ref"].as_str().unwrap()).await;
+    assert!(reference.spans.iter().any(|s| s.r == "strong"));
+    assert!(!reference.spans.iter().any(|s| s.r == "disjoint"));
+}
+
+#[tokio::test]
+async fn excerpt_prefers_informative_units_over_weak_earlier_core() {
+    let env = Env::new().await;
+    let (sid, snap) = ("support_units", "support_units_snap");
+    let weak = format!("workers and {}", "padding ".repeat(180));
+    let strong = "worker lease_refs match_ref continuation cursors explain the answer";
+    env.session(sid, "omp", "/w", "interactive", T0).await;
+    env.snapshot(sid, snap, "published").await;
+    for (seq, key, text) in [(0, "weak", weak.as_str()), (1, "strong", strong)] {
+        env.message(
+            snap,
+            Message {
+                key,
+                seq,
+                role: "user",
+                ts: Some(T0),
+                parent: None,
+                text,
+            },
+        )
+        .await;
+    }
+    env.chunk(
+        sid,
+        snap,
+        "both",
+        search_common::Chunk {
+            body: &format!("USER: {weak}\n\nUSER: {strong}"),
+            spans: vec![
+                ("weak", 0, 0, weak.len() as i64, false),
+                ("strong", 0, 0, strong.len() as i64, false),
+            ],
+            anchor: Some(T0),
+            run: "run",
+            ordinal: 0,
+            embed: false,
+        },
+    )
+    .await;
+    env.activate(sid, snap).await;
+    let r = env.ok(json!({"query":"Why did worker and lease_refs match_ref continuation cursors?", "mode":"lexical"})).await;
+    let m = &matches_of(&r, sid)[0];
+    assert!(
+        m["excerpt"]
+            .as_str()
+            .unwrap()
+            .contains("explain the answer"),
+        "{m}"
+    );
+    let (_, reference) = env.decode_match(m["match_ref"].as_str().unwrap()).await;
+    assert!(reference.spans.iter().any(|s| s.r == "strong"));
 }

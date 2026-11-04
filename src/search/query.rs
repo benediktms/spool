@@ -38,6 +38,80 @@ pub fn fts_query(text: &str) -> Option<(String, Vec<String>)> {
     (!exprs.is_empty()).then(|| (exprs.join(" OR "), terms))
 }
 
+pub(super) fn support_units(text: &str) -> Vec<Vec<String>> {
+    let mut units = Vec::new();
+    for (i, part) in text.split('"').enumerate() {
+        let parts: Vec<&str> = if i % 2 == 1 {
+            vec![part]
+        } else {
+            part.split_whitespace().collect()
+        };
+        for part in parts {
+            let unit = tokens(part);
+            if !unit.is_empty()
+                && !(unit.len() == 1
+                    && matches!(
+                        unit[0].as_str(),
+                        "a" | "an"
+                            | "and"
+                            | "are"
+                            | "as"
+                            | "at"
+                            | "be"
+                            | "by"
+                            | "did"
+                            | "do"
+                            | "for"
+                            | "from"
+                            | "how"
+                            | "in"
+                            | "is"
+                            | "it"
+                            | "of"
+                            | "on"
+                            | "or"
+                            | "the"
+                            | "to"
+                            | "was"
+                            | "what"
+                            | "which"
+                            | "why"
+                            | "with"
+                    ))
+                && !units.contains(&unit)
+            {
+                units.push(unit);
+            }
+        }
+    }
+    units
+}
+
+pub(super) fn support(text: &str, units: &[Vec<String>]) -> Vec<(usize, usize)> {
+    let mut words = Vec::new();
+    let mut start = None;
+    for (offset, c) in text
+        .char_indices()
+        .chain(std::iter::once((text.len(), ' ')))
+    {
+        if is_tok(c) {
+            start.get_or_insert(offset);
+        } else if let Some(begin) = start.take() {
+            words.push((begin, text[begin..offset].to_lowercase()));
+        }
+    }
+    units
+        .iter()
+        .enumerate()
+        .filter_map(|(index, unit)| {
+            words
+                .windows(unit.len())
+                .find(|window| window.iter().map(|(_, word)| word).eq(unit.iter()))
+                .map(|window| (index, window[0].0))
+        })
+        .collect()
+}
+
 fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
     let era = y.div_euclid(400);
@@ -326,6 +400,17 @@ mod tests {
             strip_raw("a # AGENTS.md instructions secret</INSTRUCTIONS> b"),
             "a  b"
         );
+    }
+
+    #[test]
+    fn support_preserves_units_and_unicode() {
+        let units = support_units("How did lease_refs and \"exact phrase\" explain café?");
+        assert_eq!(
+            support("workers lease_other exact aside phrase café", &units).len(),
+            1
+        );
+        assert_eq!(support("lease_refs exact phrase café", &units).len(), 3);
+        assert!(support_units("why and ?!").is_empty());
     }
 
     #[test]

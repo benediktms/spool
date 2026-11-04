@@ -601,12 +601,12 @@ impl SearchService {
         sems: &[Vec<Scored>],
         max_l: usize,
     ) -> Result<Vec<SessionDraft>, AppError> {
-        let terms: Vec<String> = plan
-            .queries
-            .iter()
-            .filter_map(|q| query::fts_query(q))
-            .flat_map(|(_, terms)| terms)
-            .collect();
+        let mut terms = Vec::new();
+        for unit in plan.queries.iter().flat_map(|q| query::support_units(q)) {
+            if !terms.contains(&unit) {
+                terms.push(unit);
+            }
+        }
         let k = f64::from(self.cfg.search.rrf_constant);
         let mut l = self.cfg.search.candidate_limit.clamp(1, max_l);
         let mut lex_window = l;
@@ -710,21 +710,12 @@ impl SearchService {
                 });
                 groups.len() - 1
             });
-            // Session score is its best chunk (first seen, list is sorted); lower chunks only add matches.
-            if groups[gi].matches.len() >= plan.per_session {
-                continue;
-            }
             if !cache.contains_key(&m.rowid) {
                 let batch: Vec<i64> = fused[pos..]
                     .iter()
                     .take(SPAN_LOOKAHEAD)
                     .filter_map(|c| metas.get(&c.rowid))
-                    .filter(|c| {
-                        !cache.contains_key(&c.rowid)
-                            && index
-                                .get(c.session_id.as_str())
-                                .is_none_or(|gi| groups[*gi].matches.len() < plan.per_session)
-                    })
+                    .filter(|c| !cache.contains_key(&c.rowid))
                     .map(|c| c.rowid)
                     .collect();
                 cache.extend(retrieve::load_spans(conn, &batch).await?);
@@ -745,6 +736,7 @@ impl SearchService {
                 .flatten()
                 .collect();
             let g = &mut groups[gi];
+            let has_room = g.matches.len() < plan.per_session;
             let hit = g.matches.iter_mut().find(|gm| {
                 gm.run_key == m.run_key
                     && (gm.ordinals.iter().any(|o| (o - m.ordinal).abs() <= 1)
@@ -761,7 +753,7 @@ impl SearchService {
                     gm.matched_by.extend(by);
                     gm.ctx_outside |= ctx_outside;
                 }
-                None => g.matches.push(GMatch {
+                None if has_room => g.matches.push(GMatch {
                     primary: m.rowid,
                     rowids: vec![m.rowid],
                     run_key: m.run_key.clone(),
@@ -771,6 +763,7 @@ impl SearchService {
                     ctx_outside,
                     debug: Some((f.lex, f.sem, f.score)),
                 }),
+                None => {}
             }
         }
         groups.retain(|g| !g.matches.is_empty());
@@ -781,7 +774,7 @@ impl SearchService {
     async fn finish_match(
         conn: &mut sqlx::SqliteConnection,
         plan: &Plan,
-        terms: &[String],
+        terms: &[Vec<String>],
         g: &Group,
         m: &GMatch,
         (primary, all_spans, bodies): (
@@ -823,6 +816,7 @@ impl SearchService {
                 if !span.is_context && end <= body.len() {
                     let mut first_visible = None;
                     let mut hit = None;
+                    let mut seen = std::collections::HashSet::new();
                     for range in &visible {
                         let start = range.start.max(pos);
                         let stop = range.end.min(end);
@@ -833,25 +827,50 @@ impl SearchService {
                             continue;
                         }
                         first_visible.get_or_insert(start);
-                        let lower = body[start..stop].to_ascii_lowercase();
-                        for term in terms.iter().filter(|t| t.is_ascii() && !t.is_empty()) {
-                            if let Some(at) = lower.find(term) {
-                                hit =
-                                    Some(hit.map_or(start + at, |old: usize| old.min(start + at)));
-                            }
+                        for (index, at) in query::support(&body[start..stop], terms) {
+                            seen.insert(index);
+                            hit = Some(hit.map_or(start + at, |old: usize| old.min(start + at)));
                         }
                     }
-                    candidates.push((*rowid, span, pos, end, first_visible, hit));
+                    let focus = hit.or(first_visible).unwrap_or(pos);
+                    let mut window_start = focus
+                        .saturating_sub(200)
+                        .max(pos)
+                        .min(end.saturating_sub(MAX_MATCH_BYTES).max(pos));
+                    while !body.is_char_boundary(window_start) {
+                        window_start -= 1;
+                    }
+                    let mut window_end = window_start.saturating_add(MAX_MATCH_BYTES).min(end);
+                    while !body.is_char_boundary(window_end) {
+                        window_end -= 1;
+                    }
+                    seen.clear();
+                    for range in &visible {
+                        let start = range.start.max(window_start);
+                        let stop = range.end.min(window_end);
+                        if start >= stop {
+                            continue;
+                        }
+                        seen.extend(
+                            query::support(&body[start..stop], terms)
+                                .into_iter()
+                                .map(|(index, _)| index),
+                        );
+                    }
+                    candidates.push((*rowid, span, pos, end, first_visible, hit, seen.len()));
                 }
                 pos = end.saturating_add(2);
             }
         }
         let chosen = candidates
             .iter()
-            .find(|c| c.5.is_some())
+            .enumerate()
+            .filter(|(_, c)| c.6 > 0)
+            .max_by_key(|(index, c)| (c.6, std::cmp::Reverse(*index)))
+            .map(|(_, c)| c)
             .or_else(|| candidates.iter().find(|c| c.4.is_some()))
             .or_else(|| candidates.first());
-        let Some((rowid, source, body_start, body_end, first_visible, hit)) = chosen.copied()
+        let Some((rowid, source, body_start, body_end, first_visible, hit, _)) = chosen.copied()
         else {
             return Err(AppError::new(
                 "STORAGE_ERROR",
