@@ -1,7 +1,7 @@
-use super::query::normalize_abs_path;
 use super::retrieve::storage_err;
 use super::types::{ProjectRef, ResolvedProjects, Warning};
 use crate::ipc::AppError;
+use crate::projects::normalize_abs_path;
 use crate::projects::{normalize_remote, resolve};
 use sqlx::{Row, SqlitePool};
 use std::collections::BTreeMap;

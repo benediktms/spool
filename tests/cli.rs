@@ -136,6 +136,42 @@ fn civil_dates_honour_the_timezone() {
 }
 
 #[test]
+fn dates_preserve_precision_and_extremes() {
+    assert_eq!(format_rfc3339(-1, UTC), "1969-12-31T23:59:59Z");
+    assert_eq!(
+        format_rfc3339(0, Tz::parse("-05:30").unwrap()),
+        "1969-12-31T18:30:00-05:30"
+    );
+    assert!(parse_when("0000-01-01", NOW, UTC).is_ok());
+    for (since, until) in [("2026-10-10", "2026-10-10"), ("2026-10-11", "2026-10-10")] {
+        assert!(
+            search_request(
+                &search_args(&["q", "--since", since, "--until", until]),
+                NOW,
+                UTC
+            )
+            .is_err()
+        );
+    }
+    let search = search_request(
+        &search_args(&["q", "--since", "7d", "--until", "1d"]),
+        NOW,
+        UTC,
+    )
+    .unwrap();
+    assert_eq!(search["after"], "2026-10-05T12:00:00Z");
+    assert_eq!(search["before"], "2026-10-11T12:00:00Z");
+    let index = index_request(&index_args(&["--since", "7d"]), NOW, UTC, "k").unwrap();
+    assert_eq!(index.since_ms, Some(NOW - 7 * 86_400_000));
+    assert_eq!(index.args["since_ms"], NOW - 7 * 86_400_000);
+    assert!(
+        parse_when("9223372036854775807w", NOW, UTC)
+            .unwrap_err()
+            .contains("out of range")
+    );
+}
+
+#[test]
 fn bad_dates_and_zones_are_rejected() {
     for bad in [
         "",

@@ -7,8 +7,7 @@ mod query;
 mod retrieve;
 mod types;
 
-pub(crate) use query::normalize_abs_path;
-pub use query::{format_rfc3339, parse_rfc3339_utc};
+pub use crate::clock::{format_rfc3339, parse_rfc3339_utc};
 pub use types::*;
 
 use crate::config::Config;
