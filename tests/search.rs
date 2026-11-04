@@ -2312,3 +2312,198 @@ async fn later_primary_evidence_wins_before_span_and_byte_caps() {
         assert_eq!(reference.content, frames(&parts));
     }
 }
+
+#[tokio::test]
+async fn grouped_excerpt_uses_nonprimary_core_evidence() {
+    let env = Env::new().await;
+    let (sid, snap) = ("grouped_excerpt", "grouped_excerpt_snap");
+    let evidence = format!("{} {}", "filler ".repeat(700), "evidenceneedle ".repeat(5));
+    let successor = "unrelated ".repeat(150);
+    env.session(sid, "omp", "/w", "interactive", T0).await;
+    env.snapshot(sid, snap, "published").await;
+    for (seq, key, text, parent) in [
+        (0, "evidence", evidence.as_str(), None),
+        (1, "successor", successor.as_str(), Some("evidence")),
+    ] {
+        env.message(
+            snap,
+            Message {
+                key,
+                seq,
+                role: "user",
+                ts: Some(T0),
+                parent,
+                text,
+            },
+        )
+        .await;
+    }
+    let context_start = evidence.find("evidenceneedle").unwrap();
+    env.chunk(
+        sid,
+        snap,
+        "predecessor",
+        search_common::Chunk {
+            body: &format!("USER: {evidence}"),
+            spans: vec![("evidence", 0, 0, evidence.len() as i64, false)],
+            anchor: Some(T0 + 1000),
+            run: "run",
+            ordinal: 0,
+            embed: false,
+        },
+    )
+    .await;
+    env.chunk(
+        sid,
+        snap,
+        "successor",
+        search_common::Chunk {
+            body: &format!("USER: {}\n\nUSER: {successor}", &evidence[context_start..]),
+            spans: vec![
+                (
+                    "evidence",
+                    0,
+                    context_start as i64,
+                    evidence.len() as i64,
+                    true,
+                ),
+                ("successor", 0, 0, successor.len() as i64, false),
+            ],
+            anchor: Some(T0 + 2000),
+            run: "run",
+            ordinal: 1,
+            embed: false,
+        },
+    )
+    .await;
+    env.activate(sid, snap).await;
+    let r = env
+        .ok(json!({"query":"evidenceneedle", "mode":"lexical", "debug_scores":true, "after":format_rfc3339(T0 + 500)}))
+        .await;
+    let m = &matches_of(&r, sid)[0];
+    assert!(
+        m["excerpt"].as_str().unwrap().contains("evidenceneedle"),
+        "{m}"
+    );
+    assert_eq!(m["matched_at"], format_rfc3339(T0 + 2000));
+    assert_eq!(m["context_outside_time_filter"], true);
+    assert_eq!(m["debug"]["lexical_rank"], 1);
+    let (_, reference) = env.decode_match(m["match_ref"].as_str().unwrap()).await;
+    assert!(reference.spans.len() <= 8);
+    assert!(reference.spans.iter().map(|s| s.e - s.s).sum::<u32>() <= 1200);
+    assert!(
+        reference.spans.iter().any(|s| s.r == "evidence"
+            && evidence[s.s as usize..s.e as usize].contains("evidenceneedle"))
+    );
+    let parts: Vec<&[u8]> = reference
+        .spans
+        .iter()
+        .map(|s| {
+            let text = if s.r == "evidence" {
+                &evidence
+            } else {
+                &successor
+            };
+            &text.as_bytes()[s.s as usize..s.e as usize]
+        })
+        .collect();
+    assert_eq!(reference.content, frames(&parts));
+}
+
+#[path = "reader_common/mod.rs"]
+mod reader_common;
+
+#[tokio::test]
+async fn grouped_excerpt_match_reads_original_source() {
+    let env = reader_common::Env::new().await;
+    let evidence = format!("{} {}", "filler ".repeat(700), "evidenceneedle ".repeat(5));
+    let successor = "unrelated ".repeat(150);
+    let (sid, _) = env
+        .indexed(
+            "grouped.jsonl",
+            &[
+                reader_common::omp_header(),
+                reader_common::omp_msg("m0", None, "user", &evidence),
+                reader_common::omp_msg("m1", Some("m0"), "user", &successor),
+            ],
+        )
+        .await;
+    let snap: String = sqlx::query_scalar("SELECT active_snapshot_id FROM sessions WHERE id = ?")
+        .bind(&sid)
+        .fetch_one(&env.index.writer)
+        .await
+        .unwrap();
+    let keys: Vec<String> =
+        sqlx::query_scalar("SELECT record_key FROM messages WHERE snapshot_id = ? ORDER BY seq")
+            .bind(&snap)
+            .fetch_all(&env.index.writer)
+            .await
+            .unwrap();
+    assert_eq!(keys.len(), 2);
+    sqlx::query("DELETE FROM chunks WHERE snapshot_id = ?")
+        .bind(&snap)
+        .execute(&env.index.writer)
+        .await
+        .unwrap();
+    let context_start = evidence.find("evidenceneedle").unwrap();
+    for (ordinal, body) in [
+        (0, format!("USER: {evidence}")),
+        (
+            1,
+            format!("USER: {}\n\nUSER: {successor}", &evidence[context_start..]),
+        ),
+    ] {
+        let rowid = sqlx::query("INSERT INTO chunks(logical_id, snapshot_id, session_id, run_key, ordinal, body, input_hash, time_anchor, rendered_tokens, is_tail) VALUES (?,?,?,'run',?,?,?,?,10,0)")
+            .bind(format!("test{ordinal}")).bind(&snap).bind(&sid).bind(ordinal).bind(&body)
+            .bind(spool::domain::digest(body.as_bytes()).to_vec()).bind(reader_common::T0)
+            .execute(&env.index.writer).await.unwrap().last_insert_rowid();
+        let spans = if ordinal == 0 {
+            vec![(0, &keys[0], 0, evidence.len(), false)]
+        } else {
+            vec![
+                (0, &keys[0], context_start, evidence.len(), true),
+                (1, &keys[1], 0, successor.len(), false),
+            ]
+        };
+        for (seq, key, start, end, context) in spans {
+            sqlx::query("INSERT INTO chunk_spans(chunk_rowid, seq, record_key, block_index, start_byte, end_byte, is_context) VALUES (?,?,?,0,?,?,?)")
+                .bind(rowid).bind(seq).bind(key).bind(start as i64).bind(end as i64).bind(i64::from(context))
+                .execute(&env.index.writer).await.unwrap();
+        }
+    }
+    let ranked: Vec<String> = sqlx::query_scalar("SELECT c.logical_id FROM chunks_fts JOIN chunks c ON c.rowid = chunks_fts.rowid WHERE chunks_fts MATCH ? ORDER BY bm25(chunks_fts)")
+        .bind("evidenceneedle")
+        .fetch_all(&env.index.writer)
+        .await
+        .unwrap();
+    assert_eq!(ranked, ["test1", "test0"]);
+    let search = SearchService::new(
+        env.index.clone(),
+        env.cfg.clone(),
+        env.emb.clone(),
+        env.leases.clone(),
+        env.keys.clone(),
+    );
+    let result = search
+        .call(json!({"query":"evidenceneedle", "mode":"lexical", "debug_scores":true}))
+        .await
+        .unwrap();
+    let m = &matches_of(&result, &sid)[0];
+    assert!(
+        m["excerpt"].as_str().unwrap().contains("evidenceneedle"),
+        "{m}"
+    );
+    let pages = env.pages(json!({"session_id":sid, "source_policy":"require_source", "max_bytes":4096, "max_items":1,
+        "selection":{"kind":"match", "match_ref":m["match_ref"], "before":0, "after":0}}), 4096).await;
+    assert!(pages.len() > 1);
+    let mut text = Vec::new();
+    for page in &pages {
+        for item in page["items"].as_array().unwrap() {
+            assert_eq!(item["provenance"]["origin"], "verified_source");
+            for block in item["blocks"].as_array().unwrap() {
+                text.extend(reader_common::frag_bytes(block));
+            }
+        }
+    }
+    assert_eq!(String::from_utf8(text).unwrap(), evidence);
+}

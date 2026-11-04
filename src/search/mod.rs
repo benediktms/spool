@@ -108,6 +108,7 @@ struct Fused {
 
 struct GMatch {
     primary: i64,
+    rowids: Vec<i64>,
     run_key: String,
     ordinals: Vec<i64>,
     /// (chunk ordinal, span seq, span) of every non-context span of the merged chunks.
@@ -649,6 +650,12 @@ impl SearchService {
             }
             l = (l * 2).min(max_l);
         };
+        let rowids: Vec<i64> = groups
+            .iter()
+            .take(plan.limit)
+            .flat_map(|g| g.matches.iter().flat_map(|m| m.rowids.iter().copied()))
+            .collect();
+        let bodies = retrieve::chunk_bodies(conn, &rowids).await?;
         let mut out = Vec::new();
         let mut leaf_counts: HashMap<String, usize> = HashMap::new();
         for g in groups.into_iter().take(plan.limit) {
@@ -664,7 +671,7 @@ impl SearchService {
                         &terms,
                         &g,
                         m,
-                        (&metas[&m.primary], &spans[&m.primary]),
+                        (&metas[&m.primary], &spans, &bodies),
                         &mut leaf_counts,
                     )
                     .await?,
@@ -749,12 +756,14 @@ impl SearchService {
             match hit {
                 Some(gm) => {
                     gm.ordinals.push(m.ordinal);
+                    gm.rowids.push(m.rowid);
                     gm.spans.extend(spans_add);
                     gm.matched_by.extend(by);
                     gm.ctx_outside |= ctx_outside;
                 }
                 None => g.matches.push(GMatch {
                     primary: m.rowid,
+                    rowids: vec![m.rowid],
                     run_key: m.run_key.clone(),
                     ordinals: vec![m.ordinal],
                     spans: spans_add.collect(),
@@ -775,7 +784,11 @@ impl SearchService {
         terms: &[String],
         g: &Group,
         m: &GMatch,
-        (primary, primary_spans): (&ChunkMeta, &[SpanRow]),
+        (primary, all_spans, bodies): (
+            &ChunkMeta,
+            &HashMap<i64, Vec<SpanRow>>,
+            &HashMap<i64, String>,
+        ),
         leaf_counts: &mut HashMap<String, usize>,
     ) -> Result<MatchDraft, AppError> {
         let mut spans = m.spans.clone();
@@ -795,52 +808,58 @@ impl SearchService {
                 _ => merged.push(s),
             }
         }
-        let body = retrieve::chunk_body(conn, primary.rowid).await?;
-        let visible = query::visible_ranges(&body);
-        let mut pos = 0usize;
         let mut candidates = Vec::new();
-        for span in primary_spans {
-            let rest = body.get(pos..).unwrap_or("");
-            pos += ["USER: ", "ASSISTANT: "]
-                .iter()
-                .find(|l| rest.starts_with(**l))
-                .map_or(0, |l| l.len());
-            let end = pos.saturating_add((span.end - span.start).max(0) as usize);
-            if !span.is_context && end <= body.len() {
-                let mut first_visible = None;
-                let mut hit = None;
-                for range in &visible {
-                    let start = range.start.max(pos);
-                    let stop = range.end.min(end);
-                    if start >= stop
-                        || !body.is_char_boundary(start)
-                        || !body.is_char_boundary(stop)
-                    {
-                        continue;
-                    }
-                    first_visible.get_or_insert(start);
-                    let lower = body[start..stop].to_ascii_lowercase();
-                    for term in terms.iter().filter(|t| t.is_ascii() && !t.is_empty()) {
-                        if let Some(at) = lower.find(term) {
-                            hit = Some(hit.map_or(start + at, |old: usize| old.min(start + at)));
+        for rowid in &m.rowids {
+            let body = &bodies[rowid];
+            let visible = query::visible_ranges(body);
+            let mut pos = 0usize;
+            for span in &all_spans[rowid] {
+                let rest = body.get(pos..).unwrap_or("");
+                pos += ["USER: ", "ASSISTANT: "]
+                    .iter()
+                    .find(|l| rest.starts_with(**l))
+                    .map_or(0, |l| l.len());
+                let end = pos.saturating_add((span.end - span.start).max(0) as usize);
+                if !span.is_context && end <= body.len() {
+                    let mut first_visible = None;
+                    let mut hit = None;
+                    for range in &visible {
+                        let start = range.start.max(pos);
+                        let stop = range.end.min(end);
+                        if start >= stop
+                            || !body.is_char_boundary(start)
+                            || !body.is_char_boundary(stop)
+                        {
+                            continue;
+                        }
+                        first_visible.get_or_insert(start);
+                        let lower = body[start..stop].to_ascii_lowercase();
+                        for term in terms.iter().filter(|t| t.is_ascii() && !t.is_empty()) {
+                            if let Some(at) = lower.find(term) {
+                                hit =
+                                    Some(hit.map_or(start + at, |old: usize| old.min(start + at)));
+                            }
                         }
                     }
+                    candidates.push((*rowid, span, pos, end, first_visible, hit));
                 }
-                candidates.push((span, pos, end, first_visible, hit));
+                pos = end.saturating_add(2);
             }
-            pos = end.saturating_add(2);
         }
         let chosen = candidates
             .iter()
-            .find(|c| c.4.is_some())
-            .or_else(|| candidates.iter().find(|c| c.3.is_some()))
+            .find(|c| c.5.is_some())
+            .or_else(|| candidates.iter().find(|c| c.4.is_some()))
             .or_else(|| candidates.first());
-        let Some((source, body_start, body_end, first_visible, hit)) = chosen.copied() else {
+        let Some((rowid, source, body_start, body_end, first_visible, hit)) = chosen.copied()
+        else {
             return Err(AppError::new(
                 "STORAGE_ERROR",
                 "the local index could not be read",
             ));
         };
+        let body = &bodies[&rowid];
+        let visible = query::visible_ranges(body);
         let focus = hit.or(first_visible).unwrap_or(body_start);
         let mut start = focus
             .saturating_sub(200)
