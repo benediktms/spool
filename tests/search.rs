@@ -582,7 +582,11 @@ async fn duplicate_spans_are_merged_and_context_not_duplicated() {
             spans.push((x.as_str(), 0, 0, len(ctx.unwrap()), true));
         }
         spans.push((ck.as_str(), 0, 0, len(core), false));
-        let body = format!("USER: frobnicate item {core}");
+        let body = if let Some(context) = ctx {
+            format!("USER: frobnicate item {context}\n\nUSER: frobnicate item {core}")
+        } else {
+            format!("USER: frobnicate item {core}")
+        };
         env.chunk(
             sid,
             snap,
@@ -1608,8 +1612,8 @@ async fn literal_uses_the_chunk_anchor_like_lexical() {
         );
         assert_eq!(
             matches_of(&r, "lit_a")[0]["context_outside_time_filter"],
-            mode == "literal",
-            "{mode}: label the time of the text actually excerpted"
+            true,
+            "{mode}: label the time of any text actually excerpted"
         );
         assert!(
             ids(&q(query, mode, &outside).await).is_empty(),
@@ -2617,4 +2621,647 @@ async fn excerpt_prefers_informative_units_over_weak_earlier_core() {
     );
     let (_, reference) = env.decode_match(m["match_ref"].as_str().unwrap()).await;
     assert!(reference.spans.iter().any(|s| s.r == "strong"));
+}
+
+#[tokio::test]
+async fn complementary_windows_retain_status_and_cause() {
+    let env = Env::new().await;
+    let (sid, snap) = ("complementary", "complementary_snap");
+    let filler = "old unrelated material ".repeat(35);
+    let status = format!(
+        "WORKER_ALREADY_EXISTS appeared in Spool. {}",
+        "status ".repeat(77)
+    );
+    let cause = format!(
+        "After restarting Spool, fixed registrations wait for the 30 second heartbeat lease expiry and retry automatically. {}",
+        "cause ".repeat(122)
+    );
+    env.session(sid, "omp", "/w", "interactive", T0).await;
+    env.snapshot(sid, snap, "published").await;
+    for (seq, key, text) in [
+        (0, "filler", &filler),
+        (1, "status", &status),
+        (2, "cause", &cause),
+    ] {
+        env.message(
+            snap,
+            Message {
+                key,
+                seq,
+                role: "user",
+                ts: Some(T0),
+                parent: None,
+                text,
+            },
+        )
+        .await;
+    }
+    let body = format!("USER: {filler}\n\nUSER: {status}\n\nUSER: {cause}");
+    env.chunk(
+        sid,
+        snap,
+        "both",
+        search_common::Chunk {
+            body: &body,
+            spans: vec![
+                ("filler", 0, 0, filler.len() as i64, false),
+                ("status", 0, 0, status.len() as i64, false),
+                ("cause", 0, 0, cause.len() as i64, false),
+            ],
+            anchor: Some(T0),
+            run: "run",
+            ordinal: 0,
+            embed: false,
+        },
+    )
+    .await;
+    env.activate(sid, snap).await;
+    let r = env.ok(json!({"query":"Why did WORKER_ALREADY_EXISTS appear after restarting Spool?", "mode":"lexical"})).await;
+    let m = &matches_of(&r, sid)[0];
+    let excerpt = m["excerpt"].as_str().unwrap();
+    assert!(
+        excerpt.contains("WORKER_ALREADY_EXISTS") && excerpt.contains("heartbeat lease expiry"),
+        "{excerpt}"
+    );
+    assert!(excerpt.len() <= 1200);
+    let (_, reference) = env.decode_match(m["match_ref"].as_str().unwrap()).await;
+    assert!(reference.spans.iter().any(|s| s.r == "status"));
+    assert!(reference.spans.iter().any(|s| s.r == "cause"));
+    let parts: Vec<&[u8]> = reference
+        .spans
+        .iter()
+        .map(|s| {
+            let text = match s.r.as_str() {
+                "filler" => &filler,
+                "status" => &status,
+                "cause" => &cause,
+                _ => panic!("unexpected span"),
+            };
+            &text.as_bytes()[s.s as usize..s.e as usize]
+        })
+        .collect();
+    assert_eq!(reference.content, frames(&parts));
+    assert_eq!(
+        excerpt,
+        parts
+            .iter()
+            .map(|p| std::str::from_utf8(p).unwrap().trim())
+            .collect::<Vec<_>>()
+            .join("\n…\n")
+    );
+    assert!(parts.iter().map(|p| p.len()).sum::<usize>() <= 1200);
+}
+
+#[tokio::test]
+async fn semantic_primary_retains_late_handle_design() {
+    let env = Env::new().await;
+    let (sid, snap) = ("late_design", "late_design_snap");
+    let query =
+        "What design reduced the large opaque handles returned by the conversation search API?";
+    let primary = format!(
+        "search {} Short handles use a signed lease_id plus index instead of embedded span lists.",
+        "padding ".repeat(240)
+    );
+    let adjacent = "search API repository filter unrelated proposal";
+    env.session(sid, "omp", "/w", "interactive", T0).await;
+    env.snapshot(sid, snap, "published").await;
+    for (seq, key, text) in [(0, "design", primary.as_str()), (1, "repo", adjacent)] {
+        env.message(
+            snap,
+            Message {
+                key,
+                seq,
+                role: "user",
+                ts: Some(T0),
+                parent: None,
+                text,
+            },
+        )
+        .await;
+        let body = format!("USER: {text}");
+        env.chunk(
+            sid,
+            snap,
+            key,
+            search_common::Chunk {
+                body: &body,
+                spans: vec![(key, 0, 0, text.len() as i64, false)],
+                anchor: Some(T0),
+                run: "run",
+                ordinal: seq,
+                embed: false,
+            },
+        )
+        .await;
+        env.embed_vec(
+            &env.profile_id,
+            &env.provider.vector_for(query),
+            &spool::domain::digest(body.as_bytes()),
+        )
+        .await;
+    }
+    env.activate(sid, snap).await;
+    let r = env
+        .ok(json!({"query":query, "mode":"semantic", "matches_per_session":1}))
+        .await;
+    let m = &matches_of(&r, sid)[0];
+    let excerpt = m["excerpt"].as_str().unwrap();
+    assert!(excerpt.contains("signed lease_id plus index"), "{excerpt}");
+    let (_, reference) = env.decode_match(m["match_ref"].as_str().unwrap()).await;
+    assert!(reference.spans.iter().any(
+        |s| s.r == "design" && primary[s.s as usize..s.e as usize].contains("signed lease_id")
+    ));
+    let parts: Vec<&[u8]> = reference
+        .spans
+        .iter()
+        .map(|s| {
+            let text = if s.r == "design" {
+                primary.as_str()
+            } else {
+                adjacent
+            };
+            &text.as_bytes()[s.s as usize..s.e as usize]
+        })
+        .collect();
+    assert_eq!(reference.content, frames(&parts));
+    assert_eq!(
+        excerpt,
+        parts
+            .iter()
+            .map(|p| std::str::from_utf8(p).unwrap().trim())
+            .collect::<Vec<_>>()
+            .join("\n…\n")
+    );
+    assert!(excerpt.len() <= 1200 && parts.iter().map(|p| p.len()).sum::<usize>() <= 1200);
+}
+
+#[tokio::test]
+async fn complementary_and_semantic_windows_read_verified_source_across_pages() {
+    for semantic in [false, true] {
+        let env = reader_common::Env::new().await;
+        let query = if semantic {
+            "What design reduced the large opaque handles returned by the conversation search API?"
+        } else {
+            "Why did WORKER_ALREADY_EXISTS appear after restarting Spool?"
+        };
+        let first = if semantic {
+            format!(
+                "search {} Short handles use a signed lease_id plus index instead of embedded span lists. {}",
+                "padding ".repeat(240),
+                "tail ".repeat(900)
+            )
+        } else {
+            format!(
+                "WORKER_ALREADY_EXISTS appeared in Spool. {}",
+                "status ".repeat(77)
+            )
+        };
+        let middle = if semantic {
+            "search API repository filter unrelated proposal".to_string()
+        } else {
+            "unrelated filler ".repeat(350)
+        };
+        let last = "After restarting Spool, fixed registrations wait for the 30 second heartbeat lease expiry and retry automatically.";
+        let (sid, _) = env
+            .indexed(
+                "windows.jsonl",
+                &[
+                    reader_common::omp_header(),
+                    reader_common::omp_msg("m0", None, "user", &first),
+                    reader_common::omp_msg("m1", Some("m0"), "user", &middle),
+                    reader_common::omp_msg("m2", Some("m1"), "user", last),
+                ],
+            )
+            .await;
+        let snap: String =
+            sqlx::query_scalar("SELECT active_snapshot_id FROM sessions WHERE id = ?")
+                .bind(&sid)
+                .fetch_one(&env.index.writer)
+                .await
+                .unwrap();
+        let keys: Vec<String> = sqlx::query_scalar(
+            "SELECT record_key FROM messages WHERE snapshot_id = ? ORDER BY seq",
+        )
+        .bind(&snap)
+        .fetch_all(&env.index.writer)
+        .await
+        .unwrap();
+        sqlx::query("DELETE FROM chunks WHERE snapshot_id = ?")
+            .bind(&snap)
+            .execute(&env.index.writer)
+            .await
+            .unwrap();
+        let groups: Vec<Vec<usize>> = if semantic {
+            vec![vec![0], vec![1]]
+        } else {
+            vec![vec![0, 1, 2]]
+        };
+        let texts = [first.as_str(), middle.as_str(), last];
+        let profile = env.emb.ensure_profile().await.unwrap();
+        for (ordinal, group) in groups.iter().enumerate() {
+            let body = group
+                .iter()
+                .map(|i| format!("USER: {}", texts[*i]))
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            let hash = spool::domain::digest(body.as_bytes());
+            let rowid = sqlx::query("INSERT INTO chunks(logical_id, snapshot_id, session_id, run_key, ordinal, body, input_hash, time_anchor, rendered_tokens, is_tail) VALUES (?,?,?,'run',?,?,?,?,10,0)")
+                .bind(format!("window{ordinal}")).bind(&snap).bind(&sid).bind(ordinal as i64).bind(&body).bind(hash.to_vec()).bind(reader_common::T0).execute(&env.index.writer).await.unwrap().last_insert_rowid();
+            for (seq, i) in group.iter().enumerate() {
+                sqlx::query("INSERT INTO chunk_spans(chunk_rowid, seq, record_key, block_index, start_byte, end_byte, is_context) VALUES (?,?,?,0,0,?,0)")
+                    .bind(rowid).bind(seq as i64).bind(&keys[*i]).bind(texts[*i].len() as i64).execute(&env.index.writer).await.unwrap();
+            }
+            if semantic {
+                let blob: Vec<u8> = env
+                    .provider
+                    .vector_for(query)
+                    .iter()
+                    .flat_map(|v| v.to_le_bytes())
+                    .collect();
+                sqlx::query("INSERT INTO embeddings(profile_id, input_hash, dimensions, vec, created_at) VALUES (?,?,32,?,0) ON CONFLICT DO NOTHING")
+                    .bind(&profile).bind(hash.to_vec()).bind(blob).execute(&env.index.writer).await.unwrap();
+            }
+        }
+        let search = SearchService::new(
+            env.index.clone(),
+            env.cfg.clone(),
+            env.emb.clone(),
+            env.leases.clone(),
+            env.keys.clone(),
+        );
+        let result = search.call(json!({"query":query,"mode":if semantic {"semantic"} else {"lexical"},"matches_per_session":1})).await.unwrap();
+        let m = &matches_of(&result, &sid)[0];
+        let expected = if semantic {
+            "signed lease_id plus index"
+        } else {
+            "heartbeat lease expiry"
+        };
+        assert!(m["excerpt"].as_str().unwrap().contains(expected), "{m}");
+        let pages = env.pages(json!({"session_id":sid,"source_policy":"require_source","max_bytes":4096,"max_items":1,"selection":{"kind":"match","match_ref":m["match_ref"],"before":0,"after":0}}), 4096).await;
+        assert!(pages.len() > 1);
+        let mut bytes = Vec::new();
+        for page in &pages {
+            for item in page["items"].as_array().unwrap() {
+                assert_eq!(item["provenance"]["origin"], "verified_source");
+                for block in item["blocks"].as_array().unwrap() {
+                    bytes.extend(reader_common::frag_bytes(block));
+                }
+            }
+        }
+        let read = String::from_utf8(bytes).unwrap();
+        assert!(read.contains(expected));
+        if !semantic {
+            assert!(read.contains("WORKER_ALREADY_EXISTS"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn hidden_only_match_keeps_a_readable_reference_without_exposing_text() {
+    let env = Env::new().await;
+    let text = "<system-reminder>hiddenonlyneedle secret</system-reminder>";
+    env.simple("hidden_only", "omp", "/w", &[(text, Some(T0))])
+        .await;
+    let r = env
+        .ok(json!({"query":"hiddenonlyneedle", "mode":"lexical"}))
+        .await;
+    let m = &matches_of(&r, "hidden_only")[0];
+    assert!(m["excerpt"].as_str().unwrap().is_empty());
+    let (_, reference) = env.decode_match(m["match_ref"].as_str().unwrap()).await;
+    assert!(!reference.spans.is_empty());
+}
+
+fn occurrence_layout(len: usize, terms: &[(usize, &str)]) -> String {
+    let mut bytes = vec![b' '; len];
+    for (at, word) in terms {
+        bytes[*at..*at + word.len()].copy_from_slice(word.as_bytes());
+    }
+    String::from_utf8(bytes).unwrap()
+}
+
+#[tokio::test]
+async fn realistic_late_design_survives_literal_citation_example() {
+    let env = Env::new().await;
+    let (sid, snap) = ("realistic_design", "realistic_design_snap");
+    let query =
+        "What design reduced the large opaque handles returned by the conversation search API?";
+    let first = occurrence_layout(127, &[(49, "api")]);
+    let primary = occurrence_layout(
+        3112,
+        &[
+            (79, "search"),
+            (230, "search"),
+            (344, "search"),
+            (1649, "`<oai-mem-citation>`"),
+            (1935, "Short handles"),
+            (2015, "signed lease_id + index"),
+            (2127, "search"),
+            (2821, "search"),
+        ],
+    );
+    let repo = occurrence_layout(
+        2570,
+        &[
+            (105, "search"),
+            (745, "api"),
+            (1613, "search"),
+            (1906, "search"),
+        ],
+    );
+    let other = occurrence_layout(889, &[(293, "api")]);
+    let proposal = occurrence_layout(1619, &[(12, "design")]);
+    env.session(sid, "omp", "/w", "interactive", T0).await;
+    env.snapshot(sid, snap, "published").await;
+    for (seq, key, text) in [
+        (0, "first", first.as_str()),
+        (1, "primary", primary.as_str()),
+        (2, "repo", repo.as_str()),
+        (3, "other", other.as_str()),
+        (4, "proposal", proposal.as_str()),
+    ] {
+        env.message(
+            snap,
+            Message {
+                key,
+                seq,
+                role: "user",
+                ts: Some(T0),
+                parent: None,
+                text,
+            },
+        )
+        .await;
+    }
+    for (ordinal, body, spans) in [
+        (
+            0,
+            format!("USER: {first}\n\nUSER: {primary}"),
+            vec![
+                ("first", 0, 0, first.len() as i64, false),
+                ("primary", 0, 0, primary.len() as i64, false),
+            ],
+        ),
+        (
+            1,
+            format!("USER: {repo}"),
+            vec![("repo", 0, 0, repo.len() as i64, false)],
+        ),
+        (
+            2,
+            format!("USER: {other}\n\nUSER: {proposal}"),
+            vec![
+                ("other", 0, 0, other.len() as i64, false),
+                ("proposal", 0, 0, proposal.len() as i64, false),
+            ],
+        ),
+    ] {
+        env.chunk(
+            sid,
+            snap,
+            &format!("chunk{ordinal}"),
+            search_common::Chunk {
+                body: &body,
+                spans,
+                anchor: Some(T0),
+                run: "run",
+                ordinal,
+                embed: false,
+            },
+        )
+        .await;
+        env.embed_vec(
+            &env.profile_id,
+            &env.provider.vector_for(query),
+            &spool::domain::digest(body.as_bytes()),
+        )
+        .await;
+    }
+    env.activate(sid, snap).await;
+    let result = env
+        .ok(json!({"query":query,"mode":"semantic","matches_per_session":1}))
+        .await;
+    let m = &matches_of(&result, sid)[0];
+    assert!(
+        m["excerpt"]
+            .as_str()
+            .unwrap()
+            .contains("signed lease_id + index"),
+        "{m}"
+    );
+    let (_, reference) = env.decode_match(m["match_ref"].as_str().unwrap()).await;
+    assert!(reference.spans.iter().any(|s| s.r == "primary"
+        && primary[s.s as usize..s.e as usize].contains("signed lease_id + index")));
+}
+
+#[tokio::test]
+async fn realistic_short_handle_mechanism_survives_rebalancing() {
+    let env = Env::new().await;
+    let (sid, snap) = ("realistic_refs", "realistic_refs_snap");
+    let query = "How did lease_refs make match_ref and continuation cursors smaller?";
+    let early = occurrence_layout(
+        4943,
+        &[
+            (2283, "lease_refs"),
+            (4090, "lease_refs"),
+            (2593, "match_ref"),
+            (3889, "match_ref"),
+            (2426, "cursors"),
+            (2909, "cursors"),
+            (3764, "cursors"),
+        ],
+    );
+    let mechanism = occurrence_layout(
+        2035,
+        &[
+            (160, "match_ref"),
+            (310, "The handles store details on the server:"),
+            (401, "lease_refs"),
+            (843, "cursors"),
+            (1141, "smaller"),
+            (1799, "lease_refs"),
+        ],
+    );
+    let notes = occurrence_layout(
+        3249,
+        &[
+            (656, "match_ref"),
+            (757, "cursors"),
+            (937, "continuation"),
+            (1180, "lease_refs"),
+            (2100, "lease_refs"),
+            (2364, "match_ref"),
+        ],
+    );
+    let last = occurrence_layout(1042, &[(593, "lease_refs")]);
+    env.session(sid, "omp", "/w", "interactive", T0).await;
+    env.snapshot(sid, snap, "published").await;
+    for (seq, key, text) in [
+        (0, "early", early.as_str()),
+        (1, "mechanism", mechanism.as_str()),
+        (2, "notes", notes.as_str()),
+        (3, "last", last.as_str()),
+    ] {
+        env.message(
+            snap,
+            Message {
+                key,
+                seq,
+                role: "user",
+                ts: Some(T0),
+                parent: None,
+                text,
+            },
+        )
+        .await;
+    }
+    for (ordinal, body, spans) in [
+        (
+            15,
+            format!("USER: {}", &early[1699..4597]),
+            vec![("early", 0, 1699, 4597, false)],
+        ),
+        (
+            16,
+            format!(
+                "USER: {}\n\nUSER: {mechanism}\n\nUSER: {}",
+                &early[4597..],
+                &notes[..905]
+            ),
+            vec![
+                ("early", 0, 4597, 4943, false),
+                ("mechanism", 0, 0, 2035, false),
+                ("notes", 0, 0, 905, false),
+            ],
+        ),
+        (
+            17,
+            format!("USER: {}\n\nUSER: {last}", &notes[905..]),
+            vec![("notes", 0, 905, 3249, false), ("last", 0, 0, 1042, false)],
+        ),
+    ] {
+        env.chunk(
+            sid,
+            snap,
+            &format!("chunk{ordinal}"),
+            search_common::Chunk {
+                body: &body,
+                spans,
+                anchor: Some(T0),
+                run: "run",
+                ordinal,
+                embed: false,
+            },
+        )
+        .await;
+    }
+    env.activate(sid, snap).await;
+    let result = env
+        .ok(json!({"query":query,"mode":"lexical","matches_per_session":1}))
+        .await;
+    let m = &matches_of(&result, sid)[0];
+    assert!(
+        m["excerpt"]
+            .as_str()
+            .unwrap()
+            .contains("The handles store details on the server:"),
+        "{m}"
+    );
+    let (_, reference) = env.decode_match(m["match_ref"].as_str().unwrap()).await;
+    assert!(reference.spans.iter().any(
+        |s| s.r == "mechanism" && mechanism[s.s as usize..s.e as usize].contains("lease_refs")
+    ));
+}
+
+#[tokio::test]
+async fn realistic_lease_status_and_cause_survive_competing_fix() {
+    let env = Env::new().await;
+    let (sid, snap) = ("realistic_lease", "realistic_lease_snap");
+    let status = occurrence_layout(580, &[(11, "Spool"), (423, "WORKER_ALREADY_EXISTS")]);
+    let cause = occurrence_layout(
+        836,
+        &[
+            (35, "after"),
+            (
+                45,
+                "fixed worker registration heartbeat expires at 30 seconds",
+            ),
+            (160, "Spool"),
+            (180, "Spool"),
+            (276, "Spool"),
+        ],
+    );
+    let fix = occurrence_layout(453, &[(245, "after")]);
+    env.session(sid, "omp", "/w", "interactive", T0).await;
+    env.snapshot(sid, snap, "published").await;
+    for (seq, key, text) in [
+        (0, "status", status.as_str()),
+        (1, "cause", cause.as_str()),
+        (2, "fix", fix.as_str()),
+    ] {
+        env.message(
+            snap,
+            Message {
+                key,
+                seq,
+                role: "user",
+                ts: Some(T0),
+                parent: None,
+                text,
+            },
+        )
+        .await;
+    }
+    let first = format!("USER: {status}\n\nUSER: {cause}\n\nUSER: {}", &fix[..18]);
+    let second = format!("USER: {}\n\nUSER: {}", &fix[..18], &fix[18..]);
+    env.chunk(
+        sid,
+        snap,
+        "first",
+        search_common::Chunk {
+            body: &first,
+            spans: vec![
+                ("status", 0, 0, 580, false),
+                ("cause", 0, 0, 836, false),
+                ("fix", 0, 0, 18, false),
+            ],
+            anchor: Some(T0),
+            run: "run",
+            ordinal: 0,
+            embed: false,
+        },
+    )
+    .await;
+    env.chunk(
+        sid,
+        snap,
+        "second",
+        search_common::Chunk {
+            body: &second,
+            spans: vec![("fix", 0, 0, 18, true), ("fix", 0, 18, 453, false)],
+            anchor: Some(T0),
+            run: "run",
+            ordinal: 1,
+            embed: false,
+        },
+    )
+    .await;
+    env.activate(sid, snap).await;
+    let result = env.ok(json!({"query":"Why did WORKER_ALREADY_EXISTS appear after restarting Spool?", "mode":"lexical", "matches_per_session":1})).await;
+    let m = &matches_of(&result, sid)[0];
+    let excerpt = m["excerpt"].as_str().unwrap();
+    assert!(
+        excerpt.contains("WORKER_ALREADY_EXISTS")
+            && excerpt.contains("fixed worker registration heartbeat expires at 30 seconds"),
+        "{m}"
+    );
+    let (_, reference) = env.decode_match(m["match_ref"].as_str().unwrap()).await;
+    assert!(
+        reference.spans.iter().any(|s| s.r == "status"
+            && status[s.s as usize..s.e as usize].contains("WORKER_ALREADY_EXISTS"))
+    );
+    assert!(reference.spans.iter().any(|s| {
+        s.r == "cause"
+            && cause[s.s as usize..s.e as usize]
+                .contains("fixed worker registration heartbeat expires at 30 seconds")
+    }));
 }
