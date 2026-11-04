@@ -1,10 +1,27 @@
-//! Project identity for sessions. Everything here is blocking filesystem work: call it from
-//! `spawn_blocking`, never from an async task or inside a write transaction.
+//! Project identity for sessions. Call filesystem work from `spawn_blocking`, never from an
+//! async task or inside a write transaction.
 
-use crate::search::normalize_abs_path;
 use gix_config::file::{includes, init};
 use gix_config::{File, Source};
 use std::path::{Path, PathBuf};
+
+/// Lexically normalize an absolute path (no filesystem access): collapse `//`, `.`, `..`, trailing `/`.
+pub(crate) fn normalize_abs_path(p: &str) -> Option<String> {
+    if !p.starts_with('/') {
+        return None;
+    }
+    let mut out: Vec<&str> = Vec::new();
+    for seg in p.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                out.pop();
+            }
+            s => out.push(s),
+        }
+    }
+    Some(format!("/{}", out.join("/")))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProjectKind {
@@ -183,6 +200,23 @@ fn origin_url(common_dir: &Path) -> Option<String> {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn paths_normalize() {
+        assert_eq!(
+            normalize_abs_path("/a//b/./c/../d/").as_deref(),
+            Some("/a/b/d")
+        );
+        for (input, expected) in [
+            ("/", "/"),
+            ("/../../", "/"),
+            ("/é/../不存在/", "/不存在"),
+            ("/nonexistent/./path", "/nonexistent/path"),
+        ] {
+            assert_eq!(normalize_abs_path(input).as_deref(), Some(expected));
+        }
+        assert!(normalize_abs_path("rel/x").is_none());
+    }
 
     fn init_repo(dir: &Path, config: &str) {
         let git = dir.join(".git");

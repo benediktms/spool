@@ -275,7 +275,7 @@ pub fn parse_timestamp_ms(s: &str) -> Option<i64> {
         });
     }
     if s.ends_with('Z') {
-        return crate::search::parse_rfc3339_utc(s);
+        return crate::clock::parse_rfc3339_utc(s);
     }
     let n = s.len();
     if n > 6 && s.is_ascii() {
@@ -292,7 +292,7 @@ pub fn parse_timestamp_ms(s: &str) -> Option<i64> {
         if oh > 23 || om > 59 {
             return None;
         }
-        let base = crate::search::parse_rfc3339_utc(&format!("{head}Z"))?;
+        let base = crate::clock::parse_rfc3339_utc(&format!("{head}Z"))?;
         return Some(base - sign * (oh * 3600 + om * 60) * 1000);
     }
     None
@@ -308,5 +308,14 @@ mod tests {
         assert_eq!(p("1791795601"), Some(1791795601000));
         assert_eq!(p("1791795601250"), Some(1791795601250));
         assert_eq!(p("garbage"), None);
+    }
+    #[test]
+    fn timestamp_native_conventions() {
+        assert_eq!(p(" 1970-01-01T00:00:00Z "), Some(0));
+        assert_eq!(p("12345678901"), Some(12_345_678_901_000));
+        assert_eq!(p("012345678901"), Some(12_345_678_901));
+        assert_eq!(p("9223372036854775808"), None);
+        assert_eq!(p("1970-01-01T00:00:00+02:00"), Some(-7_200_000));
+        assert_eq!(p("1970-01-01T00:00:00-05:30"), Some(19_800_000));
     }
 }
