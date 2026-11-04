@@ -13,7 +13,7 @@ mod search_common;
 use search_common::*;
 use serde_json::{Value, json};
 use spool::clock::{ManualClock, SharedClock};
-use spool::config::Config;
+use spool::config::{Config, Paths};
 use spool::embeddings::{EmbeddingService, FakeProvider};
 use spool::search::SearchService;
 use spool::storage::index::Index;
@@ -534,7 +534,7 @@ fn queries() -> Vec<Q> {
             cat: "related",
             q: "database change safety",
             mode_filters: n.clone(),
-            relevant: &["s_migrations", FORK_ID],
+            relevant: &["s_migrations"],
         },
         Q {
             cat: "related",
@@ -552,7 +552,7 @@ fn queries() -> Vec<Q> {
             cat: "related",
             q: "intermittent failures and races",
             mode_filters: n.clone(),
-            relevant: &["s_flaky", "s_rust"],
+            relevant: &["s_flaky"],
         },
         // negative: nothing in the corpus supports these (lexical/literal must return nothing)
         Q {
@@ -617,23 +617,31 @@ fn paraphrase_overlap(q: &Q) -> Vec<String> {
     qw.intersection(&dw).cloned().collect()
 }
 
-async fn build() -> Env {
+async fn build(real: Option<Config>) -> Env {
     let tmp = tempfile::tempdir().unwrap();
     let index = Index::open_for_test(tmp.path()).await.unwrap();
-    let mut cfg = Config::default();
-    cfg.embedding.enabled = true;
-    cfg.embedding.dimensions = 64;
+    let hosted = real.is_some();
+    let mut cfg = real.unwrap_or_default();
+    if !hosted {
+        cfg.embedding.enabled = true;
+        cfg.embedding.dimensions = 64;
+    }
     let cfg = Arc::new(cfg);
     let clock = ManualClock::new(T0 + 100 * DAY);
     let shared: SharedClock = Arc::new(clock.clone());
     let provider = Arc::new(FakeProvider::with_concepts(64, GROUPS));
-    let emb = Arc::new(EmbeddingService::new(
-        index.clone(),
-        cfg.embedding.clone(),
-        cfg.search.clone(),
-        shared.clone(),
-        provider.clone(),
-    ));
+    let emb = Arc::new(if hosted {
+        let paths = Paths::from_root(tmp.path().to_path_buf()).unwrap();
+        EmbeddingService::from_config(index.clone(), &cfg, &paths, shared.clone()).unwrap()
+    } else {
+        EmbeddingService::new(
+            index.clone(),
+            cfg.embedding.clone(),
+            cfg.search.clone(),
+            shared.clone(),
+            provider.clone(),
+        )
+    });
     let profile_id = emb.ensure_profile().await.unwrap();
     let key_path = tmp.path().join("handle.key");
     HandleKey::create(&key_path).unwrap();
@@ -671,7 +679,7 @@ async fn build() -> Env {
         let seed = search_common::Seed {
             cwd: s.cwd,
             last_activity: last,
-            embed: true,
+            embed: !hosted,
             ..search_common::Seed::default()
         };
         env.simple_with(s.id, &seed, &texts).await;
@@ -747,7 +755,7 @@ async fn build() -> Env {
                 anchor: Some(last + 4000),
                 run,
                 ordinal: ord as i64,
-                embed: true,
+                embed: !hosted,
             },
         )
         .await;
@@ -774,7 +782,7 @@ fn rank_of(v: &Value, relevant: &[&str]) -> Option<usize> {
 
 #[tokio::test]
 async fn curated_retrieval_evaluation() {
-    let env = build().await;
+    let env = build(None).await;
     let qs = queries();
     assert_eq!(qs.len(), 50, "the evaluation set has exactly 50 queries");
     let bad: Vec<_> = qs
@@ -895,5 +903,449 @@ async fn curated_retrieval_evaluation() {
     assert!(
         hyb.hits5 >= lex.hits5,
         "hybrid must not be worse than lexical on this set"
+    );
+}
+
+const ANCHORS: &[&[(&str, &str, &str)]] = &[
+    &[("s_webhook", "m0", "webhook receiver")],
+    &[("s_webhook", "m2", "HMAC secret")],
+    &[("s_migrations", "m2", "roll the migration back")],
+    &[("s_flaky", "m0", "flaky on CI")],
+    &[("s_react", "m1", "reducer")],
+    &[("s_rust", "m0", "cannot borrow")],
+    &[("s_k8s", "m3", "rollout undo")],
+    &[("s_vectors", "m2", "Exact scan")],
+    &[("s_css", "m0", "responsive")],
+    &[("s_oauth", "m1", "Refresh the access token")],
+    &[("s_perf", "m0", "slow under load")],
+    &[("s_logging", "m0", "structured logging")],
+    &[("s_legacy", "m1", "Migrate the form handlers")],
+    &[("s_git", "m2", "git bisect")],
+    &[(FORK_ID, "a1", "sqlite, a single file")],
+    &[("s_webhook", "m2", "verify_signature()")],
+    &[("s_rust", "m0", "E0502")],
+    &[("s_flaky", "m0", "test_checkout_flow")],
+    &[("s_k8s", "m3", "kubectl rollout undo")],
+    &[("s_migrations", "m1", "ALTER TABLE invoices ADD COLUMN")],
+    &[("s_rust", "m3", "Arc<Mutex<HashMap<..>>>")],
+    &[("s_webhook", "m3", "X-Hub-Signature-256")],
+    &[("s_git", "m2", "git bisect run ./ci.sh")],
+    &[(
+        "s_css",
+        "m0",
+        "grid-template-columns repeat(auto-fit, minmax(240px, 1fr))",
+    )],
+    &[("s_migrations", "m1", "lock_timeout")],
+    &[("s_react", "m1", "state into a reducer")],
+    &[("s_oauth", "m1", "Refresh the access token")],
+    &[("s_perf", "m0", "search endpoint is slow")],
+    &[("s_migrations", "m2", "roll the migration back")],
+    &[("s_k8s", "m0", "readiness probe")],
+    &[("s_legacy", "m1", "jQuery plugin shims")],
+    &[("s_legacy", "m1", "ES modules one page at a time")],
+    &[("s_legacy", "m0", "recipe site")],
+    &[("s_legacy", "m2", "$.ajax wrapper")],
+    &[("s_git", "m1", "rebase -i to squash fixups")],
+    &[(FORK_ID, "a1", "choose sqlite")],
+    &[(FORK_ID, "b1", "choose postgres")],
+    &[(FORK_ID, "a1", "single file")],
+    &[(FORK_ID, "b1", "managed server")],
+    &[(FORK_ID, "a1", "PRAGMA journal_mode")],
+    &[
+        ("s_vectors", "m2", "Exact scan"),
+        ("s_perf", "m0", "search endpoint is slow"),
+    ],
+    &[("s_migrations", "m1", "lock_timeout")],
+    &[
+        ("s_k8s", "m0", "deployment rollout stalls"),
+        ("s_migrations", "m2", "deploy fails"),
+    ],
+    &[
+        ("s_logging", "m1", "Redact secrets"),
+        ("s_oauth", "m1", "refresh token"),
+        ("s_webhook", "m2", "HMAC secret"),
+    ],
+    &[("s_flaky", "m1", "The race")],
+    &[],
+    &[],
+    &[],
+    &[],
+    &[],
+];
+
+#[tokio::test]
+async fn supporting_anchors_resolve() {
+    let env = build(None).await;
+    let qs = queries();
+    assert_eq!(ANCHORS.len(), qs.len());
+    for (q, anchors) in qs.iter().zip(ANCHORS) {
+        assert_eq!(anchors.len(), q.relevant.len());
+        for (session, key, text) in *anchors {
+            assert!(q.relevant.contains(session));
+            let body: String = sqlx::query_scalar("SELECT b.text FROM blocks b JOIN snapshots s ON s.id=b.snapshot_id WHERE s.session_id=? AND b.record_key=?")
+                .bind(session).bind(key).fetch_one(&env.index.reader).await.unwrap();
+            assert!(body.contains(text), "supporting anchor missing");
+        }
+    }
+}
+
+fn eval_config(path: &std::path::Path) -> Result<Config, &'static str> {
+    if !path.is_absolute() {
+        return Err("configuration path must be absolute");
+    }
+    let text = std::fs::read_to_string(path).map_err(|_| "configuration unavailable")?;
+    let base = path.parent().ok_or("configuration unavailable")?;
+    let mut cfg = Config::parse(&text, base).map_err(|_| "invalid configuration")?;
+    if !cfg.embedding.enabled || !cfg.embedding.hosted_processing_approved {
+        return Err("hosted processing is not enabled and approved");
+    }
+    cfg.embedding.credential_file = cfg
+        .credential_path(base)
+        .map_err(|_| "invalid credential path")?
+        .to_string_lossy()
+        .into_owned();
+    cfg.embedding.daily_ingestion_token_budget =
+        cfg.embedding.daily_ingestion_token_budget.min(10_000);
+    cfg.embedding.daily_query_token_budget = cfg.embedding.daily_query_token_budget.min(5_000);
+    cfg.search = Config::default().search;
+    Ok(cfg)
+}
+
+fn complete_result(result: &Value, mode: &str) -> bool {
+    result["mode_used"] == mode
+        && result["truncated"] == false
+        && result["coverage"].is_null()
+        && result["warnings"].as_array().is_some_and(Vec::is_empty)
+}
+
+fn complete_coverage(coverage: &spool::embeddings::VectorCoverage, profile: &str) -> bool {
+    coverage.total_chunks > 0
+        && coverage.pending_chunks == 0
+        && coverage.embedded_chunks == coverage.total_chunks
+        && coverage.profile_id == profile
+}
+
+fn sufficient_budget(ingest: usize, query: usize, cfg: &Config) -> bool {
+    u64::try_from(ingest).is_ok_and(|n| n <= cfg.embedding.daily_ingestion_token_budget)
+        && u64::try_from(query).is_ok_and(|n| n <= cfg.embedding.daily_query_token_budget)
+}
+
+#[derive(Default)]
+struct Metrics {
+    n: usize,
+    hit5: usize,
+    hit10: usize,
+    reciprocal: f64,
+}
+impl Metrics {
+    fn add(&mut self, rank: Option<usize>) {
+        self.n += 1;
+        if let Some(rank) = rank.filter(|rank| *rank <= 10) {
+            self.hit10 += 1;
+            self.hit5 += usize::from(rank <= 5);
+            self.reciprocal += 1.0 / rank as f64;
+        }
+    }
+    fn json(&self) -> Value {
+        json!({"denominator": self.n, "hit_at_5": self.hit5 as f64 / self.n as f64,
+            "hit_at_10": self.hit10 as f64 / self.n as f64, "mrr_at_10": self.reciprocal / self.n as f64})
+    }
+}
+
+async fn hosted_evaluation(cfg: Config) -> Result<Value, &'static str> {
+    use spool::embeddings::EmbeddingState;
+    use std::sync::atomic::AtomicBool;
+    let started = std::time::Instant::now();
+    let env = build(Some(cfg)).await;
+    if env.emb.status().state != EmbeddingState::Ready {
+        return Err("provider gate closed");
+    }
+    let rows: Vec<String> = sqlx::query_scalar("SELECT body FROM chunks ORDER BY rowid")
+        .fetch_all(&env.index.reader)
+        .await
+        .map_err(|_| "fixture read failed")?;
+    let qs = queries();
+    let ingest = rows.iter().map(|s| env.emb.count_tokens(s)).sum();
+    let query = qs.iter().map(|q| env.emb.count_tokens(q.q) * 2).sum();
+    if !sufficient_budget(ingest, query, &env.cfg) {
+        return Err("preflight budget insufficient");
+    }
+    let docs = rows
+        .into_iter()
+        .map(|s| (spool::domain::digest(s.as_bytes()), s))
+        .collect();
+    let progress = env
+        .emb
+        .embed_documents(docs, &AtomicBool::new(false))
+        .await
+        .map_err(|e| {
+            if e.kind == spool::embeddings::EmbedErrorKind::Auth {
+                "provider authentication failed"
+            } else {
+                "document embedding failed"
+            }
+        })?;
+    if progress.rejected > 0
+        || progress.deferred > 0
+        || progress.cancelled
+        || progress.budget_exhausted
+    {
+        return Err("document embedding incomplete");
+    }
+    let coverage = env
+        .emb
+        .vector_coverage()
+        .await
+        .map_err(|_| "coverage check failed")?;
+    if !complete_coverage(&coverage, &env.profile_id) {
+        return Err("document coverage incomplete");
+    }
+    let mut modes = serde_json::Map::new();
+    for mode in ["lexical", "semantic", "hybrid"] {
+        let mut total = Metrics::default();
+        let mut categories: std::collections::BTreeMap<&str, Metrics> = Default::default();
+        let mut ranks = Vec::new();
+        let mut negative_empty = 0;
+        for (i, q) in qs.iter().enumerate() {
+            let mut args = q.mode_filters.clone();
+            args["query"] = json!(q.q);
+            args["mode"] = json!(mode);
+            args["limit"] = json!(10);
+            let result = env.search(args).await.map_err(|_| "search failed")?;
+            if !complete_result(&result, mode) {
+                return Err("search result incomplete or fallback");
+            }
+            let rank = rank_of(&result, q.relevant);
+            if q.relevant.is_empty() {
+                negative_empty += usize::from(ids(&result).is_empty());
+            } else {
+                total.add(rank);
+                categories.entry(q.cat).or_default().add(rank);
+            }
+            let results = ids(&result);
+            let relevant_ranks: Vec<_> = q.relevant.iter().map(|id| json!({"session_id": id, "rank": results.iter().position(|result| result == id).map(|i| i + 1)})).collect();
+            ranks.push(
+                json!({"query_id": format!("q{:02}", i + 1), "relevant_ranks": relevant_ranks}),
+            );
+        }
+        let categories: serde_json::Map<String, Value> = categories
+            .into_iter()
+            .map(|(k, v)| (k.to_owned(), v.json()))
+            .collect();
+        modes.insert(mode.into(), json!({"aggregate": total.json(), "categories": categories, "negative_empty": negative_empty, "negative_denominator": 5, "queries": ranks}));
+    }
+    for q in qs.iter().filter(|q| q.cat == "symbol") {
+        let result = env
+            .search(json!({"query": q.q, "mode": "literal", "limit": 10}))
+            .await
+            .map_err(|_| "literal search failed")?;
+        if !complete_result(&result, "literal") || rank_of(&result, q.relevant).is_none() {
+            return Err("literal correctness failed");
+        }
+    }
+    for (query, forbidden) in [
+        ("sqlite storage decision", "postgres"),
+        ("postgres storage decision", "sqlite"),
+    ] {
+        let result = env
+            .search(json!({"query": query, "mode": "lexical", "session_ids": [FORK_ID]}))
+            .await
+            .map_err(|_| "branch check failed")?;
+        if !complete_result(&result, "lexical") {
+            return Err("branch check incomplete");
+        }
+        let excerpt = result["results"][0]["matches"][0]["excerpt"]
+            .as_str()
+            .ok_or("branch result missing")?;
+        if excerpt.contains(forbidden) {
+            return Err("branch hygiene failed");
+        }
+    }
+    let usage: Vec<(String, i64, i64, i64)> = sqlx::query_as("SELECT purpose, COALESCE(SUM(reserved_tokens),0), COALESCE(SUM(actual_tokens),0), COALESCE(SUM(CASE WHEN state != 'completed' THEN reserved_tokens ELSE 0 END),0) FROM embedding_requests GROUP BY purpose ORDER BY purpose")
+        .fetch_all(&env.index.reader).await.map_err(|_| "usage read failed")?;
+    let profile = env.emb.profile();
+    Ok(
+        json!({"schema_version": 1, "dataset": "spool-synthetic-retrieval-v2", "judgment_revision": "v2 removes s_fork from q42 and s_rust from q45; corpus and queries unchanged", "methodology": "real-model retrieval on synthetic sessions; incomplete relevance judgments; MRR truncated at 10", "profile": {"id": env.profile_id, "provider": profile.provider, "endpoint_identity": profile.endpoint_identity, "model": profile.model, "dimensions": profile.dimensions, "generation": profile.generation, "rendering_version": profile.rendering_version}, "settings": {"limit": 10, "candidate_limit": env.cfg.search.candidate_limit, "rrf_constant": env.cfg.search.rrf_constant, "ingest_budget": env.cfg.embedding.daily_ingestion_token_budget, "query_budget": env.cfg.embedding.daily_query_token_budget}, "preflight_estimates": {"ingest": ingest, "query": query}, "usage": usage.into_iter().map(|(purpose,reserved,reported,ambiguous)| json!({"purpose": purpose, "reserved": reserved, "completed_reported_or_estimated": reported, "ambiguous": ambiguous})).collect::<Vec<_>>(), "elapsed_ms": started.elapsed().as_millis(), "modes": modes}),
+    )
+}
+
+#[tokio::test]
+#[ignore = "explicitly consented real provider; spends tokens"]
+async fn real_provider_retrieval_evaluation() {
+    let path = std::env::var_os("SPOOL_RETRIEVAL_EVAL_CONFIG")
+        .expect("explicit configuration path required");
+    let cfg = eval_config(std::path::Path::new(&path)).expect("evaluation configuration rejected");
+    let result = tokio::time::timeout(std::time::Duration::from_secs(600), hosted_evaluation(cfg))
+        .await
+        .expect("evaluation deadline exceeded")
+        .expect("evaluation failed");
+    println!("{}", serde_json::to_string(&result).unwrap());
+}
+
+#[test]
+fn preflight_and_metrics_reject_incomplete_inputs() {
+    assert!(eval_config(std::path::Path::new("relative.toml")).is_err());
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("config.toml");
+    std::fs::write(&path, "[embedding]\nenabled = false\n").unwrap();
+    assert!(eval_config(&path).is_err());
+    std::fs::write(
+        &path,
+        "[embedding]\nenabled = true\nhosted_processing_approved = false\n",
+    )
+    .unwrap();
+    assert!(eval_config(&path).is_err());
+    let mut cfg = Config::default();
+    cfg.embedding.daily_ingestion_token_budget = 4;
+    cfg.embedding.daily_query_token_budget = 8;
+    assert!(sufficient_budget(4, 8, &cfg));
+    assert!(!sufficient_budget(5, 8, &cfg));
+    assert!(!sufficient_budget(4, 9, &cfg));
+    assert!(!complete_result(
+        &json!({"mode_used":"lexical", "truncated":false, "warnings":[]}),
+        "hybrid"
+    ));
+    assert!(!complete_result(
+        &json!({"mode_used":"hybrid", "truncated":true, "warnings":[]}),
+        "hybrid"
+    ));
+    let mut coverage = spool::embeddings::VectorCoverage {
+        profile_id: "p".into(),
+        total_chunks: 2,
+        embedded_chunks: 1,
+        pending_chunks: 1,
+    };
+    assert!(!complete_coverage(&coverage, "p"));
+    coverage.embedded_chunks = 2;
+    coverage.pending_chunks = 0;
+    assert!(complete_coverage(&coverage, "p"));
+    assert!(!complete_coverage(&coverage, "other"));
+    let mut metrics = Metrics::default();
+    for rank in [Some(1), Some(6), None, Some(11)] {
+        metrics.add(rank);
+    }
+    assert_eq!(metrics.n, 4);
+    assert_eq!(metrics.hit5, 1);
+    assert_eq!(metrics.hit10, 2);
+    assert!((metrics.reciprocal - 7.0 / 6.0).abs() < 1e-10);
+    assert_eq!(
+        rank_of(
+            &json!({"results":[{"session_id":"x"},{"session_id":"b"}]}),
+            &["a", "b"]
+        ),
+        Some(2)
+    );
+}
+
+#[tokio::test]
+async fn hosted_wiring_uses_only_synthetic_data_and_redacts_report() {
+    use std::os::unix::fs::PermissionsExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut data = Vec::new();
+                let mut buf = [0; 4096];
+                let (header_end, len) = loop {
+                    let n = stream.read(&mut buf).await.unwrap();
+                    if n == 0 {
+                        return;
+                    }
+                    data.extend_from_slice(&buf[..n]);
+                    if let Some(i) = data.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let end = i + 4;
+                        let header = String::from_utf8_lossy(&data[..end]);
+                        let len = header
+                            .lines()
+                            .find_map(|line| {
+                                line.split_once(':')
+                                    .filter(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+                                    .and_then(|(_, v)| v.trim().parse::<usize>().ok())
+                            })
+                            .unwrap();
+                        break (end, len);
+                    }
+                };
+                while data.len() < header_end + len {
+                    let n = stream.read(&mut buf).await.unwrap();
+                    if n == 0 {
+                        return;
+                    }
+                    data.extend_from_slice(&buf[..n]);
+                }
+                let request: Value =
+                    serde_json::from_slice(&data[header_end..header_end + len]).unwrap();
+                let inputs = request["input"].as_array().unwrap();
+                let vectors: Vec<Value> = inputs
+                    .iter()
+                    .enumerate()
+                    .map(|(index, _)| json!({"index": index, "embedding": [1.0, 0.0, 0.0, 0.0]}))
+                    .collect();
+                let body = json!({"data": vectors, "usage": {"total_tokens": 1}}).to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            });
+        }
+    });
+    let tmp = tempfile::tempdir().unwrap();
+    let credential = tmp.path().join("credential");
+    std::fs::write(&credential, "secret-sentinel").unwrap();
+    std::fs::set_permissions(&credential, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let mut cfg = Config::default();
+    cfg.embedding.hosted_processing_approved = true;
+    cfg.embedding.dimensions = 4;
+    cfg.embedding.endpoint = format!("http://{address}/v1/embeddings");
+    cfg.embedding.credential_file = credential.to_string_lossy().into_owned();
+    cfg.embedding.daily_ingestion_token_budget = 10_000;
+    cfg.embedding.daily_query_token_budget = 5_000;
+    let report = hosted_evaluation(cfg).await.expect("loopback evaluation");
+    let json = report.to_string();
+    for forbidden in [
+        "secret-sentinel",
+        "webhook receiver",
+        "incoming notification endpoint",
+        "/v1/embeddings",
+        credential.to_str().unwrap(),
+    ] {
+        assert!(!json.contains(forbidden));
+    }
+    assert_eq!(report["modes"]["hybrid"]["aggregate"]["denominator"], 45);
+    assert_eq!(report["modes"]["hybrid"]["negative_denominator"], 5);
+    server.abort();
+}
+
+#[tokio::test]
+async fn preflight_failures_send_no_requests() {
+    use std::os::unix::fs::PermissionsExt;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let credential = tmp.path().join("key");
+    std::fs::write(&credential, "synthetic-key").unwrap();
+    std::fs::set_permissions(&credential, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let mut cfg = Config::default();
+    cfg.embedding.hosted_processing_approved = true;
+    cfg.embedding.endpoint = format!("http://{}/v1/embeddings", listener.local_addr().unwrap());
+    cfg.embedding.credential_file = credential.to_string_lossy().into_owned();
+    cfg.embedding.daily_ingestion_token_budget = 1;
+    assert_eq!(
+        hosted_evaluation(cfg.clone()).await.unwrap_err(),
+        "preflight budget insufficient"
+    );
+    cfg.embedding.daily_ingestion_token_budget = 10_000;
+    cfg.embedding.credential_file = tmp.path().join("missing").to_string_lossy().into_owned();
+    assert_eq!(
+        hosted_evaluation(cfg).await.unwrap_err(),
+        "provider gate closed"
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), listener.accept())
+            .await
+            .is_err()
     );
 }
