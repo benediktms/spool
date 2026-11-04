@@ -477,12 +477,32 @@ pub async fn load_spans(
     Ok(out)
 }
 
-pub async fn chunk_body(conn: &mut SqliteConnection, rowid: i64) -> Result<String, AppError> {
-    sqlx::query_scalar("SELECT body FROM chunks WHERE rowid = ?")
-        .bind(rowid)
-        .fetch_one(&mut *conn)
-        .await
-        .map_err(storage_err)
+pub async fn chunk_bodies(
+    conn: &mut SqliteConnection,
+    rowids: &[i64],
+) -> Result<HashMap<i64, String>, AppError> {
+    let mut out = HashMap::new();
+    for part in rowids.chunks(500) {
+        let sql = format!(
+            "SELECT rowid, body FROM chunks WHERE rowid IN ({})",
+            ph(part.len())
+        );
+        let binds: Vec<Bind> = part.iter().map(|r| Bind::Int(*r)).collect();
+        for row in build(sql, &binds)
+            .fetch_all(&mut *conn)
+            .await
+            .map_err(storage_err)?
+        {
+            out.insert(row.get(0), row.get(1));
+        }
+    }
+    if out.len() != rowids.len() {
+        return Err(AppError::new(
+            "STORAGE_ERROR",
+            "the local index could not be read",
+        ));
+    }
+    Ok(out)
 }
 
 #[derive(Debug, Clone)]
