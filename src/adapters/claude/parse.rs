@@ -1,4 +1,4 @@
-use super::{Block, Content, Line};
+use super::{Block, Content, Line, USER_INPUT_TOOL, answer_texts, exchange_index, question_texts};
 use crate::adapters::AdapterError;
 use crate::adapters::jsonl::{Emission, LineParser, Occurrences, ParseCx, RawRecord};
 use crate::adapters::lineage::RecordLineage;
@@ -6,7 +6,8 @@ use crate::domain::{
     BlockOrigin, Coverage, Digest, MessageEntry, RecordKind, RecordMeta, Role, SessionKind,
     TextBlock, ToolCallMeta, ToolResultMeta, parse_timestamp_ms,
 };
-use std::collections::HashMap;
+use serde_json::Value;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Default)]
 pub(crate) struct ParseState {
@@ -15,6 +16,7 @@ pub(crate) struct ParseState {
     latest_blocks: HashMap<String, usize>,
     latest_message_parent: HashMap<String, Option<String>>,
     lineage: RecordLineage,
+    user_input_calls: HashSet<String>,
 }
 
 /// What one record projects to, plus the native message identity used for supersession.
@@ -40,7 +42,7 @@ impl LineParser for ParseState {
         let mut meta = RecordMeta {
             key,
             native_id: x.uuid.clone(),
-            parent_key: x.parent.clone(),
+            parent_key: x.parent.clone().or_else(|| x.logical_parent.clone()),
             kind: RecordKind::Control,
             timestamp,
             turn_id: None,
@@ -54,6 +56,39 @@ impl LineParser for ParseState {
         self.lineage.index(&meta, &projection.emission.calls);
 
         self.publish(cx, meta, projection)
+    }
+}
+
+fn push_exchange(blocks: &mut Vec<TextBlock>, content_index: u32, texts: Vec<&str>) {
+    for (n, text) in texts.into_iter().enumerate() {
+        blocks.push(TextBlock {
+            index: exchange_index(content_index, n),
+            origin: BlockOrigin::Authored,
+            text: text.to_owned(),
+        });
+    }
+}
+
+fn queued_message(x: &Line, meta: &mut RecordMeta) -> Projection {
+    meta.kind = RecordKind::Message;
+    let text = x.queued_prompt().unwrap_or_default().to_owned();
+    Projection {
+        identity: x.uuid.as_deref().map(|id| format!("uuid:{id}")),
+        emission: Emission {
+            message: Some(MessageEntry {
+                record_key: meta.key.clone(),
+                role: Role::User,
+                phase: None,
+                blocks: vec![TextBlock {
+                    index: 0,
+                    origin: BlockOrigin::Authored,
+                    text,
+                }],
+                attachments: Vec::new(),
+                supersedes: Vec::new(),
+            }),
+            ..Emission::default()
+        },
     }
 }
 
@@ -106,9 +141,9 @@ impl ParseState {
             .as_ref()
             .and_then(|message| message.role.as_deref())
             .or(x.ty.as_deref());
-        if cx.session.kind == SessionKind::Subagent {
+        if cx.session.kind == SessionKind::Subagent || x.is_compact_summary == Some(true) {
             None
-        } else if role == Some("user") {
+        } else if role == Some("user") || x.queued_prompt().is_some() {
             Some(key.to_owned())
         } else if role == Some("assistant") {
             self.lineage.ancestor_turn(x.parent.as_deref())
@@ -123,14 +158,30 @@ impl ParseState {
         x: &mut Line,
         meta: &mut RecordMeta,
     ) -> Projection {
+        if x.is_compact_summary == Some(true)
+            || (x.ty.as_deref() == Some("system")
+                && x.subtype.as_deref() == Some("compact_boundary"))
+        {
+            meta.kind = RecordKind::Summary;
+            return Projection {
+                identity: None,
+                emission: Emission::default(),
+            };
+        }
+        let retained = x.is_meta != Some(true)
+            && x.is_sidechain != Some(true)
+            && (cx.session.kind != SessionKind::Subagent || cx.options.include_subagents);
         match x.ty.as_deref() {
-            Some("user" | "assistant")
-                if x.is_meta != Some(true)
-                    && x.is_sidechain != Some(true)
-                    && (cx.session.kind != SessionKind::Subagent
-                        || cx.options.include_subagents) =>
-            {
+            Some("user" | "assistant") if retained => {
                 return self.project_message(cx, x, meta);
+            }
+            Some("attachment") if retained && x.queued_prompt().is_some() => {
+                return queued_message(x, meta);
+            }
+            Some("ai-title") => {
+                if let Some(title) = x.ai_title.take() {
+                    cx.session.title = Some(title);
+                }
             }
             Some(
                 "user"
@@ -139,7 +190,19 @@ impl ParseState {
                 | "progress"
                 | "file-history-snapshot"
                 | "last-prompt"
-                | "queue-operation",
+                | "queue-operation"
+                | "attachment"
+                | "api-request"
+                | "api-request-blob"
+                | "api-request-shape"
+                | "mode"
+                | "permission-mode"
+                | "atis-latch"
+                | "session-owner"
+                | "tools-used"
+                | "cost-state"
+                | "pr-link"
+                | "file-history-delta",
             ) => {}
             Some("summary" | "compact_boundary") => meta.kind = RecordKind::Summary,
             Some(_) | None => {
@@ -179,22 +242,23 @@ impl ParseState {
             m.id.as_deref()
                 .map(|id| format!("message:{id}"))
                 .or_else(|| x.uuid.as_deref().map(|id| format!("uuid:{id}")));
-        let blocks = match m.content {
-            Some(content) => self.content_blocks(cx, content, meta, &mut out.emission),
-            None => Vec::new(),
+        let (blocks, plain_text) = match m.content {
+            Some(content) => self.content_blocks(
+                cx,
+                content,
+                x.tool_use_result.as_ref(),
+                meta,
+                &mut out.emission,
+            ),
+            None => (Vec::new(), false),
         };
 
         let has_text = !blocks.is_empty();
-        if !has_text {
+        if !plain_text {
             infer_result_turn(meta, &out.emission.results);
         }
 
-        if has_text
-            || out
-                .identity
-                .as_ref()
-                .is_some_and(|id| self.message_keys.contains_key(id))
-        {
+        if has_text {
             out.emission.message = Some(MessageEntry {
                 record_key: meta.key.clone(),
                 role,
@@ -220,22 +284,28 @@ impl ParseState {
         &mut self,
         cx: &mut ParseCx<'_>,
         content: Content,
+        tool_use_result: Option<&Value>,
         meta: &RecordMeta,
         emission: &mut Emission,
-    ) -> Vec<TextBlock> {
+    ) -> (Vec<TextBlock>, bool) {
         let mut blocks = Vec::new();
+        let mut plain_text = false;
         match content {
-            Content::Text(text) => blocks.push(TextBlock {
-                index: 0,
-                origin: BlockOrigin::Authored,
-                text,
-            }),
+            Content::Text(text) => {
+                plain_text = true;
+                blocks.push(TextBlock {
+                    index: 0,
+                    origin: BlockOrigin::Authored,
+                    text,
+                })
+            }
             Content::Blocks(items) => {
                 for (i, block) in items.into_iter().enumerate() {
                     let index = i as u32;
                     match block.ty.as_deref() {
                         Some("text") => {
                             if let Some(text) = block.text {
+                                plain_text = true;
                                 blocks.push(TextBlock {
                                     index,
                                     origin: BlockOrigin::Authored,
@@ -243,14 +313,29 @@ impl ParseState {
                                 });
                             }
                         }
-                        Some("tool_use") => emission.calls.push(ToolCallMeta {
-                            record_key: meta.key.clone(),
-                            block_index: index,
-                            native_call_id: block.id,
-                            tool_name: block.name.unwrap_or_else(|| "unknown".into()),
-                            turn_id: meta.turn_id.clone(),
-                        }),
+                        Some("tool_use") => {
+                            if block.name.as_deref() == Some(USER_INPUT_TOOL) {
+                                self.user_input_calls.extend(block.id.clone());
+                                if let Some(input) = &block.input {
+                                    push_exchange(&mut blocks, index, question_texts(input));
+                                }
+                            }
+                            emission.calls.push(ToolCallMeta {
+                                record_key: meta.key.clone(),
+                                block_index: index,
+                                native_call_id: block.id,
+                                tool_name: block.name.unwrap_or_else(|| "unknown".into()),
+                                turn_id: meta.turn_id.clone(),
+                            });
+                        }
                         Some("tool_result") => {
+                            let answered = block
+                                .call_id
+                                .as_ref()
+                                .is_some_and(|id| self.user_input_calls.contains(id));
+                            if answered && let Some(result) = tool_use_result {
+                                push_exchange(&mut blocks, index, answer_texts(result));
+                            }
                             emission.results.push(self.tool_result(block, index, meta))
                         }
                         Some("image" | "document" | "thinking" | "redacted_thinking") => {}
@@ -259,7 +344,7 @@ impl ParseState {
                 }
             }
         }
-        blocks
+        (blocks, plain_text)
     }
 
     fn tool_result(&self, block: Block, index: u32, meta: &RecordMeta) -> ToolResultMeta {

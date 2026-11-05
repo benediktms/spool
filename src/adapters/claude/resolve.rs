@@ -1,4 +1,4 @@
-use super::{Content, Line};
+use super::{Content, Line, USER_INPUT_TOOL, answer_texts, exchange_index, question_texts};
 use crate::adapters::AdapterError;
 use crate::adapters::jsonl::{json_block, tool_result_block, verbatim_block};
 use crate::domain::{BlockKind, ResolvedBlock};
@@ -11,6 +11,9 @@ pub(super) fn resolve_line(
     let json = serde_json::from_slice::<Value>(line).ok();
     let native_id = x.as_ref().and_then(|record| record.uuid.clone());
     let blocks = match (x.as_ref(), json.as_ref()) {
+        (Some(x), _) if let Some(prompt) = x.queued_prompt() => {
+            vec![verbatim_block(0, BlockKind::Text, prompt)]
+        }
         (Some(x), Some(json)) => message_blocks(x, json)?,
         _ => Vec::new(),
     };
@@ -41,6 +44,12 @@ fn message_blocks(x: &Line, json: &Value) -> Result<Vec<ResolvedBlock>, AdapterE
                         }
                     }
                     Some("tool_use") => {
+                        if authored
+                            && block.name.as_deref() == Some(USER_INPUT_TOOL)
+                            && let Some(input) = &block.input
+                        {
+                            exchange_blocks(&mut blocks, index, question_texts(input));
+                        }
                         if let Some(input) =
                             json.pointer(&format!("/message/content/{index}/input"))
                         {
@@ -53,6 +62,9 @@ fn message_blocks(x: &Line, json: &Value) -> Result<Vec<ResolvedBlock>, AdapterE
                         }
                     }
                     Some("tool_result") => {
+                        if authored && let Some(result) = &x.tool_use_result {
+                            exchange_blocks(&mut blocks, index, answer_texts(result));
+                        }
                         if let Some(result) =
                             json.pointer(&format!("/message/content/{index}/content"))
                         {
@@ -71,4 +83,14 @@ fn message_blocks(x: &Line, json: &Value) -> Result<Vec<ResolvedBlock>, AdapterE
     }
 
     Ok(blocks)
+}
+
+fn exchange_blocks(blocks: &mut Vec<ResolvedBlock>, content_index: u32, texts: Vec<&str>) {
+    for (n, text) in texts.into_iter().enumerate() {
+        blocks.push(verbatim_block(
+            exchange_index(content_index, n),
+            BlockKind::Text,
+            text,
+        ));
+    }
 }

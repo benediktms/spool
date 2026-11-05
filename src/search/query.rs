@@ -128,6 +128,12 @@ const INJECTED_TAGS: [&str; 4] = [
     "system-reminder",
     "user_instructions",
 ];
+const COMMAND_WRAPPERS: [&str; 4] = [
+    "<command-name>",
+    "<command-message>",
+    "<local-command-stdout>",
+    "<local-command-caveat>",
+];
 const AGENTS_PREAMBLE: &str = "# AGENTS.md instructions";
 
 fn literal_citation_markers(text: &str) -> std::collections::HashSet<usize> {
@@ -291,7 +297,8 @@ pub fn strip_injected(text: &str) -> String {
 pub fn title_from_prompt(text: &str) -> Option<String> {
     let cleaned = strip_raw(text);
     let t = cleaned.trim();
-    (!t.is_empty()).then(|| t[..floor_boundary(t, 120)].trim_end().to_string())
+    let command = COMMAND_WRAPPERS.iter().any(|tag| t.starts_with(tag));
+    (!t.is_empty() && !command).then(|| t[..floor_boundary(t, 120)].trim_end().to_string())
 }
 
 /// A window of at most `max` bytes of the cleaned `body` (char boundaries), centred on `focus` (byte range of the
@@ -461,6 +468,12 @@ mod tests {
         assert_eq!(kept.trim(), "real");
         let doc = "# AGENTS.md instructions for /w\n\n<INSTRUCTIONS>\nrules\n</INSTRUCTIONS>\nask";
         assert_eq!(title_from_prompt(doc).as_deref(), Some("ask"));
+        let login = "<command-name>/login</command-name>\n<command-message>login</command-message>";
+        assert_eq!(title_from_prompt(login), None);
+        assert_eq!(
+            title_from_prompt("<local-command-stdout>Login successful</local-command-stdout>"),
+            None
+        );
         assert_eq!(
             title_from_prompt(&"é".repeat(100)).map(|t| t.len()),
             Some(120)
