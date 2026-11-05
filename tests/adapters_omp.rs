@@ -316,3 +316,39 @@ fn omp_unknown_schema_is_unsupported_and_limits_are_visible() {
         .unwrap();
     assert!(resolved.blocks.is_empty());
 }
+
+#[test]
+fn omp_title_slot_names_the_session_and_metadata_records_are_control() {
+    let bytes = concat!(
+        r#"{"type":"title","v":1,"title":"Slot title","source":"auto","pad":"  "}"#,
+        "\n",
+        r#"{"type":"session","version":3,"id":"s","timestamp":"2026-10-12T00:00:00Z"}"#,
+        "\n",
+        r#"{"type":"session_init","id":"i","parentId":null,"systemPrompt":"MUST_NOT_INDEX_PROMPT","task":"MUST_NOT_INDEX_TASK"}"#,
+        "\n",
+        r#"{"type":"custom_message","id":"c","parentId":"i","customType":"x","content":"MUST_NOT_INDEX_CUSTOM"}"#,
+        "\n",
+        r#"{"type":"title_change","id":"t","parentId":"c","title":"Old title","source":"auto"}"#,
+        "\n",
+        r#"{"type":"message","id":"a","parentId":"t","message":{"role":"assistant","content":[{"type":"thinking","thinking":"MUST_NOT_INDEX_THINKING"},{"type":"text","text":"hi"}]}}"#,
+        "\n",
+    );
+    let (manifest, sink) = parse(&OmpAdapter, bytes.as_bytes());
+    assert_eq!(manifest.native_title.as_deref(), Some("Slot title"));
+    assert_eq!(manifest.counts.unknown_records, 0);
+    assert_eq!(manifest.counts.unknown_blocks, 0);
+    for key in ["i", "c", "t"] {
+        let record = sink.records.iter().find(|r| r.key == key).unwrap();
+        assert_eq!(record.kind, RecordKind::Control);
+    }
+    let texts: Vec<_> = sink
+        .messages
+        .iter()
+        .flat_map(|m| m.blocks.iter().map(|b| b.text.as_str()))
+        .collect();
+    assert_eq!(texts, ["hi"]);
+
+    let untitled = bytes.replacen("Slot title", "", 1);
+    let (manifest, _) = parse(&OmpAdapter, untitled.as_bytes());
+    assert_eq!(manifest.native_title, None);
+}

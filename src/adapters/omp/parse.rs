@@ -7,6 +7,22 @@ use crate::domain::{
     ToolCallMeta, ToolResultMeta, parse_timestamp_ms,
 };
 
+/// Metadata record types written by OMP; they carry ancestry but no conversational text.
+const CONTROL_TYPES: &[&str] = &[
+    "custom",
+    "custom_message",
+    "credential_pin",
+    "mode_change",
+    "model_change",
+    "model_usage",
+    "reset_boundary",
+    "service_tier_change",
+    "session_init",
+    "thinking_level_change",
+    "title_change",
+    "ttsr_injection",
+];
+
 fn record_meta(
     cx: &ParseCx<'_>,
     entry: &Entry,
@@ -51,6 +67,7 @@ impl LineParser for ParseState {
             if e.slot_version != Some(1) {
                 cx.coverage = Coverage::Unsupported;
             }
+            cx.session.title = e.title.filter(|title| !title.is_empty());
             Ok(())
         } else if is_session {
             handle_session(cx, e, timestamp, raw)
@@ -89,7 +106,7 @@ fn handle_session(
             SessionKind::Interactive
         },
         native_id: e.id,
-        title: e.title,
+        title: cx.session.title.take().or(e.title),
         cwd: e.cwd,
         remote: None,
         parent_native_session: e.parent_session,
@@ -149,6 +166,7 @@ impl ParseState {
                 emission.results.push(self.tool_result(e.message, meta));
             }
             Some("title") => meta.kind = RecordKind::Header,
+            Some(ty) if CONTROL_TYPES.contains(&ty) => {}
             Some(_) => {
                 meta.kind = RecordKind::Control;
                 cx.counts.unknown_records += 1;
@@ -265,7 +283,7 @@ fn content_blocks(
                 tool_name: block.name.unwrap_or_else(|| "unknown".into()),
                 turn_id: meta.turn_id.clone(),
             }),
-            Some("image") => {}
+            Some("image" | "thinking") => {}
             Some(_) | None => cx.counts.unknown_blocks += 1,
         }
     }

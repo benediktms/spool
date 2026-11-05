@@ -69,7 +69,7 @@ struct Block {
 }
 impl JsonlHarness for OmpAdapter {
     const KIND: HarnessKind = HarnessKind::Omp;
-    const PARSER_VERSION: &'static str = "omp-v3-title-slot-v1";
+    const PARSER_VERSION: &'static str = "omp-v3-title-slot-v2";
     const MALFORMED_DETAIL: &'static str = "record is malformed or unsupported";
     type Parser = parse::ParseState;
 
