@@ -1,4 +1,4 @@
-use super::jsonl::{JsonlHarness, first_line};
+use super::jsonl::{JsonlHarness, first_line, non_empty, strings};
 use super::{AdapterError, ProbeResult};
 use crate::domain::{HarnessKind, ResolvedBlock};
 use serde::Deserialize;
@@ -36,6 +36,8 @@ struct Message {
     call_id: Option<String>,
     #[serde(rename = "isError")]
     is_error: Option<bool>,
+    #[serde(rename = "toolName")]
+    tool_name: Option<String>,
     #[serde(flatten)]
     _rest: HashMap<String, IgnoredAny>,
 }
@@ -69,7 +71,7 @@ struct Block {
 }
 impl JsonlHarness for OmpAdapter {
     const KIND: HarnessKind = HarnessKind::Omp;
-    const PARSER_VERSION: &'static str = "omp-v3-title-slot-v1";
+    const PARSER_VERSION: &'static str = "omp-v3-title-slot-v3";
     const MALFORMED_DETAIL: &'static str = "record is malformed or unsupported";
     type Parser = parse::ParseState;
 
@@ -102,4 +104,34 @@ impl JsonlHarness for OmpAdapter {
     ) -> Result<(Option<String>, Vec<ResolvedBlock>), AdapterError> {
         resolve::resolve_line(line)
     }
+}
+
+/// The only OMP tool whose question and answer text is conversational.
+const ASK_TOOL: &str = "ask";
+
+/// Question strings of `ask` arguments, in order. Options, headers and recommendations are ignored.
+fn question_texts(arguments: &Value) -> Vec<&str> {
+    let questions = arguments.get("questions").and_then(Value::as_array);
+    non_empty(
+        questions
+            .into_iter()
+            .flatten()
+            .filter_map(|question| question.get("question")?.as_str())
+            .collect(),
+    )
+}
+
+/// Selected options, typed input and notes of `ask` result details, in question order.
+fn answer_texts(details: &Value) -> Vec<&str> {
+    let answers = match details.get("results").and_then(Value::as_array) {
+        Some(results) => results.iter().collect(),
+        None => vec![details],
+    };
+    let mut texts = Vec::new();
+    for answer in answers {
+        for field in ["selectedOptions", "customInput", "note"] {
+            texts.extend(strings(answer.get(field)));
+        }
+    }
+    non_empty(texts)
 }

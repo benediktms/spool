@@ -1,4 +1,4 @@
-use super::jsonl::{JsonlHarness, first_line};
+use super::jsonl::{JsonlHarness, exchange_index, first_line, non_empty, strings};
 use super::{AdapterError, ProbeResult};
 use crate::domain::{HarnessKind, ResolvedBlock};
 use serde::Deserialize;
@@ -125,27 +125,6 @@ impl JsonlHarness for ClaudeAdapter {
 
 /// The only Claude tool whose question and answer text is conversational.
 const USER_INPUT_TOOL: &str = "AskUserQuestion";
-const MAX_EXCHANGE_TEXTS: usize = 0xFFFF;
-
-/// Block `n` of an exchange inside content block `content`. The first block keeps the content
-/// index so it matches ordinary text numbering.
-fn exchange_index(content: u32, n: usize) -> u32 {
-    content.saturating_add(u32::try_from(n).unwrap_or(0) << 16)
-}
-
-fn strings(value: Option<&Value>) -> Vec<&str> {
-    match value {
-        Some(Value::String(text)) => vec![text],
-        Some(Value::Array(items)) => items.iter().filter_map(Value::as_str).collect(),
-        _ => Vec::new(),
-    }
-}
-
-fn non_empty(mut texts: Vec<&str>) -> Vec<&str> {
-    texts.retain(|text| !text.is_empty());
-    texts.truncate(MAX_EXCHANGE_TEXTS);
-    texts
-}
 
 /// Question strings of an `AskUserQuestion` input, in order. Options and headers are ignored.
 fn question_texts(input: &Value) -> Vec<&str> {

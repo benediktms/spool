@@ -187,6 +187,28 @@ impl Occurrences {
     }
 }
 
+const MAX_EXCHANGE_TEXTS: usize = 0xFFFF;
+
+/// Block `n` of an exchange inside content block `content`. The first block keeps the content
+/// index so it matches ordinary text numbering.
+pub(crate) fn exchange_index(content: u32, n: usize) -> u32 {
+    content.saturating_add(u32::try_from(n).unwrap_or(0) << 16)
+}
+
+pub(crate) fn strings(value: Option<&Value>) -> Vec<&str> {
+    match value {
+        Some(Value::String(text)) => vec![text],
+        Some(Value::Array(items)) => items.iter().filter_map(Value::as_str).collect(),
+        _ => Vec::new(),
+    }
+}
+
+pub(crate) fn non_empty(mut texts: Vec<&str>) -> Vec<&str> {
+    texts.retain(|text| !text.is_empty());
+    texts.truncate(MAX_EXCHANGE_TEXTS);
+    texts
+}
+
 pub(crate) fn first_line(header: &[u8]) -> &[u8] {
     header.split(|b| *b == b'\n').next().unwrap_or_default()
 }
