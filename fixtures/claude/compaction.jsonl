@@ -1,0 +1,6 @@
+{"type":"user","uuid":"cc-u1","parentUuid":null,"sessionId":"claude-compact-1","timestamp":"2026-10-12T09:00:01Z","cwd":"/tmp/project","message":{"role":"user","content":"before compaction question"}}
+{"type":"assistant","uuid":"cc-a1","parentUuid":"cc-u1","sessionId":"claude-compact-1","message":{"id":"cc-m1","role":"assistant","content":[{"type":"text","text":"before compaction answer"}]}}
+{"type":"system","subtype":"compact_boundary","content":"Conversation compacted","level":"info","uuid":"cc-boundary","parentUuid":null,"logicalParentUuid":"cc-a1","isSidechain":false,"sessionId":"claude-compact-1","compactMetadata":{"trigger":"auto","preTokens":1000}}
+{"type":"user","uuid":"cc-summary","parentUuid":"cc-boundary","isSidechain":false,"isCompactSummary":true,"isVisibleInTranscriptOnly":true,"sessionId":"claude-compact-1","message":{"role":"user","content":"MUST_NOT_INDEX_COMPACT_SUMMARY This session is being continued from a previous conversation."}}
+{"type":"user","uuid":"cc-u2","parentUuid":"cc-summary","sessionId":"claude-compact-1","message":{"role":"user","content":"after compaction question"}}
+{"type":"assistant","uuid":"cc-a2","parentUuid":"cc-u2","sessionId":"claude-compact-1","message":{"id":"cc-m2","role":"assistant","content":[{"type":"text","text":"after compaction answer"}]}}

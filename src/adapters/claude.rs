@@ -17,6 +17,11 @@ pub(crate) struct Line {
     timestamp: Option<String>,
     #[serde(rename = "parentUuid")]
     parent: Option<String>,
+    #[serde(rename = "logicalParentUuid")]
+    logical_parent: Option<String>,
+    subtype: Option<String>,
+    #[serde(rename = "isCompactSummary")]
+    is_compact_summary: Option<bool>,
     #[serde(rename = "sessionId")]
     session_id: Option<String>,
     cwd: Option<String>,
@@ -60,7 +65,8 @@ struct Block {
 
 impl JsonlHarness for ClaudeAdapter {
     const KIND: HarnessKind = HarnessKind::Claude;
-    const PARSER_VERSION: &'static str = "claude-jsonl-session-browser-2026-10.1+late-cwd";
+    const PARSER_VERSION: &'static str =
+        "claude-jsonl-session-browser-2026-10.1+late-cwd+compaction";
     const MALFORMED_DETAIL: &'static str = "invalid complete JSONL record";
     type Parser = parse::ParseState;
 

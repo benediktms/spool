@@ -40,7 +40,7 @@ impl LineParser for ParseState {
         let mut meta = RecordMeta {
             key,
             native_id: x.uuid.clone(),
-            parent_key: x.parent.clone(),
+            parent_key: x.parent.clone().or_else(|| x.logical_parent.clone()),
             kind: RecordKind::Control,
             timestamp,
             turn_id: None,
@@ -106,7 +106,7 @@ impl ParseState {
             .as_ref()
             .and_then(|message| message.role.as_deref())
             .or(x.ty.as_deref());
-        if cx.session.kind == SessionKind::Subagent {
+        if cx.session.kind == SessionKind::Subagent || x.is_compact_summary == Some(true) {
             None
         } else if role == Some("user") {
             Some(key.to_owned())
@@ -123,6 +123,16 @@ impl ParseState {
         x: &mut Line,
         meta: &mut RecordMeta,
     ) -> Projection {
+        if x.is_compact_summary == Some(true)
+            || (x.ty.as_deref() == Some("system")
+                && x.subtype.as_deref() == Some("compact_boundary"))
+        {
+            meta.kind = RecordKind::Summary;
+            return Projection {
+                identity: None,
+                emission: Emission::default(),
+            };
+        }
         match x.ty.as_deref() {
             Some("user" | "assistant")
                 if x.is_meta != Some(true)

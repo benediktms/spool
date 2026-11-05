@@ -225,3 +225,29 @@ fn claude_cwd_comes_from_the_first_line_that_has_one() {
     assert_eq!(manifest.native_session_id, "s1");
     assert_eq!(manifest.cwd.as_deref(), Some("/work/a"));
 }
+
+#[test]
+fn claude_compaction_is_summary_and_keeps_one_chain() {
+    let bytes = include_bytes!("../fixtures/claude/compaction.jsonl");
+    let (_, sink) = parse(&ClaudeAdapter, bytes);
+    let text: Vec<_> = sink
+        .messages
+        .iter()
+        .flat_map(|message| message.blocks.iter().map(|block| block.text.as_str()))
+        .collect();
+    assert_eq!(
+        text,
+        [
+            "before compaction question",
+            "before compaction answer",
+            "after compaction question",
+            "after compaction answer",
+        ]
+    );
+    let kind = |key: &str| sink.records.iter().find(|r| r.key == key).unwrap().kind;
+    assert_eq!(kind("cc-boundary"), RecordKind::Summary);
+    assert_eq!(kind("cc-summary"), RecordKind::Summary);
+    let (graph, warnings) = SessionGraph::build(&sink.records, &sink.messages);
+    assert!(warnings.is_empty());
+    assert_eq!(graph.path_to("cc-a2"), ["cc-u1", "cc-a1", "cc-u2", "cc-a2"]);
+}
