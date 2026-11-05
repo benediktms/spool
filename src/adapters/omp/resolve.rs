@@ -1,6 +1,6 @@
-use super::{Content, Entry, TextEntry};
+use super::{ASK_TOOL, Content, Entry, TextEntry, answer_texts, question_texts};
 use crate::adapters::AdapterError;
-use crate::adapters::jsonl::{json_block, tool_result_block, verbatim_block};
+use crate::adapters::jsonl::{exchange_index, json_block, tool_result_block, verbatim_block};
 use crate::domain::{BlockKind, ResolvedBlock};
 use serde_json::Value;
 
@@ -29,7 +29,13 @@ fn project_blocks(
     let role = message.role.as_deref();
 
     if role == Some("toolResult") || ent.ty.as_deref() == Some("toolResult") {
-        tool_result_blocks(json)
+        let mut blocks = tool_result_blocks(json)?;
+        if message.tool_name.as_deref() == Some(ASK_TOOL)
+            && let Some(details) = json.pointer("/message/details")
+        {
+            exchange_blocks(&mut blocks, 0, answer_texts(details));
+        }
+        Ok(blocks)
     } else if matches!(role, Some("user" | "assistant")) {
         authored_blocks(line, json)
     } else {
@@ -70,6 +76,9 @@ fn authored_blocks(line: &[u8], json: &Value) -> Result<Vec<ResolvedBlock>, Adap
                         if let Some(arguments) =
                             json.pointer(&format!("/message/content/{i}/arguments"))
                         {
+                            if block.name.as_deref() == Some(ASK_TOOL) {
+                                exchange_blocks(&mut blocks, i as u32, question_texts(arguments));
+                            }
                             blocks.push(json_block(
                                 i as u32,
                                 BlockKind::ToolCall,
@@ -85,4 +94,14 @@ fn authored_blocks(line: &[u8], json: &Value) -> Result<Vec<ResolvedBlock>, Adap
         None => {}
     }
     Ok(blocks)
+}
+
+fn exchange_blocks(blocks: &mut Vec<ResolvedBlock>, content_index: u32, texts: Vec<&str>) {
+    for (n, text) in texts.into_iter().enumerate() {
+        blocks.push(verbatim_block(
+            exchange_index(content_index, n),
+            BlockKind::Text,
+            text,
+        ));
+    }
 }

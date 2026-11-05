@@ -231,7 +231,7 @@ These signatures are architectural sketches; production types should reflect own
 | Genuine user conversational text | Include | Conversation view |
 | Assistant text, including commentary and final answers | Include | Conversation view |
 | Code blocks, errors, and paths written in conversational text | Include verbatim | Conversation view |
-| Structured user-input exchanges (`AskUserQuestion`, `request_user_input`) | Include question text as assistant and selected answers and user notes as user; exclude options, descriptions, headers, and ids | Conversation view |
+| Structured user-input exchanges (`AskUserQuestion`, `request_user_input`, OhMyPi `ask`) | Include question text as assistant and selected answers and user notes as user; exclude options, descriptions, headers, and ids | Conversation view |
 | Tool invocation arguments | Exclude | With-tools/raw view |
 | Tool result text | Exclude, even inside a user-role envelope | With-tools/raw view |
 | Reasoning/thinking blocks | Exclude | Raw view only if explicitly enabled |

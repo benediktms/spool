@@ -352,3 +352,143 @@ fn omp_title_slot_names_the_session_and_metadata_records_are_control() {
     let (manifest, _) = parse(&OmpAdapter, untitled.as_bytes());
     assert_eq!(manifest.native_title, None);
 }
+
+#[test]
+fn omp_ask_exchange_is_conversational_and_resolves_identically() {
+    use serde_json::json;
+    let q1 = "Where should the \"files\" live?\nPick one.";
+    let q2 = "Which format?";
+    let q3 = "Ship now?";
+    let ask = |id: &str, parent: &str, call: &str, questions: serde_json::Value| {
+        json!({"type":"message","id":id,"parentId":parent,"message":{"role":"assistant","content":[
+            {"type":"text","text":"Let me ask."},
+            {"type":"toolCall","id":call,"name":"ask","arguments":{"i":"MUST_NOT_INDEX_INTENT","questions":questions}}]}})
+    };
+    let result = |id: &str, parent: &str, call: &str, tool: &str, details: serde_json::Value| {
+        json!({"type":"message","id":id,"parentId":parent,"message":{"role":"toolResult","toolCallId":call,"toolName":tool,
+            "content":[{"type":"text","text":"MUST_NOT_INDEX_RESULT_TEXT"}],"details":details}})
+    };
+    let lines = [
+        json!({"type":"session","version":3,"id":"s","timestamp":"2026-10-12T00:00:00Z"}),
+        json!({"type":"message","id":"u1","parentId":null,"message":{"role":"user","content":"start"}}),
+        ask(
+            "a1",
+            "u1",
+            "ask-1",
+            json!([
+            {"id":"where","header":"MUST_NOT_INDEX_HEADER","question":q1,"recommended":0,
+             "options":[{"label":"MUST_NOT_INDEX_OPTION","description":"MUST_NOT_INDEX_DESCRIPTION"}]},
+            {"id":"fmt","question":q2,"options":[]}]),
+        ),
+        result(
+            "r1",
+            "a1",
+            "ask-1",
+            "ask",
+            json!({"results":[
+            {"id":"where","question":q1,"options":["MUST_NOT_INDEX_OPTION"],"multi":false,
+             "selectedOptions":["~/.agents/people/"],"note":"my own note"},
+            {"id":"fmt","question":q2,"options":[],"multi":false,"selectedOptions":[],"customInput":"toml"}]}),
+        ),
+        ask(
+            "a2",
+            "r1",
+            "ask-2",
+            json!([{"id":"ship","question":q3,"options":[]}]),
+        ),
+        result(
+            "r2",
+            "a2",
+            "ask-2",
+            "ask",
+            json!({"question":q3,"options":[],"multi":true,
+            "selectedOptions":["yes","today"]}),
+        ),
+        json!({"type":"message","id":"a3","parentId":"r2","message":{"role":"assistant","content":[
+            {"type":"toolCall","id":"other-1","name":"bash","arguments":{"questions":[{"question":"MUST_NOT_INDEX_OTHER_TOOL"}]}}]}}),
+        result(
+            "r3",
+            "a3",
+            "other-1",
+            "bash",
+            json!({"selectedOptions":["MUST_NOT_INDEX_OTHER_ANSWER"]}),
+        ),
+    ];
+    let bytes = lines
+        .iter()
+        .map(|line| format!("{line}\n"))
+        .collect::<String>()
+        .into_bytes();
+    let (_, sink) = parse(&OmpAdapter, &bytes);
+
+    let exchange: Vec<_> = sink
+        .messages
+        .iter()
+        .filter(|message| message.record_key != "u1")
+        .map(|message| {
+            (
+                message.record_key.as_str(),
+                message.role,
+                message
+                    .blocks
+                    .iter()
+                    .map(|block| block.text.as_str())
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        exchange,
+        [
+            ("a1", Role::Assistant, vec!["Let me ask.", q1, q2]),
+            (
+                "r1",
+                Role::User,
+                vec!["~/.agents/people/", "my own note", "toml"]
+            ),
+            ("a2", Role::Assistant, vec!["Let me ask.", q3]),
+            ("r2", Role::User, vec!["yes", "today"]),
+        ]
+    );
+    let kind = |key: &str| sink.records.iter().find(|r| r.key == key).unwrap().kind;
+    assert_eq!(kind("r1"), RecordKind::Message);
+    assert_eq!(kind("a3"), RecordKind::ToolCall);
+    assert_eq!(kind("r3"), RecordKind::ToolResult);
+    assert_eq!(sink.results.len(), 3);
+    let answer = sink.results.iter().find(|r| r.record_key == "r1").unwrap();
+    assert_eq!(answer.turn_id.as_deref(), Some("u1"));
+    assert_eq!(
+        answer.call.as_ref().map(|(k, i)| (k.as_str(), *i)),
+        Some(("a1", 1))
+    );
+
+    let indexed = sink
+        .messages
+        .iter()
+        .flat_map(|m| m.blocks.iter().map(|b| b.text.as_str()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!indexed.contains("MUST_NOT_INDEX"));
+
+    for record in &sink.records {
+        let resolved = OmpAdapter
+            .resolve_locator(
+                &mut Cursor::new(bytes.as_slice()),
+                &record.locator,
+                &record.digest,
+                1024 * 1024,
+            )
+            .unwrap();
+        for message in sink.messages.iter().filter(|m| m.record_key == record.key) {
+            for block in &message.blocks {
+                let found = resolved
+                    .blocks
+                    .iter()
+                    .find(|b| b.index == block.index && b.kind == BlockKind::Text)
+                    .unwrap();
+                assert_eq!(found.bytes, block.text.as_bytes());
+                assert_eq!(found.fidelity, Fidelity::Verbatim);
+            }
+        }
+    }
+}

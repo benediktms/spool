@@ -1,11 +1,14 @@
-use super::{Block, Content, Entry, Message, TextEntry};
+use super::{ASK_TOOL, Block, Content, Entry, Message, TextEntry, answer_texts, question_texts};
 use crate::adapters::AdapterError;
-use crate::adapters::jsonl::{Emission, LineParser, ParseCx, RawRecord, SessionFacts};
+use crate::adapters::jsonl::{
+    Emission, LineParser, ParseCx, RawRecord, SessionFacts, exchange_index,
+};
 use crate::adapters::lineage::RecordLineage;
 use crate::domain::{
     BlockOrigin, Coverage, MessageEntry, RecordKind, RecordMeta, Role, SessionKind, TextBlock,
     ToolCallMeta, ToolResultMeta, parse_timestamp_ms,
 };
+use serde_json::Value;
 
 /// Metadata record types written by OMP; they carry ancestry but no conversational text.
 const CONTROL_TYPES: &[&str] = &[
@@ -161,10 +164,7 @@ impl ParseState {
         match e.ty.as_deref() {
             Some("message") => self.project_message(cx, e.message, meta, line, &mut emission),
             Some("compaction" | "branch_summary") => meta.kind = RecordKind::Summary,
-            Some("toolResult") => {
-                meta.kind = RecordKind::ToolResult;
-                emission.results.push(self.tool_result(e.message, meta));
-            }
+            Some("toolResult") => self.project_result(e.message, meta, line, &mut emission),
             Some("title") => meta.kind = RecordKind::Header,
             Some(ty) if CONTROL_TYPES.contains(&ty) => {}
             Some(_) => {
@@ -191,13 +191,47 @@ impl ParseState {
             return;
         };
         match message.role.as_deref() {
-            Some("toolResult") => {
-                meta.kind = RecordKind::ToolResult;
-                emission.results.push(self.tool_result(Some(message), meta));
-            }
+            Some("toolResult") => self.project_result(Some(message), meta, line, emission),
             Some("user") => project_authored(cx, Role::User, meta, line, emission),
             Some("assistant") => project_authored(cx, Role::Assistant, meta, line, emission),
             _ => {}
+        }
+    }
+
+    /// An answered `ask` result is the user's reply; other results carry no conversational text.
+    fn project_result(
+        &self,
+        message: Option<Message>,
+        meta: &mut RecordMeta,
+        line: &[u8],
+        emission: &mut Emission,
+    ) {
+        let asked = message
+            .as_ref()
+            .is_some_and(|message| message.tool_name.as_deref() == Some(ASK_TOOL));
+        meta.kind = RecordKind::ToolResult;
+        emission.results.push(self.tool_result(message, meta));
+        if !asked {
+            return;
+        }
+        let json = serde_json::from_slice::<Value>(line).ok();
+        let answers = json
+            .as_ref()
+            .and_then(|json| json.pointer("/message/details"))
+            .map(answer_texts)
+            .unwrap_or_default();
+        let mut blocks = Vec::new();
+        push_exchange(&mut blocks, 0, answers);
+        if !blocks.is_empty() {
+            meta.kind = RecordKind::Message;
+            emission.message = Some(MessageEntry {
+                record_key: meta.key.clone(),
+                role: Role::User,
+                phase: None,
+                blocks,
+                attachments: Vec::new(),
+                supersedes: vec![],
+            });
         }
     }
 
@@ -239,7 +273,9 @@ fn project_authored(
             origin: BlockOrigin::Authored,
             text,
         }],
-        Some(Content::Blocks(blocks)) => content_blocks(cx, blocks, meta, &mut emission.calls),
+        Some(Content::Blocks(blocks)) => {
+            content_blocks(cx, blocks, meta, line, &mut emission.calls)
+        }
         None => Vec::new(),
     };
 
@@ -262,9 +298,11 @@ fn content_blocks(
     cx: &mut ParseCx<'_>,
     blocks: Vec<Block>,
     meta: &RecordMeta,
+    line: &[u8],
     calls: &mut Vec<ToolCallMeta>,
 ) -> Vec<TextBlock> {
     let mut text_blocks = Vec::new();
+    let mut json = None;
     for (i, block) in blocks.into_iter().enumerate() {
         match block.ty.as_deref() {
             Some("text") => {
@@ -276,18 +314,40 @@ fn content_blocks(
                     });
                 }
             }
-            Some("toolCall") => calls.push(ToolCallMeta {
-                record_key: meta.key.clone(),
-                block_index: i as u32,
-                native_call_id: block.id.or(block.call_id),
-                tool_name: block.name.unwrap_or_else(|| "unknown".into()),
-                turn_id: meta.turn_id.clone(),
-            }),
+            Some("toolCall") => {
+                if block.name.as_deref() == Some(ASK_TOOL) {
+                    let json = json.get_or_insert_with(|| {
+                        serde_json::from_slice::<Value>(line).unwrap_or_default()
+                    });
+                    if let Some(arguments) =
+                        json.pointer(&format!("/message/content/{i}/arguments"))
+                    {
+                        push_exchange(&mut text_blocks, i as u32, question_texts(arguments));
+                    }
+                }
+                calls.push(ToolCallMeta {
+                    record_key: meta.key.clone(),
+                    block_index: i as u32,
+                    native_call_id: block.id.or(block.call_id),
+                    tool_name: block.name.unwrap_or_else(|| "unknown".into()),
+                    turn_id: meta.turn_id.clone(),
+                })
+            }
             Some("image" | "thinking") => {}
             Some(_) | None => cx.counts.unknown_blocks += 1,
         }
     }
     text_blocks
+}
+
+fn push_exchange(blocks: &mut Vec<TextBlock>, content_index: u32, texts: Vec<&str>) {
+    for (n, text) in texts.into_iter().enumerate() {
+        blocks.push(TextBlock {
+            index: exchange_index(content_index, n),
+            origin: BlockOrigin::Authored,
+            text: text.to_owned(),
+        });
+    }
 }
 
 fn publish(cx: &mut ParseCx<'_>, meta: RecordMeta, emission: Emission) -> Result<(), AdapterError> {
