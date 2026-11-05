@@ -122,6 +122,14 @@ impl LineParser for ParseState {
             Some("session_meta") => apply_session_meta(cx, payload),
             Some("response_item") => self.classify_response_item(cx, &mut rec, payload),
             Some("event_msg") => self.classify_event_msg(cx, &mut rec, payload),
+            Some("compacted") => rec.meta.kind = RecordKind::Summary,
+            Some(
+                "turn_context"
+                | "world_state"
+                | "token_usage_record"
+                | "inter_agent_communication_metadata"
+                | "retained_context",
+            ) => {}
             _ => mark_unknown(cx, &mut rec.meta),
         }
 

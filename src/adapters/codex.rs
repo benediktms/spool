@@ -62,7 +62,8 @@ struct Content {
 }
 impl JsonlHarness for CodexAdapter {
     const KIND: HarnessKind = HarnessKind::Codex;
-    const PARSER_VERSION: &'static str = "codex-rollout-cab328f2+git-remote+content-kinds";
+    const PARSER_VERSION: &'static str =
+        "codex-rollout-cab328f2+git-remote+content-kinds+compacted";
     const MALFORMED_DETAIL: &'static str = "invalid complete JSONL rollout line";
     type Parser = parse::ParseState;
 

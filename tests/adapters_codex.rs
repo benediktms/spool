@@ -338,3 +338,36 @@ fn codex_session_meta_git_remote_is_normalized_and_never_keeps_credentials() {
     assert_eq!(manifest.remote.as_deref(), Some("github.com/acme/widgets"));
     assert!(!format!("{manifest:?}").contains("tok3n"));
 }
+
+#[test]
+fn codex_compacted_and_metadata_envelopes_keep_full_coverage() {
+    let bytes = br#"{"type":"session_meta","payload":{"id":"codex-compacted","history_mode":"paginated"}}
+{"type":"turn_context","payload":{"cwd":"/tmp/project","model":"m"}}
+{"type":"world_state","payload":{}}
+{"type":"response_item","payload":{"type":"message","id":"before","role":"user","content":[{"type":"input_text","text":"before compaction"}]}}
+{"type":"token_usage_record","payload":{}}
+{"type":"inter_agent_communication_metadata","payload":{}}
+{"type":"retained_context","payload":{"type":"verified_answer","call_id":"c1","questions":[]}}
+{"type":"compacted","payload":{"message":"MUST_NOT_INDEX_COMPACTED_SENTINEL","replacement_history":[{"type":"message","id":"before","role":"user","content":[{"type":"input_text","text":"before compaction"}]},{"type":"compaction","id":"cmp","encrypted_content":"x"}]}}
+{"type":"response_item","payload":{"type":"message","id":"after","role":"assistant","content":[{"type":"output_text","text":"after compaction"}]}}
+"#;
+    let (manifest, sink) = parse(&CodexAdapter, bytes);
+    assert_eq!(manifest.coverage, Coverage::Complete);
+    assert!(sink.records.iter().all(|r| r.kind != RecordKind::Unknown));
+    assert_eq!(
+        sink.records
+            .iter()
+            .filter(|r| r.kind == RecordKind::Summary)
+            .count(),
+        1
+    );
+    let texts: Vec<_> = sink
+        .messages
+        .iter()
+        .flat_map(|m| m.blocks.iter().map(|b| b.text.as_str()))
+        .collect();
+    assert_eq!(texts, ["before compaction", "after compaction"]);
+    let (graph, warnings) = SessionGraph::build(&sink.records, &sink.messages);
+    assert!(warnings.is_empty());
+    assert_eq!(graph.path_to("after"), ["before", "after"]);
+}
