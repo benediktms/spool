@@ -7,9 +7,7 @@ use super::handle::{HandleError, HandleKey, HandleKind, KeyStore};
 use super::lease::{LeaseManager, LeaseState, PinTarget};
 use super::locator::{Observation, SourceCtx, SourceLimits};
 use super::reader::{PageEnv, RefMaker, SelRef, assemble, record_digest_hex};
-use super::refs::{
-    Anchor, BranchRef, ItemKind, ItemRef, MatchRef, MessageRef, RefHandle, short_digest,
-};
+use super::refs::{Anchor, BranchRef, ItemKind, ItemRef, MatchRef, MessageRef, RefHandle};
 use super::selection::*;
 use super::types::*;
 use crate::adapters::adapter_for;
@@ -462,9 +460,6 @@ impl ReadService {
             snap: &snap,
         };
         verify_digests(&snap, &dec)?;
-        if let Dec::Match { m, .. } = &dec {
-            self.verify_match_content(&snap, m).await?;
-        }
         let sel = match self.resolve_decoded(&snap, &dec, view).await {
             Ok(s) => s,
             Err(SelFail::App(e)) => return Err(e),
@@ -583,12 +578,7 @@ impl ReadService {
                 branch,
                 ..
             } => {
-                let mut recs: Vec<String> = Vec::new();
-                for s in &m.spans {
-                    if !recs.contains(&s.r) {
-                        recs.push(s.r.clone());
-                    }
-                }
+                let recs: Vec<String> = m.records.iter().map(|r| r.key.clone()).collect();
                 resolve_window(
                     snap,
                     SelKind::Match,
@@ -685,43 +675,6 @@ impl ReadService {
             Snap::load(&self.index.reader, &staged.snapshot_id).await?,
             vec![],
         ))
-    }
-
-    async fn verify_match_content(&self, snap: &Snap, m: &MatchRef) -> Result<(), AppError> {
-        let mut frames: Vec<u8> = Vec::new();
-        for s in &m.spans {
-            let text: Option<String> = sqlx::query_scalar(
-                "SELECT text FROM blocks WHERE snapshot_id = ? AND record_key = ? AND idx = ?",
-            )
-            .bind(&snap.id)
-            .bind(&s.r)
-            .bind(s.b as i64)
-            .fetch_optional(&self.index.reader)
-            .await
-            .map_err(storage_err)?;
-            let bytes = text
-                .as_ref()
-                .and_then(|t| t.as_bytes().get(s.s as usize..s.e as usize));
-            let Some(bytes) = bytes else {
-                return Err(app_err(
-                    "STALE_REFERENCE",
-                    "the matched span no longer exists in this snapshot",
-                    false,
-                    "re_search",
-                ));
-            };
-            frames.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
-            frames.extend_from_slice(bytes);
-        }
-        if short_digest(&frames) != m.content {
-            return Err(app_err(
-                "STALE_REFERENCE",
-                "the matched content does not match the reference",
-                false,
-                "re_search",
-            ));
-        }
-        Ok(())
     }
 
     // -----------------------------------------------------------------------------------------
@@ -948,8 +901,22 @@ impl ReadService {
         let h =
             RefHandle::decode(key, HandleKind::Match, token).map_err(|e| handle_err(e, false))?;
         let payload = self.leases.get_ref(&h.lease, h.ref_id, "match").await?;
-        let m: MatchRef =
-            serde_json::from_slice(&payload).map_err(|_| invalid("reference is not valid"))?;
+        let m: MatchRef = serde_json::from_slice(&payload).map_err(|_| {
+            app_err(
+                "STALE_REFERENCE",
+                "the match reference uses an obsolete payload",
+                false,
+                "re_search",
+            )
+        })?;
+        if m.version != 2 || m.records.is_empty() {
+            return Err(app_err(
+                "STALE_REFERENCE",
+                "the match reference uses an obsolete payload",
+                false,
+                "re_search",
+            ));
+        }
         let anchor = Anchor {
             lease: h.lease,
             manifest: m.manifest.clone(),
@@ -1027,6 +994,19 @@ fn verify_digests(snap: &Snap, dec: &Dec) -> Result<(), AppError> {
         }
     };
     match dec {
+        Dec::Match { m, .. } => {
+            for record in &m.records {
+                if check(&record.key, &record.digest).is_err() {
+                    return Err(app_err(
+                        "STALE_REFERENCE",
+                        "the matched record changed",
+                        false,
+                        "re_search",
+                    ));
+                }
+            }
+            Ok(())
+        }
         Dec::Message { m, .. } => check(&m.record, &m.digest),
         Dec::Range { from, through, .. } => {
             check(&from.record, &from.digest).and(check(&through.record, &through.digest))

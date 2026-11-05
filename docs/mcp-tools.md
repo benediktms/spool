@@ -51,18 +51,20 @@ Input (unknown fields are rejected; exactly one of `query` or `queries` is requi
 | `projects` | 1 to 16 entries, each a project name (`app-memberships`, case-insensitive), `owner/repo` (any host), a git URL, or an absolute path inside a project. Matches of several entries are unioned |
 | `after`, `before`, `include_unknown_time` | absolute RFC 3339 timestamps only; relative dates exist only in the CLI |
 | `prefer_recent`, `limit`, `matches_per_session`, `debug_scores` | ranking and size controls; `limit` above 50 and `matches_per_session` above 3 are clamped with a `limit_clamped` warning, zero is rejected |
+| `preview_target_bytes` | soft target for each preview, 256 through 8,192. Default 1,200 |
+| `max_bytes` | serialized response budget, 4,096 through the server cap. Default is the server cap, normally 65,536 |
 
 Output: `mode_requested`, `mode_used`, `index_epoch`, `coverage` (only when degraded: pending sessions, chunks without vectors, or a fallback mode; indexed sessions, active/embedded
 chunks, pending sessions, last discovery), `results` (session identity and title, `matches`
-with `match_ref`, `match_ref_expires_at`, optional `branch_ref`, excerpt of at most 1,200 bytes,
-`matched_by`) and `project` (`name`, `remote`; null when unknown) per session, `warnings`, `truncated`, and `resolved_projects` (per `projects` entry, the projects it matched; absent without the filter). An entry that matches nothing adds a `project_not_found` warning; when no entry matches, the result is empty (the search never widens to all projects). Default response cap 64 KiB.
+with `match_ref`, `match_ref_expires_at`, optional `branch_ref`, nullable `preview: {text, clipped}`,
+`matched_by`) and `project` (`name`, `remote`; null when unknown) per session, `warnings`, `truncated`, and `resolved_projects` (per `projects` entry, the projects it matched; absent without the filter). An entry that matches nothing adds a `project_not_found` warning; when no entry matches, the result is empty (the search never widens to all projects). Output schema version is 2. Reconnect to obtain the updated tool schema.
 
 Behaviour worth knowing:
 
 * `title` is the native title (`title_origin = "native"`), else the first user prompt cut to 120 bytes
-  (`title_origin = "first_prompt"`). Excerpts are centred on the matched span; injected blocks
+  (`title_origin = "first_prompt"`). Previews contain a few complete passages separated by an ellipsis. Spool removes injected blocks
   (`<oai-mem-citation>`, `<environment_context>`, `<system-reminder>`, `<user_instructions>`, the
-  `# AGENTS.md instructions` preamble) are removed from excerpts and titles, never from the index.
+  `# AGENTS.md instructions` preamble) from previews and titles, never from the index. A hard passage split sets `clipped`. Extra conversation outside the passage does not. The budget can omit previews before matches, with omissions reported in `warnings` and `truncated`. References remain usable when previews are null. Old match payloads return `STALE_REFERENCE` with recovery `re_search`.
 
 * `hybrid` falls back to `lexical` when a query embedding cannot be obtained and says so with a
   `query_embedding_unavailable` warning and `mode_used = "lexical"`.

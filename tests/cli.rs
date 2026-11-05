@@ -475,6 +475,22 @@ fn search_and_index_requests_resolve_relative_dates() {
         )
         .is_err()
     );
+    assert_eq!(
+        search_request(
+            &search_args(&["q", "--preview-target-bytes", "256", "--max-bytes", "4096"]),
+            NOW,
+            UTC
+        )
+        .unwrap(),
+        json!({"query":"q", "preview_target_bytes":256, "max_bytes":4096})
+    );
+    for args in [
+        vec!["q", "--preview-target-bytes", "255"],
+        vec!["q", "--preview-target-bytes", "8193"],
+        vec!["q", "--max-bytes", "4095"],
+    ] {
+        assert!(search_request(&search_args(&args), NOW, UTC).is_err());
+    }
     assert!(search_request(&search_args(&["  "]), NOW, UTC).is_err());
     assert!(search_request(&search_args(&["q", "--since", "yesterday"]), NOW, UTC).is_err());
 
@@ -948,7 +964,7 @@ fn fake_daemon(home: &Path) -> (Seen, tokio::sync::watch::Sender<bool>) {
                     "tool:search_sessions" => Ok(json!({
                     "mode_requested":"hybrid","mode_used":"lexical","warnings":[{"code":"query_embedding_unavailable"}],
                     "results":[{"session_id":"ss_a","source":"omp","title":"Synthetic","last_activity_at":"2026-10-10T00:00:00Z",
-                                "matches":[{"match_ref":"MREF","excerpt":"USER: hello\nASSISTANT: world"}]}],
+                                "matches":[{"match_ref":"MREF","preview":{"text":"USER: hello\nASSISTANT: world","clipped":false}},{"match_ref":"OMITTED","preview":null}]}],
                     "truncated":false})),
                     "tool:read_session" => Ok(json!({"echo": args})),
                     "status" => Ok(
@@ -1092,7 +1108,10 @@ async fn search_read_and_errors_flow_through_the_socket() {
     );
     assert!(t.contains("ss_a  [omp]  Synthetic"), "{t}");
     assert!(
-        t.contains("match_ref: MREF") && t.contains("USER: hello ASSISTANT: world"),
+        t.contains("match_ref: MREF")
+            && t.contains("USER: hello ASSISTANT: world")
+            && t.contains("match_ref: OMITTED")
+            && t.contains("preview:   (omitted; read using match_ref)"),
         "{t}"
     );
 

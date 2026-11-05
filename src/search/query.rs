@@ -284,6 +284,7 @@ fn strip_raw(text: &str) -> String {
 }
 
 /// Remove injected blocks (tag and content) and the AGENTS.md preamble; returns the input when nothing remains.
+#[cfg(test)]
 pub fn strip_injected(text: &str) -> String {
     let cur = strip_raw(text);
     if cur.trim().is_empty() {
@@ -304,6 +305,7 @@ pub fn title_from_prompt(text: &str) -> Option<String> {
 /// A window of at most `max` bytes of the cleaned `body` (char boundaries), centred on `focus` (byte range of the
 /// matched span in `body`) when given, else on the first occurrence of a lowercase ASCII term.
 /// Returns `(excerpt, truncated)`.
+#[cfg(test)]
 pub fn excerpt(
     body: &str,
     terms: &[String],

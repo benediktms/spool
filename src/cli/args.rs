@@ -163,6 +163,12 @@ pub struct SearchArgs {
     pub until: Option<String>,
     #[arg(long)]
     pub limit: Option<u32>,
+    /// Target preview size in bytes (256-8192).
+    #[arg(long)]
+    pub preview_target_bytes: Option<u32>,
+    /// Maximum serialized search response size in bytes (at least 4096).
+    #[arg(long)]
+    pub max_bytes: Option<u32>,
     /// Print the raw tool result.
     #[arg(long)]
     pub json: bool,

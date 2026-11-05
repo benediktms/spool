@@ -1853,3 +1853,126 @@ async fn swept_lease_fails_short_refs_cleanly() {
         .await;
     assert_eq!(e.code, "CURSOR_EXPIRED");
 }
+
+#[tokio::test]
+async fn obsolete_match_payload_requires_new_search() {
+    let env = Env::new().await;
+    let (sid, _) = env.indexed("old-match.jsonl", &linear(2)).await;
+    let first = env.ok(json!({"session_id": sid})).await;
+    let anchor = env.anchor_of(&first);
+    let payload =
+        serde_json::to_vec(&json!({"m": anchor.manifest, "spans": [], "content": "old"})).unwrap();
+    let ref_id = env
+        .leases
+        .add_ref(&anchor.lease, "match", &payload)
+        .await
+        .unwrap();
+    let token = spool::transcript::refs::RefHandle {
+        lease: anchor.lease,
+        ref_id,
+    }
+    .encode(
+        &env.keys.current(),
+        spool::transcript::handle::HandleKind::Match,
+    );
+    let error = env
+        .err(json!({"session_id": sid, "selection": {"kind": "match", "match_ref": token}}))
+        .await;
+    assert_eq!(error.code, "STALE_REFERENCE");
+    assert_eq!(error.recovery.as_deref(), Some("re_search"));
+}
+
+#[tokio::test]
+async fn search_match_survives_retirement_of_indexed_chunks() {
+    let env = Env::new().await;
+    let (sid, path) = env.indexed("retired-search.jsonl", &linear(4)).await;
+    let search = spool::search::SearchService::new(
+        env.index.clone(),
+        env.cfg.clone(),
+        env.emb.clone(),
+        env.leases.clone(),
+        env.keys.clone(),
+    );
+    let result = search
+        .call(json!({"query":"qwz2", "mode":"lexical"}))
+        .await
+        .unwrap();
+    let token = result["results"][0]["matches"][0]["match_ref"]
+        .as_str()
+        .unwrap();
+    let handle = spool::transcript::refs::RefHandle::decode(
+        &env.keys.current(),
+        spool::transcript::handle::HandleKind::Match,
+        token,
+    )
+    .unwrap();
+    let payload = env
+        .leases
+        .get_ref(&handle.lease, handle.ref_id, "match")
+        .await
+        .unwrap();
+    let reference: spool::transcript::refs::MatchRef = serde_json::from_slice(&payload).unwrap();
+    let snapshot: String =
+        sqlx::query_scalar("SELECT snapshot_id FROM read_manifests WHERE id = ?")
+            .bind(&reference.manifest)
+            .fetch_one(&env.index.reader)
+            .await
+            .unwrap();
+    append(
+        &path,
+        &[omp_msg("m004", Some("m003"), "user", "new content")],
+    );
+    env.index(&sid).await.unwrap();
+    let remaining: i64 = sqlx::query_scalar("SELECT count(*) FROM chunks WHERE snapshot_id = ?")
+        .bind(&snapshot)
+        .fetch_one(&env.index.reader)
+        .await
+        .unwrap();
+    assert_eq!(remaining, 0);
+    let read = env.ok(json!({"session_id":sid,"selection":{"kind":"match","match_ref":token,"before":0,"after":0}})).await;
+    assert!(items(&read).iter().any(|item| text_of(item) == msg_text(2)));
+}
+
+#[tokio::test]
+async fn search_max_bytes_omits_previews_before_references() {
+    let env = Env::new().await;
+    for i in 0..6 {
+        let text = format!("packingneedle {}", "content ".repeat(400));
+        let lines = vec![omp_header(), omp_msg("m0", None, "user", &text)];
+        env.indexed(&format!("packing-{i}.jsonl"), &lines).await;
+    }
+    let search = spool::search::SearchService::new(
+        env.index.clone(),
+        env.cfg.clone(),
+        env.emb.clone(),
+        env.leases.clone(),
+        env.keys.clone(),
+    );
+    let result = search
+        .call(json!({"query":"packingneedle", "mode":"lexical", "max_bytes":4096}))
+        .await
+        .unwrap();
+    assert!(tool_result_bytes(&result, false) <= 4096);
+    assert_eq!(result["truncated"], true);
+    let sessions = result["results"].as_array().unwrap();
+    assert!(!sessions.is_empty());
+    assert!(
+        sessions
+            .iter()
+            .any(|s| s["matches"][0]["preview"].is_null())
+    );
+    for session in sessions {
+        let read = env.ok(json!({"session_id":session["session_id"], "selection":{"kind":"match", "match_ref":session["matches"][0]["match_ref"], "before":0, "after":0}})).await;
+        assert!(!items(&read).is_empty());
+    }
+    for args in [
+        json!({"query":"x","mode":"lexical","max_bytes":4095}),
+        json!({"query":"x","mode":"lexical","preview_target_bytes":255}),
+        json!({"query":"x","mode":"lexical","preview_target_bytes":8193}),
+    ] {
+        assert_eq!(
+            search.call(args).await.unwrap_err().code,
+            "INVALID_ARGUMENT"
+        );
+    }
+}

@@ -98,6 +98,14 @@ pub struct SearchInput {
     #[serde(default)]
     #[schemars(range(min = 1, max = 3))]
     pub matches_per_session: Option<usize>,
+    /// Soft target for preview text in UTF-8 bytes (256 to 8192).
+    #[serde(default)]
+    #[schemars(range(min = 256, max = 8192))]
+    pub preview_target_bytes: Option<usize>,
+    /// Maximum serialized response bytes (4096 to the server limit).
+    #[serde(default)]
+    #[schemars(range(min = 4096))]
+    pub max_bytes: Option<usize>,
     /// Include per-match ranking diagnostics.
     #[serde(default)]
     pub debug_scores: bool,
@@ -171,6 +179,13 @@ pub struct DebugScores {
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[schemars(crate = "schemars")]
+pub struct Preview {
+    pub text: String,
+    pub clipped: bool,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[schemars(crate = "schemars")]
 pub struct MatchResult {
     /// Signed, view-independent reference for read_session.
     pub match_ref: String,
@@ -179,14 +194,12 @@ pub struct MatchResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch_ref: Option<String>,
     pub matched_at: Option<String>,
-    /// At most 1,200 UTF-8 bytes of indexed text.
-    pub excerpt: String,
+    /// Optional verbatim preview of the matched source.
+    pub preview: Option<Preview>,
     /// Subset of `lexical`, `semantic`, `literal`.
     pub matched_by: Vec<String>,
     /// True when contextual text in the excerpt lies outside the requested time interval.
     pub context_outside_time_filter: bool,
-    /// True when the excerpt is shorter than the matched text.
-    pub truncated: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub debug: Option<DebugScores>,
 }
