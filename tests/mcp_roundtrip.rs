@@ -131,6 +131,10 @@ async fn stdio_client_reaches_daemon_tool_over_ipc() {
     let mut names: Vec<_> = tools.iter().map(|t| t.name.to_string()).collect();
     names.sort();
     assert_eq!(names, ["index_status", "read_session", "search_sessions"]);
+    let search = tools.iter().find(|t| t.name == "search_sessions").unwrap();
+    let properties = &search.input_schema["properties"];
+    assert!(properties.get("preview_target_bytes").is_some());
+    assert!(properties.get("max_bytes").is_some());
 
     let r = client
         .call_tool(CallToolRequestParams::new("index_status"))

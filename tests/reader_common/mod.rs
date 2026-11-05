@@ -17,7 +17,7 @@ use spool::transcript::ReadService;
 use spool::transcript::handle::HandleKind;
 use spool::transcript::handle::{HandleKey, KeyStore};
 use spool::transcript::lease::LeaseManager;
-use spool::transcript::refs::{Anchor, MatchRef, MessageRef, RefHandle, SpanRef, short_digest};
+use spool::transcript::refs::{Anchor, MatchRecord, MatchRef, MessageRef, RefHandle};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock};
@@ -339,22 +339,28 @@ impl Env {
 
     /// A search-style match reference over whole blocks (same payload shape the search service issues).
     pub async fn match_ref(&self, anchor: &Anchor, spans: &[(&str, u32, &str)]) -> String {
-        let mut frames = Vec::new();
-        let mut refs = Vec::new();
+        let mut records = Vec::new();
         for (rec, block, text) in spans {
-            frames.extend_from_slice(&(text.len() as u64).to_le_bytes());
-            frames.extend_from_slice(text.as_bytes());
-            refs.push(SpanRef {
-                r: rec.to_string(),
-                b: *block,
-                s: 0,
-                e: text.len() as u32,
+            if records.iter().any(|r: &MatchRecord| r.key == *rec) {
+                continue;
+            }
+            let digest: Vec<u8> = sqlx::query_scalar("SELECT r.digest FROM records r JOIN read_manifests m ON m.snapshot_id = r.snapshot_id WHERE m.id = ? AND r.key = ?")
+                .bind(&anchor.manifest).bind(rec).fetch_one(&self.index.reader).await.unwrap();
+            let mut digest: [u8; 32] = digest.try_into().unwrap();
+            let actual: String = sqlx::query_scalar("SELECT b.text FROM blocks b JOIN read_manifests m ON m.snapshot_id = b.snapshot_id WHERE m.id = ? AND b.record_key = ? AND b.idx = ?")
+                .bind(&anchor.manifest).bind(rec).bind(i64::from(*block)).fetch_one(&self.index.reader).await.unwrap();
+            if actual != *text {
+                digest[0] ^= 1;
+            }
+            records.push(MatchRecord {
+                key: rec.to_string(),
+                digest: spool::transcript::reader::record_digest_hex(&digest),
             });
         }
         let payload = serde_json::to_vec(&MatchRef {
             manifest: anchor.manifest.clone(),
-            spans: refs,
-            content: short_digest(&frames),
+            version: 2,
+            records,
         })
         .unwrap();
         let ref_id = self

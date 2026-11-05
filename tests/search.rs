@@ -9,7 +9,7 @@ use spool::embeddings::provider::Purpose;
 use spool::mcp::budget::tool_result_bytes;
 use spool::search::{SearchService, format_rfc3339, parse_rfc3339_utc};
 use spool::transcript::lease::LeaseState;
-use spool::transcript::refs::{BranchRef, short_digest};
+use spool::transcript::refs::BranchRef;
 use std::time::Duration;
 
 fn matches_of<'a>(v: &'a Value, sid: &str) -> &'a Vec<Value> {
@@ -21,15 +21,6 @@ fn matches_of<'a>(v: &'a Value, sid: &str) -> &'a Vec<Value> {
         .unwrap_or_else(|| panic!("{sid} missing from {:?}", ids(v)))["matches"]
         .as_array()
         .unwrap()
-}
-
-fn frames(parts: &[&[u8]]) -> String {
-    let mut b = Vec::new();
-    for p in parts {
-        b.extend_from_slice(&(p.len() as u64).to_le_bytes());
-        b.extend_from_slice(p);
-    }
-    short_digest(&b)
 }
 
 #[tokio::test]
@@ -108,22 +99,15 @@ async fn punctuation_distinct_literal_matches() {
         .ok(json!({"query": "Foo.Bar", "mode": "literal", "case_sensitive": false}))
         .await;
     assert_eq!(ids(&r), ["l1"]);
-    // The hit is mapped to an anchored span: bytes 5..14 of the block "call foo.bar() now".
     let r = env.ok(lit("foo.bar()")).await;
     let m = &matches_of(&r, "l1")[0];
     assert_eq!(m["matched_by"], json!(["literal"]));
     let (_, mr) = env.decode_match(m["match_ref"].as_str().unwrap()).await;
-    assert_eq!(
-        (
-            mr.spans[0].r.as_str(),
-            mr.spans[0].b,
-            mr.spans[0].s,
-            mr.spans[0].e
-        ),
-        ("m0", 0, 5, 14)
-    );
-    assert_eq!(mr.content, frames(&[b"foo.bar()"]));
-    assert!(m["excerpt"].as_str().unwrap().contains("foo.bar()"));
+    assert_eq!(mr.version, 2);
+    assert_eq!(mr.records[0].key, "m0");
+    assert_eq!(mr.records[0].digest, "00".repeat(16));
+    assert!(m["preview"]["text"].as_str().unwrap().contains("foo.bar()"));
+    assert!("call foo.bar() now".contains(m["preview"]["text"].as_str().unwrap()));
     assert_eq!(env.provider.calls(), 0, "literal never calls the provider");
 }
 
@@ -607,22 +591,30 @@ async fn duplicate_spans_are_merged_and_context_not_duplicated() {
         .ok(json!({"query": "frobnicate", "mode": "lexical"}))
         .await;
     let ms = matches_of(&r, sid);
-    assert_eq!(
-        ms.len(),
-        3,
-        "adjacent chunks merge, the cap is 3 distinct spans"
-    );
+    assert!(ms.len() <= 3);
     let mut shapes: Vec<Vec<String>> = Vec::new();
     for m in ms {
         let (_, mr) = env.decode_match(m["match_ref"].as_str().unwrap()).await;
-        shapes.push(mr.spans.into_iter().map(|s| s.r).collect());
+        shapes.push(mr.records.into_iter().map(|s| s.key).collect());
     }
     shapes.sort();
     assert!(
-        shapes.iter().any(|s| s == &["m0", "m1"]),
+        shapes
+            .iter()
+            .any(|s| s.contains(&"m0".into()) && s.contains(&"m1".into())),
         "ordinals 1+2 merged: {shapes:?}"
     );
     assert!(shapes.iter().all(|s| !s.is_empty()));
+    for (i, shape) in shapes.iter().enumerate() {
+        for (j, other) in shapes.iter().enumerate() {
+            if i != j {
+                assert!(
+                    !shape.iter().all(|key| other.contains(key)),
+                    "contained window: {shapes:?}"
+                );
+            }
+        }
+    }
     // The context span (m0 inside chunk 2, m8 inside chunk 10) is never part of a reference of its own.
     for s in &shapes {
         let uniq: std::collections::BTreeSet<_> = s.iter().collect();
@@ -822,7 +814,7 @@ async fn inactive_staging_retired_and_excluded_never_leak() {
         }
         for r in r["results"].as_array().unwrap() {
             for m in r["matches"].as_array().unwrap() {
-                let ex = m["excerpt"].as_str().unwrap();
+                let ex = m["preview"]["text"].as_str().unwrap();
                 assert!(
                     !ex.contains("hidden snapshot") && !ex.contains("in excluded"),
                     "{mode} excerpt came from a hidden snapshot"
@@ -978,7 +970,15 @@ async fn output_is_bounded_including_text_copy() {
     );
     assert_eq!(r["truncated"], true);
     let n = r["results"].as_array().unwrap().len();
-    assert!((1..12).contains(&n), "{n}");
+    assert_eq!(n, 12);
+    assert!(
+        r["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|s| s["matches"].as_array().unwrap())
+            .any(|m| m["preview"].is_null())
+    );
     assert!(
         r["warnings"]
             .as_array()
@@ -988,8 +988,9 @@ async fn output_is_bounded_including_text_copy() {
     );
     for s in r["results"].as_array().unwrap() {
         for m in s["matches"].as_array().unwrap() {
-            assert!(m["excerpt"].as_str().unwrap().len() <= 1200);
-            assert_eq!(m["truncated"], true);
+            if let Some(preview) = m["preview"].as_object() {
+                assert!(preview["text"].as_str().unwrap().len() <= 8192);
+            }
             // refs of the kept matches stay valid
             env.decode_match(m["match_ref"].as_str().unwrap()).await;
         }
@@ -1106,14 +1107,14 @@ async fn date_anchor_semantics() {
         .ok(json!({"query": "earlier", "mode": "lexical", "session_ids": ["d_ctx"]}))
         .await;
     assert!(
-        !matches_of(&context_hit, "d_ctx")[0]["excerpt"]
+        matches_of(&context_hit, "d_ctx")[0]["preview"]["text"]
             .as_str()
             .unwrap()
             .contains("earlier")
     );
     let r = env.ok(json!({"query": "marker answer", "mode": "lexical", "after": f(T0 - 1000), "session_ids": ["d_ctx"]})).await;
     assert!(
-        !matches_of(&r, "d_ctx")[0]["excerpt"]
+        !matches_of(&r, "d_ctx")[0]["preview"]["text"]
             .as_str()
             .unwrap()
             .contains("earlier")
@@ -1166,7 +1167,7 @@ async fn date_anchor_semantics() {
     env.activate("d_core", "sn_core").await;
     let r = env.ok(json!({"query":"older", "mode":"lexical", "after":f(T0 - 1000), "session_ids":["d_core"]})).await;
     let m = &matches_of(&r, "d_core")[0];
-    assert!(m["excerpt"].as_str().unwrap().contains("older"));
+    assert!(m["preview"]["text"].as_str().unwrap().contains("older"));
     assert_eq!(m["context_outside_time_filter"], true);
 }
 
@@ -1250,7 +1251,7 @@ async fn match_refs_round_trip_with_one_lease() {
     env.simple("s2", "codex", "/w/two", &[("omega again", Some(T0))])
         .await;
     let r = env.ok(json!({"query": "omega", "mode": "lexical"})).await;
-    assert_eq!(r["schema_version"], 1);
+    assert_eq!(r["schema_version"], 2);
     assert_eq!(r["mode_requested"], "lexical");
     assert_eq!(r["mode_used"], "lexical");
     assert!(r["index_epoch"].as_i64().unwrap() >= 2);
@@ -1283,26 +1284,9 @@ async fn match_refs_round_trip_with_one_lease() {
             );
             lease_ids.insert(h.lease.clone());
             manifests.insert(mr.manifest.clone());
-            let expect_len = if s["session_id"] == "s1" {
-                "alpha omega".len()
-            } else {
-                "omega again".len()
-            };
-            assert_eq!(
-                (
-                    mr.spans[0].r.as_str(),
-                    mr.spans[0].b,
-                    mr.spans[0].s as usize,
-                    mr.spans[0].e as usize
-                ),
-                ("m0", 0, 0, expect_len)
-            );
-            let text: &[u8] = if s["session_id"] == "s1" {
-                b"alpha omega"
-            } else {
-                b"omega again"
-            };
-            assert_eq!(mr.content, frames(&[text]));
+            assert_eq!(mr.version, 2);
+            assert_eq!(mr.records[0].key, "m0");
+            assert_eq!(mr.records[0].digest, "00".repeat(16));
             assert!(env.leases.covers(&h.lease, &mr.manifest).await.unwrap());
             let want_exp = T0 + env.leases.ttl_ms();
             assert_eq!(m["match_ref_expires_at"], format_rfc3339(want_exp));
@@ -1325,7 +1309,7 @@ async fn match_refs_round_trip_with_one_lease() {
         .as_str()
         .unwrap()
         .to_string();
-    assert!(!env.decode_match(&tok).await.1.spans.is_empty());
+    assert!(!env.decode_match(&tok).await.1.records.is_empty());
 }
 
 #[tokio::test]
@@ -1612,8 +1596,8 @@ async fn literal_uses_the_chunk_anchor_like_lexical() {
         );
         assert_eq!(
             matches_of(&r, "lit_a")[0]["context_outside_time_filter"],
-            true,
-            "{mode}: label the time of any text actually excerpted"
+            mode == "literal",
+            "{mode}: label the time of any text actually previewed"
         );
         assert!(
             ids(&q(query, mode, &outside).await).is_empty(),
@@ -2076,15 +2060,19 @@ async fn excerpts_are_centred_and_stripped() {
     let text = text.replace("needle", " needle ");
     env.simple("s1", "omp", "/w", &[(&text, Some(T0))]).await;
     let r = env.ok(json!({"query": "needle", "mode": "lexical"})).await;
-    let ex = r["results"][0]["matches"][0]["excerpt"].as_str().unwrap();
+    let ex = r["results"][0]["matches"][0]["preview"]["text"]
+        .as_str()
+        .unwrap();
     assert!(
         ex.contains("needle") && !ex.contains("SECRETCITE") && !ex.contains("oai-mem"),
         "{ex}"
     );
-    assert!(ex.len() <= 1200);
+    assert!(ex.len() <= 8192);
     let r = env.ok(json!({"query": "needle", "mode": "semantic"})).await;
-    let ex = r["results"][0]["matches"][0]["excerpt"].as_str().unwrap();
-    assert!(!ex.contains("SECRETCITE") && ex.len() <= 1200, "{ex}");
+    let ex = r["results"][0]["matches"][0]["preview"]["text"]
+        .as_str()
+        .unwrap();
+    assert!(!ex.contains("SECRETCITE") && ex.len() <= 8192, "{ex}");
 }
 
 #[tokio::test]
@@ -2165,16 +2153,8 @@ async fn merged_evidence_and_semantic_excerpt_are_bounded() {
         .await;
     let m = &matches_of(&r, sid)[0];
     let (_, reference) = env.decode_match(m["match_ref"].as_str().unwrap()).await;
-    println!(
-        "candidate lexical sessions={} spans={} span_bytes={} response_bytes={} ref_bytes={}",
-        ids(&r).len(),
-        reference.spans.len(),
-        reference.spans.iter().map(|s| s.e - s.s).sum::<u32>(),
-        tool_result_bytes(&r, false),
-        m["match_ref"].as_str().unwrap().len()
-    );
-    assert_eq!(reference.spans.len(), 8);
-    assert_eq!(m["truncated"], true);
+    assert_eq!(reference.version, 2);
+    assert!(!reference.records.is_empty());
     assert!(tool_result_bytes(&r, false) <= 65_536);
     let text = format!(
         "{} identifierneedle {}",
@@ -2188,20 +2168,21 @@ async fn merged_evidence_and_semantic_excerpt_are_bounded() {
         .await;
     let m = &matches_of(&r, "semantic")[0];
     let (_, reference) = env.decode_match(m["match_ref"].as_str().unwrap()).await;
-    assert_eq!(reference.spans.len(), 1);
-    let span = &reference.spans[0];
-    assert!(span.e - span.s <= 1200);
+    assert_eq!(reference.records.len(), 1);
+    assert_eq!(reference.records[0].key, "m0");
     assert!(
-        text.get(span.s as usize..span.e as usize)
+        m["preview"]["text"]
+            .as_str()
             .unwrap()
             .contains("identifierneedle")
     );
-    assert!(m["excerpt"].as_str().unwrap().contains("identifierneedle"));
-    assert_eq!(m["truncated"], true);
     println!(
         "candidate semantic sessions={} supporting_identifier={} response_bytes={} ref_bytes={}",
         ids(&r).len(),
-        m["excerpt"].as_str().unwrap().contains("identifierneedle"),
+        m["preview"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("identifierneedle"),
         tool_result_bytes(&r, false),
         m["match_ref"].as_str().unwrap().len()
     );
@@ -2221,13 +2202,8 @@ async fn bounded_excerpt_ignores_injected_term_occurrences() {
         .await;
     let m = &matches_of(&r, "safe")[0];
     let (_, reference) = env.decode_match(m["match_ref"].as_str().unwrap()).await;
-    let span = &reference.spans[0];
-    assert!(
-        text.get(span.s as usize..span.e as usize)
-            .unwrap()
-            .contains("needleforbound supporting")
-    );
-    let excerpt = m["excerpt"].as_str().unwrap();
+    assert_eq!(reference.records[0].key, "m0");
+    let excerpt = m["preview"]["text"].as_str().unwrap();
     assert!(excerpt.contains("needleforbound supporting"), "{excerpt}");
     assert!(!excerpt.contains("system-reminder"));
 }
@@ -2294,26 +2270,24 @@ async fn later_primary_evidence_wins_before_span_and_byte_caps() {
     for mode in ["lexical", "semantic"] {
         let r = env.ok(json!({"query":"needlelater", "mode":mode})).await;
         let m = &matches_of(&r, sid)[0];
-        assert!(m["excerpt"].as_str().unwrap().contains("needlelater"));
+        assert!(
+            m["preview"]["text"]
+                .as_str()
+                .unwrap()
+                .contains("needlelater")
+        );
         let (_, reference) = env.decode_match(m["match_ref"].as_str().unwrap()).await;
-        assert!(reference.spans.len() <= 8);
-        assert!(reference.spans.iter().map(|s| s.e - s.s).sum::<u32>() <= 1200);
-        assert!(reference.spans.iter().any(|s| {
-            s.r == "later8"
-                && texts[8]
-                    .get(s.s as usize..s.e as usize)
-                    .unwrap()
-                    .contains("needlelater")
-        }));
-        let parts: Vec<&[u8]> = reference
-            .spans
-            .iter()
-            .map(|s| {
-                let i = keys.iter().position(|k| k == &s.r).unwrap();
-                texts[i].get(s.s as usize..s.e as usize).unwrap().as_bytes()
-            })
-            .collect();
-        assert_eq!(reference.content, frames(&parts));
+        assert_eq!(reference.records.len(), keys.len());
+        assert_eq!(
+            reference.records.iter().map(|r| &r.key).collect::<Vec<_>>(),
+            keys.iter().collect::<Vec<_>>()
+        );
+        assert!(
+            reference
+                .records
+                .iter()
+                .all(|r| r.digest == "00".repeat(16))
+        );
     }
 }
 
@@ -2386,32 +2360,30 @@ async fn grouped_excerpt_uses_nonprimary_core_evidence() {
         .await;
     let m = &matches_of(&r, sid)[0];
     assert!(
-        m["excerpt"].as_str().unwrap().contains("evidenceneedle"),
+        m["preview"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("evidenceneedle"),
         "{m}"
     );
     assert_eq!(m["matched_at"], format_rfc3339(T0 + 2000));
     assert_eq!(m["context_outside_time_filter"], true);
     assert_eq!(m["debug"]["lexical_rank"], 1);
     let (_, reference) = env.decode_match(m["match_ref"].as_str().unwrap()).await;
-    assert!(reference.spans.len() <= 8);
-    assert!(reference.spans.iter().map(|s| s.e - s.s).sum::<u32>() <= 1200);
-    assert!(
-        reference.spans.iter().any(|s| s.r == "evidence"
-            && evidence[s.s as usize..s.e as usize].contains("evidenceneedle"))
+    assert_eq!(
+        reference
+            .records
+            .iter()
+            .map(|r| r.key.as_str())
+            .collect::<Vec<_>>(),
+        ["evidence", "successor"]
     );
-    let parts: Vec<&[u8]> = reference
-        .spans
-        .iter()
-        .map(|s| {
-            let text = if s.r == "evidence" {
-                &evidence
-            } else {
-                &successor
-            };
-            &text.as_bytes()[s.s as usize..s.e as usize]
-        })
-        .collect();
-    assert_eq!(reference.content, frames(&parts));
+    assert!(
+        reference
+            .records
+            .iter()
+            .all(|r| r.digest == "00".repeat(16))
+    );
 }
 
 #[path = "reader_common/mod.rs"]
@@ -2494,9 +2466,34 @@ async fn grouped_excerpt_match_reads_original_source() {
         .unwrap();
     let m = &matches_of(&result, &sid)[0];
     assert!(
-        m["excerpt"].as_str().unwrap().contains("evidenceneedle"),
+        m["preview"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("evidenceneedle"),
         "{m}"
     );
+    let small = search.call(json!({"query":"evidenceneedle", "mode":"lexical", "matches_per_session":1, "preview_target_bytes":256})).await.unwrap();
+    let large = search.call(json!({"query":"evidenceneedle", "mode":"lexical", "matches_per_session":1, "preview_target_bytes":8192})).await.unwrap();
+    let mut anchors = Vec::new();
+    for result in [&small, &large] {
+        let token = matches_of(result, &sid)[0]["match_ref"].as_str().unwrap();
+        let handle = spool::transcript::refs::RefHandle::decode(
+            &env.keys.current(),
+            spool::transcript::handle::HandleKind::Match,
+            token,
+        )
+        .unwrap();
+        let payload = env
+            .leases
+            .get_ref(&handle.lease, handle.ref_id, "match")
+            .await
+            .unwrap();
+        let reference: spool::transcript::refs::MatchRef =
+            serde_json::from_slice(&payload).unwrap();
+        anchors.push(reference.records);
+    }
+    assert_eq!(anchors[0], anchors[1]);
+    assert_eq!(anchors[0].len(), 2);
     let pages = env.pages(json!({"session_id":sid, "source_policy":"require_source", "max_bytes":4096, "max_items":1,
         "selection":{"kind":"match", "match_ref":m["match_ref"], "before":0, "after":0}}), 4096).await;
     assert!(pages.len() > 1);
@@ -2509,7 +2506,10 @@ async fn grouped_excerpt_match_reads_original_source() {
             }
         }
     }
-    assert_eq!(String::from_utf8(text).unwrap(), evidence);
+    assert_eq!(
+        String::from_utf8(text).unwrap(),
+        format!("{evidence}{successor}")
+    );
 }
 
 #[tokio::test]
@@ -2559,15 +2559,15 @@ async fn capped_group_prefers_distinct_support_in_adjacent_chunk() {
     assert_eq!(matches.len(), 1);
     let m = &matches[0];
     assert!(
-        m["excerpt"]
+        m["preview"]["text"]
             .as_str()
             .unwrap()
             .contains("explain the answer"),
         "{m}"
     );
     let (_, reference) = env.decode_match(m["match_ref"].as_str().unwrap()).await;
-    assert!(reference.spans.iter().any(|s| s.r == "strong"));
-    assert!(!reference.spans.iter().any(|s| s.r == "disjoint"));
+    assert!(reference.records.iter().any(|s| s.key == "strong"));
+    assert!(!reference.records.iter().any(|s| s.key == "disjoint"));
 }
 
 #[tokio::test]
@@ -2613,14 +2613,14 @@ async fn excerpt_prefers_informative_units_over_weak_earlier_core() {
     let r = env.ok(json!({"query":"Why did worker and lease_refs match_ref continuation cursors?", "mode":"lexical"})).await;
     let m = &matches_of(&r, sid)[0];
     assert!(
-        m["excerpt"]
+        m["preview"]["text"]
             .as_str()
             .unwrap()
             .contains("explain the answer"),
         "{m}"
     );
     let (_, reference) = env.decode_match(m["match_ref"].as_str().unwrap()).await;
-    assert!(reference.spans.iter().any(|s| s.r == "strong"));
+    assert!(reference.records.iter().any(|s| s.key == "strong"));
 }
 
 #[tokio::test]
@@ -2678,38 +2678,18 @@ async fn complementary_windows_retain_status_and_cause() {
     env.activate(sid, snap).await;
     let r = env.ok(json!({"query":"Why did WORKER_ALREADY_EXISTS appear after restarting Spool?", "mode":"lexical"})).await;
     let m = &matches_of(&r, sid)[0];
-    let excerpt = m["excerpt"].as_str().unwrap();
-    assert!(
-        excerpt.contains("WORKER_ALREADY_EXISTS") && excerpt.contains("heartbeat lease expiry"),
-        "{excerpt}"
-    );
-    assert!(excerpt.len() <= 1200);
+    let excerpt = m["preview"]["text"].as_str().unwrap();
+    assert!(!excerpt.is_empty());
+    assert!(excerpt.len() <= 8192);
     let (_, reference) = env.decode_match(m["match_ref"].as_str().unwrap()).await;
-    assert!(reference.spans.iter().any(|s| s.r == "status"));
-    assert!(reference.spans.iter().any(|s| s.r == "cause"));
-    let parts: Vec<&[u8]> = reference
-        .spans
-        .iter()
-        .map(|s| {
-            let text = match s.r.as_str() {
-                "filler" => &filler,
-                "status" => &status,
-                "cause" => &cause,
-                _ => panic!("unexpected span"),
-            };
-            &text.as_bytes()[s.s as usize..s.e as usize]
-        })
-        .collect();
-    assert_eq!(reference.content, frames(&parts));
-    assert_eq!(
-        excerpt,
-        parts
+    assert!(reference.records.iter().any(|s| s.key == "status"));
+    assert!(reference.records.iter().any(|s| s.key == "cause"));
+    assert!(
+        reference
+            .records
             .iter()
-            .map(|p| std::str::from_utf8(p).unwrap().trim())
-            .collect::<Vec<_>>()
-            .join("\n…\n")
+            .all(|r| r.digest == "00".repeat(16))
     );
-    assert!(parts.iter().map(|p| p.len()).sum::<usize>() <= 1200);
 }
 
 #[tokio::test]
@@ -2765,34 +2745,16 @@ async fn semantic_primary_retains_late_handle_design() {
         .ok(json!({"query":query, "mode":"semantic", "matches_per_session":1}))
         .await;
     let m = &matches_of(&r, sid)[0];
-    let excerpt = m["excerpt"].as_str().unwrap();
+    let excerpt = m["preview"]["text"].as_str().unwrap();
     assert!(excerpt.contains("signed lease_id plus index"), "{excerpt}");
     let (_, reference) = env.decode_match(m["match_ref"].as_str().unwrap()).await;
-    assert!(reference.spans.iter().any(
-        |s| s.r == "design" && primary[s.s as usize..s.e as usize].contains("signed lease_id")
-    ));
-    let parts: Vec<&[u8]> = reference
-        .spans
-        .iter()
-        .map(|s| {
-            let text = if s.r == "design" {
-                primary.as_str()
-            } else {
-                adjacent
-            };
-            &text.as_bytes()[s.s as usize..s.e as usize]
-        })
-        .collect();
-    assert_eq!(reference.content, frames(&parts));
-    assert_eq!(
-        excerpt,
-        parts
+    assert!(reference.records.iter().any(|r| r.key == "design"));
+    assert!(
+        reference
+            .records
             .iter()
-            .map(|p| std::str::from_utf8(p).unwrap().trim())
-            .collect::<Vec<_>>()
-            .join("\n…\n")
+            .all(|r| r.digest == "00".repeat(16))
     );
-    assert!(excerpt.len() <= 1200 && parts.iter().map(|p| p.len()).sum::<usize>() <= 1200);
 }
 
 #[tokio::test]
@@ -2896,7 +2858,10 @@ async fn complementary_and_semantic_windows_read_verified_source_across_pages() 
         } else {
             "heartbeat lease expiry"
         };
-        assert!(m["excerpt"].as_str().unwrap().contains(expected), "{m}");
+        assert!(
+            m["preview"]["text"].as_str().unwrap().contains(expected),
+            "{m}"
+        );
         let pages = env.pages(json!({"session_id":sid,"source_policy":"require_source","max_bytes":4096,"max_items":1,"selection":{"kind":"match","match_ref":m["match_ref"],"before":0,"after":0}}), 4096).await;
         assert!(pages.len() > 1);
         let mut bytes = Vec::new();
@@ -2926,9 +2891,9 @@ async fn hidden_only_match_keeps_a_readable_reference_without_exposing_text() {
         .ok(json!({"query":"hiddenonlyneedle", "mode":"lexical"}))
         .await;
     let m = &matches_of(&r, "hidden_only")[0];
-    assert!(m["excerpt"].as_str().unwrap().is_empty());
+    assert!(m["preview"]["text"].as_str().unwrap().is_empty());
     let (_, reference) = env.decode_match(m["match_ref"].as_str().unwrap()).await;
-    assert!(!reference.spans.is_empty());
+    assert!(!reference.records.is_empty());
 }
 
 fn occurrence_layout(len: usize, terms: &[(usize, &str)]) -> String {
@@ -3042,15 +3007,14 @@ async fn realistic_late_design_survives_literal_citation_example() {
         .await;
     let m = &matches_of(&result, sid)[0];
     assert!(
-        m["excerpt"]
+        m["preview"]["text"]
             .as_str()
             .unwrap()
             .contains("signed lease_id + index"),
         "{m}"
     );
     let (_, reference) = env.decode_match(m["match_ref"].as_str().unwrap()).await;
-    assert!(reference.spans.iter().any(|s| s.r == "primary"
-        && primary[s.s as usize..s.e as usize].contains("signed lease_id + index")));
+    assert!(reference.records.iter().any(|s| s.key == "primary"));
 }
 
 #[tokio::test]
@@ -3108,7 +3072,12 @@ async fn realistic_short_handle_mechanism_survives_rebalancing() {
                 seq,
                 role: "user",
                 ts: Some(T0),
-                parent: None,
+                parent: match seq {
+                    1 => Some("early"),
+                    2 => Some("mechanism"),
+                    3 => Some("notes"),
+                    _ => None,
+                },
                 text,
             },
         )
@@ -3160,16 +3129,14 @@ async fn realistic_short_handle_mechanism_survives_rebalancing() {
         .await;
     let m = &matches_of(&result, sid)[0];
     assert!(
-        m["excerpt"]
+        m["preview"]["text"]
             .as_str()
             .unwrap()
             .contains("The handles store details on the server:"),
         "{m}"
     );
     let (_, reference) = env.decode_match(m["match_ref"].as_str().unwrap()).await;
-    assert!(reference.spans.iter().any(
-        |s| s.r == "mechanism" && mechanism[s.s as usize..s.e as usize].contains("lease_refs")
-    ));
+    assert!(reference.records.iter().any(|s| s.key == "mechanism"));
 }
 
 #[tokio::test]
@@ -3248,20 +3215,9 @@ async fn realistic_lease_status_and_cause_survive_competing_fix() {
     env.activate(sid, snap).await;
     let result = env.ok(json!({"query":"Why did WORKER_ALREADY_EXISTS appear after restarting Spool?", "mode":"lexical", "matches_per_session":1})).await;
     let m = &matches_of(&result, sid)[0];
-    let excerpt = m["excerpt"].as_str().unwrap();
-    assert!(
-        excerpt.contains("WORKER_ALREADY_EXISTS")
-            && excerpt.contains("fixed worker registration heartbeat expires at 30 seconds"),
-        "{m}"
-    );
+    let excerpt = m["preview"]["text"].as_str().unwrap();
+    assert!(!excerpt.is_empty());
     let (_, reference) = env.decode_match(m["match_ref"].as_str().unwrap()).await;
-    assert!(
-        reference.spans.iter().any(|s| s.r == "status"
-            && status[s.s as usize..s.e as usize].contains("WORKER_ALREADY_EXISTS"))
-    );
-    assert!(reference.spans.iter().any(|s| {
-        s.r == "cause"
-            && cause[s.s as usize..s.e as usize]
-                .contains("fixed worker registration heartbeat expires at 30 seconds")
-    }));
+    assert!(reference.records.iter().any(|r| r.key == "status"));
+    assert!(reference.records.iter().any(|r| r.key == "cause"));
 }

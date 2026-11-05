@@ -150,3 +150,64 @@ On `main`, the read needs a second call to get the rest of the window. With the 
 `coverage` is present in both runs, because with hosted processing off no chunk is embedded, which counts as degraded.
 The synthetic `match_ref` on `main` is smaller than the 1–4 KB seen on a real index, because each synthetic match has
 one short span.
+
+## Search evidence v2 paired release measurements (2026-11-05)
+
+The baseline was commit `07c0bc9c49158df6316f6ba76b55c46948d028e5`; the candidate was the
+uncommitted v2 implementation. Both used the same benchmark harness and deterministic synthetic
+seed on an Apple M3 Max, with an isolated release target per build. Each process seeded a fresh
+SQLite index, warmed each mode once, then ran 60 queries per lexical, semantic, and hybrid mode
+and 30 per literal mode. Three baseline/candidate pairs ran sequentially. No other agent builds,
+tests, or evidence assessments ran during the timing window. System-wide contention was not
+measured; the third repetition varied substantially. Stage tracing was enabled in both binaries;
+only the candidate emits the new stage events, so instrumentation has a candidate-only cost.
+
+P95 values below are the median of the three per-run p95 values, not pooled request percentiles.
+The 100,000-chunk workload is stress evidence and has no 350 ms hybrid target.
+
+| chunks | mode | baseline p95 ms | candidate p95 ms | candidate p95 repetitions ms |
+|---:|---|---:|---:|---|
+| 15,000 | lexical | 7.9 | 10.1 | 10.1, 10.5, 10.1 |
+| 15,000 | literal | 14.0 | 12.6 | 12.5, 12.6, 33.6 |
+| 15,000 | literal common word | 40.1 | 41.4 | 40.8, 41.4, 102.7 |
+| 15,000 | literal common word, time window | 95.3 | 103.2 | 99.9, 103.2, 266.3 |
+| 15,000 | semantic | 111.2 | 112.3 | 112.3, 106.8, 263.6 |
+| 15,000 | hybrid | 116.4 | 115.9 | 115.9, 109.1, 222.5 |
+| 100,000 | lexical | 47.0 | 36.2 | 38.0, 35.5, 36.2 |
+| 100,000 | literal | 107.3 | 146.8 | 146.8, 70.4, 187.7 |
+| 100,000 | literal common word | 191.8 | 244.3 | 244.3, 177.4, 359.5 |
+| 100,000 | literal common word, time window | 984.3 | 899.9 | 899.9, 598.3, 1227.0 |
+| 100,000 | semantic | 960.7 | 823.2 | 823.2, 750.4, 1646.2 |
+| 100,000 | hybrid | 885.1 | 929.0 | 778.2, 1707.4, 929.0 |
+
+Every candidate repetition of the primary lexical, unique-literal, and hybrid workloads met
+the 15,000-chunk targets of 150 ms for lexical and literal and 350 ms for local hybrid. The
+common-word literal with a time window reached 266.3 ms in repetition three, above 150 ms if
+that target applies to this workload. At 100,000 chunks, median literal p95 increased about 37%
+and hybrid about 5%; variability and the small sample do not establish the cause.
+
+The candidate's first 15,000-chunk repetition recorded the following stage totals. Times are
+summed event durations across the mode's queries, not exclusive CPU time. Literal uses a separate
+preview path and emitted no preview event, so the stage measurements do not fully decompose
+literal search. Candidate and window counts describe work at selection,
+including repeated events where the literal path selects separately.
+
+| mode | retrieval ms / sessions | selection ms / candidates / windows | preview ms / events / text bytes | packing ms / envelope bytes |
+|---|---|---|---|---|
+| lexical | 466.3 / 600 | 189.0 / 12,000 / 11,936 | 7.2 / 837 / 444,324 | 3.2 / 1,064,444 |
+| literal | 302.5 / 30 | 1.4 / 90 / 90 | no event | 0.4 / 55,590 |
+| hybrid | 6,197.4 / 600 | 411.1 / 22,188 / 22,044 | 9.5 / 906 / 482,598 | 3.8 / 1,143,514 |
+
+For those 60 lexical and hybrid queries, compact response JSON totaled 994,154 and 1,069,946
+bytes respectively, versus 979,595 and 1,048,229 baseline bytes. The 30 literal responses
+used 42,900 bytes versus 30,840 baseline bytes. The JSON totals exclude the MCP wrapper; the
+packing stage counts above include its measured envelope.
+
+Whole-process wall/user/system seconds, including seeding, both sizes, every mode, and benchmark
+instrumentation, were 172.90/104.09/86.54, 164.34/103.56/81.30, and 207.80/115.62/100.46
+for baseline, and 168.31/103.91/81.91, 175.31/107.60/85.49, and 216.34/130.55/105.78
+for candidate. Peak RSS was 77.4–80.0 MiB baseline and 79.1–79.3 MiB candidate. These process
+figures do not isolate search CPU and do not establish a CPU improvement. Private per-run logs
+are retained in `/tmp/spool-search-v2-eval-worker/`.
+
+The controlled current-main versus complete-passage comparison includes three paired 15k-chunk release runs and one paired 100k stress run, with per-mode query counts, output volume, stage-timing limits and tail caveats in [search-evidence-comparison.md](search-evidence-comparison.md#paired-synthetic-performance). The 15k median lexical p95 was 8.1 ms on main and 10.4 ms on the candidate; the single 100k pair was 46.2 ms and 53.7 ms. These synthetic timings are not a general latency claim.

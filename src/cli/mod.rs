@@ -311,7 +311,14 @@ fn print_search(v: &Value) {
             .flatten()
         {
             println!("  match_ref: {}", s(m, "match_ref"));
-            println!("  excerpt:   {}", s(m, "excerpt").replace('\n', " "));
+            match m
+                .get("preview")
+                .and_then(|p| p.get("text"))
+                .and_then(Value::as_str)
+            {
+                Some(text) => println!("  preview:   {}", text.replace('\n', " ")),
+                None => println!("  preview:   (omitted; read using match_ref)"),
+            }
         }
     }
     if v.get("truncated").and_then(Value::as_bool) == Some(true) {

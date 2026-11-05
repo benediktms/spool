@@ -18,7 +18,7 @@ use crate::storage::index::Index;
 use crate::transcript::handle::HandleKind;
 use crate::transcript::handle::KeyStore;
 use crate::transcript::lease::{LeaseManager, NewRef, PinTarget};
-use crate::transcript::refs::{Anchor, BranchRef, MatchRef, RefHandle, SpanRef, short_digest};
+use crate::transcript::refs::{Anchor, BranchRef, MatchRecord, MatchRef, RefHandle};
 use retrieve::{ChunkMeta, Filters, LiteralHit, Scored, SessionRow, SpanRow};
 use rmcp::handler::server::tool::schema_for_type;
 use rmcp::model::{Tool, ToolAnnotations};
@@ -33,7 +33,6 @@ pub const TOOL_NAME: &str = "search_sessions";
 const MAX_QUERY_BYTES: usize = 4096;
 const MAX_QUERIES: usize = 4;
 const MAX_QUERY_TOKENS: usize = 1024;
-const MAX_EXCERPT_BYTES: usize = 1200;
 const MAX_FILTER_LIST: usize = 256;
 /// Retrieval is retried when a snapshot is retired / excluded between the read transaction and the lease pin.
 const MAX_ATTEMPTS: usize = 3;
@@ -61,6 +60,266 @@ fn invalid(msg: impl Into<String>) -> AppError {
     e
 }
 
+type RetrievalFuture<'a, T> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, AppError>> + Send + 'a>>;
+
+trait CandidateRetriever: Send + Sync {
+    fn lexical<'a>(
+        &'a self,
+        conn: &'a mut sqlx::SqliteConnection,
+        filters: &'a Filters,
+        query: &'a str,
+        limit: usize,
+    ) -> RetrievalFuture<'a, Vec<Scored>>;
+    fn semantic<'a>(
+        &'a self,
+        conn: &'a mut sqlx::SqliteConnection,
+        filters: &'a Filters,
+        profile: &'a str,
+        vector: Arc<Vec<f32>>,
+        limits: retrieve::ScanLimits,
+    ) -> RetrievalFuture<'a, retrieve::ScanOutcome>;
+    fn literal<'a>(
+        &'a self,
+        conn: &'a mut sqlx::SqliteConnection,
+        plan: &'a Plan,
+        query: &'a str,
+        limit: usize,
+    ) -> RetrievalFuture<'a, Vec<LiteralHit>>;
+}
+struct DefaultRetriever;
+impl CandidateRetriever for DefaultRetriever {
+    fn lexical<'a>(
+        &'a self,
+        conn: &'a mut sqlx::SqliteConnection,
+        filters: &'a Filters,
+        query: &'a str,
+        limit: usize,
+    ) -> RetrievalFuture<'a, Vec<Scored>> {
+        Box::pin(retrieve::lexical(conn, filters, query, limit))
+    }
+    fn semantic<'a>(
+        &'a self,
+        conn: &'a mut sqlx::SqliteConnection,
+        filters: &'a Filters,
+        profile: &'a str,
+        vector: Arc<Vec<f32>>,
+        limits: retrieve::ScanLimits,
+    ) -> RetrievalFuture<'a, retrieve::ScanOutcome> {
+        Box::pin(retrieve::semantic_scan(
+            conn, filters, profile, vector, limits,
+        ))
+    }
+    fn literal<'a>(
+        &'a self,
+        conn: &'a mut sqlx::SqliteConnection,
+        plan: &'a Plan,
+        query: &'a str,
+        limit: usize,
+    ) -> RetrievalFuture<'a, Vec<LiteralHit>> {
+        Box::pin(retrieve::literal(
+            conn,
+            &plan.filters,
+            query,
+            plan.case_sensitive,
+            plan.per_session,
+            plan.prefer_recent,
+            limit,
+        ))
+    }
+}
+trait PreviewRenderer: Send + Sync {
+    fn render(
+        &self,
+        m: &GMatch,
+        terms: &[Vec<String>],
+        filters: &Filters,
+        spans: &HashMap<i64, Vec<SpanRow>>,
+        bodies: &HashMap<i64, String>,
+        target: usize,
+    ) -> Option<evidence::Selection>;
+    fn render_literal(&self, body: &str, focus: usize, target: usize) -> (String, bool);
+}
+trait MatchSelector: Send + Sync {
+    fn select(
+        &self,
+        fused: &[Fused],
+        metas: &HashMap<i64, ChunkMeta>,
+        cache: &HashMap<i64, Vec<SpanRow>>,
+        ancestry: &HashMap<String, HashMap<String, Option<String>>>,
+        per_session: usize,
+    ) -> Vec<Group>;
+}
+struct DefaultMatchSelector;
+impl MatchSelector for DefaultMatchSelector {
+    fn select(
+        &self,
+        fused: &[Fused],
+        metas: &HashMap<i64, ChunkMeta>,
+        cache: &HashMap<i64, Vec<SpanRow>>,
+        ancestry: &HashMap<String, HashMap<String, Option<String>>>,
+        per_session: usize,
+    ) -> Vec<Group> {
+        let mut runs: HashMap<(&str, &str), Vec<(usize, &Fused)>> = HashMap::new();
+        for (rank, candidate) in fused.iter().enumerate() {
+            if let Some(meta) = metas.get(&candidate.rowid) {
+                runs.entry((&meta.snapshot_id, &meta.run_key))
+                    .or_default()
+                    .push((rank, candidate));
+            }
+        }
+        for candidates in runs.values_mut() {
+            candidates.sort_by_key(|(_, f)| (metas[&f.rowid].ordinal, f.rowid));
+        }
+        let mut groups: Vec<Group> = Vec::new();
+        let mut index: HashMap<String, usize> = HashMap::new();
+        for (center_rank, center) in fused.iter().enumerate() {
+            let Some(meta) = metas.get(&center.rowid) else {
+                continue;
+            };
+            if !cache[&center.rowid].iter().any(|s| !s.is_context) {
+                continue;
+            }
+            let gi = *index.entry(meta.session_id.clone()).or_insert_with(|| {
+                groups.push(Group {
+                    session_id: meta.session_id.clone(),
+                    snapshot_id: meta.snapshot_id.clone(),
+                    score: center.score,
+                    last_activity: meta.last_activity_at,
+                    matches: Vec::new(),
+                });
+                groups.len() - 1
+            });
+            let run = &runs[&(meta.snapshot_id.as_str(), meta.run_key.as_str())];
+            let position = run
+                .iter()
+                .position(|(_, f)| f.rowid == center.rowid)
+                .expect("center is in its run");
+            let mut members = vec![(center_rank, center)];
+            for (rank, candidate) in &run[position.saturating_sub(1)..(position + 2).min(run.len())]
+            {
+                if candidate.rowid != center.rowid
+                    && members.iter().all(|(_, member)| {
+                        compatible_chunks(
+                            &ancestry[&meta.snapshot_id],
+                            &cache[&member.rowid],
+                            &cache[&candidate.rowid],
+                        )
+                    })
+                {
+                    members.push((*rank, *candidate));
+                }
+            }
+            members.sort_by_key(|(_, f)| metas[&f.rowid].ordinal);
+            let Some((_, witness)) = members.iter().min_by_key(|(rank, _)| rank) else {
+                continue;
+            };
+            let witness = *witness;
+            let mut spans = Vec::new();
+            let mut by = BTreeSet::new();
+            for (_, candidate) in &members {
+                let m = &metas[&candidate.rowid];
+                for (seq, span) in cache[&candidate.rowid].iter().enumerate() {
+                    spans.push((m.ordinal, seq, span.clone()));
+                }
+                if candidate.lex.is_some() {
+                    by.insert("lexical");
+                }
+                if candidate.sem.is_some() {
+                    by.insert("semantic");
+                }
+            }
+            let gm = GMatch {
+                primary: witness.rowid,
+                rowids: members.iter().map(|(_, f)| f.rowid).collect(),
+                ordinals: vec![center_rank as i64],
+                spans,
+                matched_by: by,
+                debug: Some((witness.lex, witness.sem, witness.score)),
+            };
+            groups[gi].matches.push(gm);
+        }
+        for group in &mut groups {
+            group.matches.sort_by(|a, b| {
+                let ar = fused
+                    .iter()
+                    .position(|f| f.rowid == a.primary)
+                    .unwrap_or(usize::MAX);
+                let br = fused
+                    .iter()
+                    .position(|f| f.rowid == b.primary)
+                    .unwrap_or(usize::MAX);
+                ar.cmp(&br)
+                    .then_with(|| b.rowids.len().cmp(&a.rowids.len()))
+                    .then_with(|| a.ordinals.cmp(&b.ordinals))
+            });
+            let mut retained: Vec<GMatch> = Vec::new();
+            for candidate in group.matches.drain(..) {
+                if retained
+                    .iter()
+                    .any(|other| other.rowids.contains(&candidate.primary))
+                {
+                    continue;
+                }
+                let keys: BTreeSet<_> = candidate
+                    .spans
+                    .iter()
+                    .map(|(_, _, s)| &s.record_key)
+                    .collect();
+                if retained.iter().any(|other| {
+                    let other_keys: BTreeSet<_> =
+                        other.spans.iter().map(|(_, _, s)| &s.record_key).collect();
+                    keys.is_subset(&other_keys)
+                }) {
+                    continue;
+                }
+                retained.retain(|other| {
+                    let other_keys: BTreeSet<_> =
+                        other.spans.iter().map(|(_, _, s)| &s.record_key).collect();
+                    !other_keys.is_subset(&keys) || !candidate.rowids.contains(&other.primary)
+                });
+                retained.push(candidate);
+            }
+            retained.truncate(per_session);
+            group.matches = retained;
+        }
+        groups.retain(|g| !g.matches.is_empty());
+        groups
+    }
+}
+struct DefaultPreviewRenderer;
+impl PreviewRenderer for DefaultPreviewRenderer {
+    fn render(
+        &self,
+        m: &GMatch,
+        terms: &[Vec<String>],
+        filters: &Filters,
+        spans: &HashMap<i64, Vec<SpanRow>>,
+        bodies: &HashMap<i64, String>,
+        target: usize,
+    ) -> Option<evidence::Selection> {
+        evidence::select(m, terms, filters, spans, bodies, target)
+    }
+    fn render_literal(&self, body: &str, focus: usize, target: usize) -> (String, bool) {
+        evidence::literal(body, focus, target)
+    }
+}
+
+struct Strategies {
+    retriever: Box<dyn CandidateRetriever>,
+    selector: Box<dyn MatchSelector>,
+    renderer: Box<dyn PreviewRenderer>,
+}
+impl Default for Strategies {
+    fn default() -> Self {
+        Self {
+            retriever: Box::new(DefaultRetriever),
+            selector: Box::new(DefaultMatchSelector),
+            renderer: Box::new(DefaultPreviewRenderer),
+        }
+    }
+}
+
 pub struct SearchService {
     index: Index,
     cfg: Arc<Config>,
@@ -69,6 +328,9 @@ pub struct SearchService {
     keys: KeyStore,
     scan_permits: Arc<Semaphore>,
     coverage_cache: retrieve::CoverageCache,
+    retriever: Box<dyn CandidateRetriever>,
+    renderer: Box<dyn PreviewRenderer>,
+    selector: Box<dyn MatchSelector>,
 }
 
 struct Plan {
@@ -82,6 +344,8 @@ struct Plan {
     debug: bool,
     case_sensitive: bool,
     resolved_projects: Option<Vec<ResolvedProjects>>,
+    preview_target_bytes: usize,
+    max_bytes: usize,
 }
 
 /// The lexical side of a search: highlight terms, the FTS expression (if any) and its first candidate window.
@@ -107,12 +371,10 @@ struct Fused {
 struct GMatch {
     primary: i64,
     rowids: Vec<i64>,
-    run_key: String,
     ordinals: Vec<i64>,
     /// (chunk ordinal, span seq, span) of every non-context span of the merged chunks.
     spans: Vec<(i64, usize, SpanRow)>,
     matched_by: BTreeSet<&'static str>,
-    ctx_outside: bool,
     debug: Option<(Rank, Rank, f64)>,
 }
 
@@ -124,9 +386,15 @@ struct Group {
     matches: Vec<GMatch>,
 }
 
+struct MatchData<'a> {
+    terms: &'a [Vec<String>],
+    primary: &'a ChunkMeta,
+    spans: &'a HashMap<i64, Vec<SpanRow>>,
+    bodies: &'a HashMap<i64, String>,
+}
+
 struct MatchDraft {
-    spans: Vec<SpanRef>,
-    content: String,
+    records: Vec<MatchRecord>,
     branch_leaf: Option<String>,
     matched_at: Option<i64>,
     excerpt: String,
@@ -166,6 +434,17 @@ impl SearchService {
         leases: LeaseManager,
         keys: KeyStore,
     ) -> Self {
+        Self::with_strategies(index, cfg, embeddings, leases, keys, Strategies::default())
+    }
+
+    fn with_strategies(
+        index: Index,
+        cfg: Arc<Config>,
+        embeddings: Arc<EmbeddingService>,
+        leases: LeaseManager,
+        keys: KeyStore,
+        strategies: Strategies,
+    ) -> Self {
         let permits = cfg.search.semantic_scan_concurrency.max(1);
         Self {
             index,
@@ -175,6 +454,9 @@ impl SearchService {
             keys,
             scan_permits: Arc::new(Semaphore::new(permits)),
             coverage_cache: Default::default(),
+            retriever: strategies.retriever,
+            renderer: strategies.renderer,
+            selector: strategies.selector,
         }
     }
 
@@ -281,6 +563,14 @@ impl SearchService {
 
     async fn plan(&self, input: SearchInput) -> Result<Plan, AppError> {
         let cfg = &self.cfg.search;
+        let preview_target_bytes = input.preview_target_bytes.unwrap_or(1200);
+        if !(256..=8192).contains(&preview_target_bytes) {
+            return Err(invalid("preview_target_bytes must be between 256 and 8192"));
+        }
+        let max_bytes = input.max_bytes.unwrap_or(cfg.max_search_response_bytes);
+        if !(4096..=cfg.max_search_response_bytes).contains(&max_bytes) {
+            return Err(invalid("max_bytes is outside the server limits"));
+        }
         let mut queries = match (input.query, input.queries) {
             (Some(q), None) => vec![q],
             (None, Some(qs)) => qs,
@@ -404,6 +694,8 @@ impl SearchService {
             debug: input.debug_scores,
             case_sensitive: input.case_sensitive.unwrap_or(true),
             resolved_projects,
+            preview_target_bytes,
+            max_bytes,
         })
     }
 
@@ -453,16 +745,7 @@ impl SearchService {
         let mut rows = Vec::new();
         let mut reached = false;
         for q in &plan.queries {
-            let r = retrieve::literal(
-                conn,
-                &plan.filters,
-                q,
-                plan.case_sensitive,
-                plan.per_session,
-                plan.prefer_recent,
-                max_l,
-            )
-            .await?;
+            let r = self.retriever.literal(conn, plan, q, max_l).await?;
             reached |= r.len() >= max_l;
             rows.extend(r);
         }
@@ -476,6 +759,7 @@ impl SearchService {
     }
 
     async fn semantic_candidates(
+        &self,
         conn: &mut sqlx::SqliteConnection,
         plan: &Plan,
         q: &QueryVector,
@@ -483,7 +767,10 @@ impl SearchService {
         limits: retrieve::ScanLimits,
         warnings: &mut Vec<Warning>,
     ) -> Result<Vec<Scored>, AppError> {
-        let out = retrieve::semantic_scan(conn, &plan.filters, &q.0, q.1.clone(), limits).await?;
+        let out = self
+            .retriever
+            .semantic(conn, &plan.filters, &q.0, q.1.clone(), limits)
+            .await?;
         if !out.complete {
             warnings.push(warn(
                 "semantic_scan_incomplete",
@@ -530,6 +817,7 @@ impl SearchService {
         let mut suggest_literal = false;
         let max_l = cfg.max_candidate_limit.max(cfg.candidate_limit).max(1);
 
+        let stage_start = Instant::now();
         let sessions = if mode == Mode::Literal {
             self.literal_drafts(conn, plan, max_l, &mut warnings)
                 .await?
@@ -540,13 +828,14 @@ impl SearchService {
                     let fts = query::fts_query(q);
                     let hits = match &fts {
                         Some((expr, _)) => {
-                            retrieve::lexical(
-                                conn,
-                                &plan.filters,
-                                expr,
-                                cfg.candidate_limit.clamp(1, max_l),
-                            )
-                            .await?
+                            self.retriever
+                                .lexical(
+                                    conn,
+                                    &plan.filters,
+                                    expr,
+                                    cfg.candidate_limit.clamp(1, max_l),
+                                )
+                                .await?
                         }
                         None => Vec::new(),
                     };
@@ -569,13 +858,18 @@ impl SearchService {
                     deadline,
                 };
                 sems.push(
-                    Self::semantic_candidates(conn, plan, q, &coverage, limits, &mut warnings)
+                    self.semantic_candidates(conn, plan, q, &coverage, limits, &mut warnings)
                         .await?,
                 );
             }
             self.chunk_sessions(conn, plan, lexicals, &sems, max_l)
                 .await?
         };
+        tracing::debug!(
+            stage = "retrieval",
+            elapsed_us = stage_start.elapsed().as_micros() as u64,
+            sessions = sessions.len()
+        );
         let mut sessions = sessions;
         Self::fill_titles(conn, &mut sessions).await?;
         drop(tx);
@@ -614,7 +908,7 @@ impl SearchService {
             if l > lex_window {
                 for lq in &mut lexicals {
                     if let Some(e) = &lq.expr {
-                        lq.hits = retrieve::lexical(conn, &plan.filters, e, l).await?;
+                        lq.hits = self.retriever.lexical(conn, &plan.filters, e, l).await?;
                     }
                 }
                 lex_window = l;
@@ -652,6 +946,8 @@ impl SearchService {
             .iter()
             .take(plan.limit)
             .flat_map(|g| g.matches.iter().flat_map(|m| m.rowids.iter().copied()))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
             .collect();
         let bodies = retrieve::chunk_bodies(conn, &rowids).await?;
         let mut out = Vec::new();
@@ -663,13 +959,17 @@ impl SearchService {
             let mut matches = Vec::new();
             for m in &g.matches {
                 matches.push(
-                    Self::finish_match(
+                    self.finish_match(
                         conn,
                         plan,
-                        &terms,
                         &g,
                         m,
-                        (&metas[&m.primary], &spans, &bodies),
+                        MatchData {
+                            terms: &terms,
+                            primary: &metas[&m.primary],
+                            spans: &spans,
+                            bodies: &bodies,
+                        },
                         &mut leaf_counts,
                     )
                     .await?,
@@ -692,106 +992,101 @@ impl SearchService {
         metas: &HashMap<i64, ChunkMeta>,
         cache: &mut HashMap<i64, Vec<SpanRow>>,
     ) -> Result<Vec<Group>, AppError> {
-        let mut groups: Vec<Group> = Vec::new();
-        let mut index: HashMap<String, usize> = HashMap::new();
-        for (pos, f) in fused.iter().enumerate() {
-            let Some(m) = metas.get(&f.rowid) else {
-                continue;
-            };
-            let gi = *index.entry(m.session_id.clone()).or_insert_with(|| {
-                groups.push(Group {
-                    session_id: m.session_id.clone(),
-                    snapshot_id: m.snapshot_id.clone(),
-                    score: f.score,
-                    last_activity: m.last_activity_at,
-                    matches: Vec::new(),
-                });
-                groups.len() - 1
-            });
-            if !cache.contains_key(&m.rowid) {
-                let batch: Vec<i64> = fused[pos..]
-                    .iter()
-                    .take(SPAN_LOOKAHEAD)
-                    .filter_map(|c| metas.get(&c.rowid))
-                    .filter(|c| !cache.contains_key(&c.rowid))
-                    .map(|c| c.rowid)
-                    .collect();
-                cache.extend(retrieve::load_spans(conn, &batch).await?);
-            }
-            let all = &cache[&m.rowid];
-            // A chunk without an anchored (non-context) span cannot produce a readable reference.
-            let core: Vec<(usize, &SpanRow)> =
-                all.iter().filter(|s| !s.is_context).enumerate().collect();
-            if core.is_empty() {
-                continue;
-            }
-            // Any returned text (context or matched) whose own message time lies outside the interval is labelled.
-            let ctx_outside = all
-                .iter()
-                .any(|s| outside_interval(&plan.filters, s.msg_ts));
-            let by: Vec<&'static str> = [f.lex.map(|_| "lexical"), f.sem.map(|_| "semantic")]
-                .into_iter()
-                .flatten()
-                .collect();
-            let g = &mut groups[gi];
-            let has_room = g.matches.len() < plan.per_session;
-            let hit = g.matches.iter_mut().find(|gm| {
-                gm.run_key == m.run_key
-                    && (gm.ordinals.iter().any(|o| (o - m.ordinal).abs() <= 1)
-                        || core
-                            .iter()
-                            .any(|(_, s)| gm.spans.iter().any(|(_, _, t)| overlaps(t, s))))
-            });
-            let spans_add = core.iter().map(|(i, s)| (m.ordinal, *i, (*s).clone()));
-            match hit {
-                Some(gm) => {
-                    gm.ordinals.push(m.ordinal);
-                    gm.rowids.push(m.rowid);
-                    gm.spans.extend(spans_add);
-                    gm.matched_by.extend(by);
-                    gm.ctx_outside |= ctx_outside;
-                }
-                None if has_room => g.matches.push(GMatch {
-                    primary: m.rowid,
-                    rowids: vec![m.rowid],
-                    run_key: m.run_key.clone(),
-                    ordinals: vec![m.ordinal],
-                    spans: spans_add.collect(),
-                    matched_by: by.into_iter().collect(),
-                    ctx_outside,
-                    debug: Some((f.lex, f.sem, f.score)),
-                }),
-                None => {}
-            }
+        let stage_start = Instant::now();
+        let missing: Vec<i64> = fused
+            .iter()
+            .map(|f| f.rowid)
+            .filter(|id| !cache.contains_key(id))
+            .collect();
+        for batch in missing.chunks(SPAN_LOOKAHEAD) {
+            cache.extend(retrieve::load_spans(conn, batch).await?);
         }
-        groups.retain(|g| !g.matches.is_empty());
+        let mut ancestry = HashMap::new();
+        let snapshots: BTreeSet<_> = metas.values().map(|m| m.snapshot_id.as_str()).collect();
+        for snapshot in snapshots {
+            let keys: BTreeSet<_> = fused
+                .iter()
+                .filter_map(|f| {
+                    metas
+                        .get(&f.rowid)
+                        .filter(|m| m.snapshot_id == snapshot)
+                        .map(|_| &cache[&f.rowid])
+                })
+                .flatten()
+                .map(|s| s.record_key.as_str())
+                .collect();
+            let keys: Vec<_> = keys.into_iter().collect();
+            let mut parents = HashMap::new();
+            for batch in keys.chunks(500) {
+                let sql = format!(
+                    "WITH RECURSIVE ancestors(k, parent) AS (SELECT record_key, parent_message_key FROM messages WHERE snapshot_id = ? AND record_key IN ({}) UNION SELECT m.record_key, m.parent_message_key FROM messages m JOIN ancestors a ON m.record_key = a.parent WHERE m.snapshot_id = ?) SELECT k, parent FROM ancestors",
+                    vec!["?"; batch.len()].join(",")
+                );
+                let mut q = sqlx::query(sqlx::AssertSqlSafe(sql)).bind(snapshot);
+                for key in batch {
+                    q = q.bind(*key);
+                }
+                for row in q
+                    .bind(snapshot)
+                    .fetch_all(&mut *conn)
+                    .await
+                    .map_err(retrieve::storage_err)?
+                {
+                    use sqlx::Row;
+                    parents.insert(row.get::<String, _>(0), row.get::<Option<String>, _>(1));
+                }
+            }
+            ancestry.insert(snapshot.to_string(), parents);
+        }
+        let groups = self
+            .selector
+            .select(fused, metas, cache, &ancestry, plan.per_session);
+        tracing::debug!(
+            stage = "selection",
+            elapsed_us = stage_start.elapsed().as_micros() as u64,
+            candidates = fused.len(),
+            windows = groups.iter().map(|g| g.matches.len()).sum::<usize>()
+        );
         Ok(groups)
     }
 
     /// Turn a grouped match into its anchored spans, digest, branch leaf and bounded excerpt.
     async fn finish_match(
+        &self,
         conn: &mut sqlx::SqliteConnection,
         plan: &Plan,
-        terms: &[Vec<String>],
         g: &Group,
         m: &GMatch,
-        (primary, all_spans, bodies): (
-            &ChunkMeta,
-            &HashMap<i64, Vec<SpanRow>>,
-            &HashMap<i64, String>,
-        ),
+        data: MatchData<'_>,
         leaf_counts: &mut HashMap<String, usize>,
     ) -> Result<MatchDraft, AppError> {
-        let selection = evidence::select(m, terms, &plan.filters, all_spans, bodies)
+        let stage_start = Instant::now();
+        let selection = self
+            .renderer
+            .render(
+                m,
+                data.terms,
+                &plan.filters,
+                data.spans,
+                data.bodies,
+                plan.preview_target_bytes,
+            )
             .ok_or_else(|| AppError::new("STORAGE_ERROR", "the local index could not be read"))?;
+        tracing::debug!(
+            stage = "preview",
+            elapsed_us = stage_start.elapsed().as_micros() as u64,
+            text_bytes = selection.excerpt.len()
+        );
         let evidence::Selection {
-            spans: selected,
             excerpt,
             truncated,
             context_outside_time_filter: excerpt_outside,
         } = selection;
-        let last_key = selected.last().map(|s| s.record_key.clone());
-        let (span_refs, content) = span_refs_and_digest(conn, &g.snapshot_id, &selected).await?;
+        let mut window_spans = m.spans.clone();
+        window_spans.sort_by_key(|(ord, seq, _)| (*ord, *seq));
+        let window_spans: Vec<SpanRow> = window_spans.into_iter().map(|(_, _, s)| s).collect();
+        let last_key = window_spans.last().map(|s| s.record_key.clone());
+        let records = match_records(conn, &g.snapshot_id, &window_spans).await?;
         let branch_leaf =
             branch_leaf(conn, &g.snapshot_id, last_key.as_deref(), leaf_counts).await?;
         let debug = m
@@ -805,10 +1100,9 @@ impl SearchService {
                 semantic_cosine: sem.map(|s| s.1),
             });
         Ok(MatchDraft {
-            spans: span_refs,
-            content,
+            records,
             branch_leaf,
-            matched_at: primary.time_anchor,
+            matched_at: data.primary.time_anchor,
             excerpt,
             truncated,
             matched_by: m.matched_by.iter().map(|s| (*s).to_string()).collect(),
@@ -870,34 +1164,67 @@ impl SearchService {
             let mut matches = Vec::new();
             for h in hits {
                 let end = h.byte_start + h.hit_text.len() as i64;
-                let (excerpt, cut) = query::excerpt(
-                    &format!("{}: {}", h.role.to_uppercase(), h.window),
-                    &[],
-                    None,
-                    MAX_EXCERPT_BYTES,
+                let body: String = sqlx::query_scalar(
+                    "SELECT text FROM blocks WHERE snapshot_id = ? AND record_key = ? AND idx = ?",
+                )
+                .bind(&snap)
+                .bind(&h.record_key)
+                .bind(h.block_index)
+                .fetch_one(&mut *conn)
+                .await
+                .map_err(retrieve::storage_err)?;
+                let (excerpt, cut) = self.renderer.render_literal(
+                    &body,
+                    h.byte_start as usize,
+                    plan.preview_target_bytes,
                 );
                 let span = SpanRow {
                     record_key: h.record_key.clone(),
-                    block_index: h.block_index,
                     start: h.byte_start,
                     end,
                     is_context: false,
                     msg_ts: h.ts,
                 };
-                let content = digest_frames(std::iter::once(h.hit_text.as_slice()));
+                let rowids: Vec<i64> = sqlx::query_scalar("WITH center AS (SELECT c.run_key, c.ordinal, c.rowid FROM chunk_spans sp JOIN chunks c ON c.rowid = sp.chunk_rowid WHERE c.snapshot_id = ? AND sp.record_key = ? AND sp.block_index = ? AND sp.start_byte <= ? AND sp.end_byte >= ? ORDER BY sp.is_context, c.ordinal LIMIT 1) SELECT c.rowid FROM chunks c JOIN center x ON c.snapshot_id = ? AND c.run_key = x.run_key AND c.ordinal BETWEEN x.ordinal - 1 AND x.ordinal + 1 ORDER BY (c.rowid = x.rowid) DESC, c.ordinal")
+                    .bind(&snap).bind(&h.record_key).bind(h.block_index).bind(h.byte_start).bind(end).bind(&snap)
+                    .fetch_all(&mut *conn).await.map_err(retrieve::storage_err)?;
+                let records = if rowids.is_empty() {
+                    match_records(conn, &snap, std::slice::from_ref(&span)).await?
+                } else {
+                    let metas: HashMap<_, _> = retrieve::load_chunks(conn, &rowids)
+                        .await?
+                        .into_iter()
+                        .map(|m| (m.rowid, m))
+                        .collect();
+                    let fused: Vec<_> = rowids
+                        .iter()
+                        .enumerate()
+                        .map(|(rank, &rowid)| Fused {
+                            rowid,
+                            logical_id: rowid.to_string(),
+                            score: 1.0 / (rank + 1) as f64,
+                            lex: Some((rank + 1, 0.0)),
+                            sem: None,
+                        })
+                        .collect();
+                    let mut cache = HashMap::new();
+                    let groups = self
+                        .group_chunks(conn, plan, &fused, &metas, &mut cache)
+                        .await?;
+                    let selected: Vec<_> = groups
+                        .first()
+                        .and_then(|g| g.matches.first())
+                        .map(|m| m.spans.iter().map(|(_, _, s)| s.clone()).collect())
+                        .unwrap_or_else(|| vec![span.clone()]);
+                    match_records(conn, &snap, &selected).await?
+                };
                 matches.push(MatchDraft {
-                    spans: vec![SpanRef {
-                        r: span.record_key.clone(),
-                        b: span.block_index as u32,
-                        s: span.start as u32,
-                        e: span.end as u32,
-                    }],
-                    content,
+                    records,
                     branch_leaf: branch_leaf(conn, &snap, Some(&h.record_key), &mut leaf_counts)
                         .await?,
                     matched_at: h.anchor,
                     excerpt,
-                    truncated: cut || !h.window_covers_all,
+                    truncated: cut,
                     matched_by: vec!["literal".into()],
                     ctx_outside: outside_interval(&plan.filters, h.ts),
                     debug: None,
@@ -959,8 +1286,8 @@ impl SearchService {
                         .encode(&key, HandleKind::Match);
                         let payload = serde_json::to_vec(&MatchRef {
                             manifest: anchor.manifest.clone(),
-                            spans: m.spans,
-                            content: m.content,
+                            version: 2,
+                            records: m.records,
                         })
                         .expect("match ref serializes");
                         pending.insert(
@@ -982,10 +1309,12 @@ impl SearchService {
                                 .encode(&key)
                             }),
                             matched_at: m.matched_at.map(format_rfc3339),
-                            excerpt: m.excerpt,
+                            preview: Some(Preview {
+                                text: m.excerpt,
+                                clipped: m.truncated,
+                            }),
                             matched_by: m.matched_by,
                             context_outside_time_filter: m.ctx_outside,
-                            truncated: m.truncated,
                             debug: m.debug,
                         }
                     })
@@ -998,7 +1327,7 @@ impl SearchService {
         }
 
         let mut out = SearchOutput {
-            schema_version: 1,
+            schema_version: 2,
             mode_requested: plan.mode,
             mode_used,
             index_epoch: ret.epoch,
@@ -1012,7 +1341,16 @@ impl SearchService {
             truncated: false,
             suggest_literal: ret.suggest_literal,
         };
-        self.fit_budget(&mut out);
+        let stage_start = Instant::now();
+        self.fit_budget(&mut out, plan.max_bytes);
+        tracing::debug!(
+            stage = "packing",
+            elapsed_us = stage_start.elapsed().as_micros() as u64,
+            output_bytes = tool_result_bytes(
+                &serde_json::to_value(&out).unwrap_or(serde_json::Value::Null),
+                false
+            )
+        );
         if let Some(lease) = &lease {
             let rows: Vec<NewRef> = out
                 .results
@@ -1065,8 +1403,7 @@ impl SearchService {
 
     /// Keep the largest prefix of matches (breadth first: every session's first match before any second match)
     /// whose tool result fits `max_search_response_bytes`.
-    fn fit_budget(&self, out: &mut SearchOutput) {
-        let budget = self.cfg.search.max_search_response_bytes;
+    fn fit_budget(&self, out: &mut SearchOutput, budget: usize) {
         let size = |o: &SearchOutput| {
             tool_result_bytes(&serde_json::to_value(o).unwrap_or(Value::Null), false)
         };
@@ -1080,7 +1417,13 @@ impl SearchService {
             .flat_map(|(si, s)| (0..s.matches.len()).map(move |mi| (mi, si)))
             .collect();
         order.sort();
-        let full = std::mem::take(&mut out.results);
+        let mut full = std::mem::take(&mut out.results);
+        let previews: Vec<Option<Preview>> = order
+            .iter()
+            .map(|&(mi, si)| full[si].matches[mi].preview.take())
+            .collect();
+        out.truncated = true;
+        out.warnings.push(warn("response_truncated", "Previews or matches were omitted to fit the response size limit; narrow the query or filters."));
         let build = |k: usize| -> Vec<SessionResult> {
             let keep: BTreeSet<(usize, usize)> =
                 order[..k].iter().map(|&(mi, si)| (si, mi)).collect();
@@ -1098,22 +1441,27 @@ impl SearchService {
                 })
                 .collect()
         };
-        out.truncated = true;
-        out.warnings.push(warn(
-            "response_truncated",
-            "Matches were dropped to fit the response size limit; narrow the query or filters.",
-        ));
         let (mut lo, mut hi) = (0usize, order.len());
         while lo < hi {
             let mid = (lo + hi).div_ceil(2);
             out.results = build(mid);
             if size(out) <= budget {
-                lo = mid
+                lo = mid;
             } else {
-                hi = mid - 1
+                hi = mid - 1;
             }
         }
         out.results = build(lo);
+        for (idx, &(mi, si)) in order[..lo].iter().enumerate() {
+            let session_id = &full[si].session_id;
+            let Some(session) = out.results.iter().position(|s| &s.session_id == session_id) else {
+                continue;
+            };
+            out.results[session].matches[mi].preview = previews[idx].clone();
+            if size(out) > budget {
+                out.results[session].matches[mi].preview = None;
+            }
+        }
     }
 }
 
@@ -1202,11 +1550,36 @@ fn prefer_recent(groups: &mut [Group]) {
     }
 }
 
-fn overlaps(a: &SpanRow, b: &SpanRow) -> bool {
-    a.record_key == b.record_key
-        && a.block_index == b.block_index
-        && a.start <= b.end
-        && b.start <= a.end
+fn compatible_chunks(
+    parents: &HashMap<String, Option<String>>,
+    left: &[SpanRow],
+    right: &[SpanRow],
+) -> bool {
+    let keys: Vec<_> = left
+        .iter()
+        .chain(right)
+        .map(|s| s.record_key.as_str())
+        .collect();
+    keys.iter().all(|a| {
+        keys.iter().all(|b| {
+            let ancestor = |from: &str, to: &str| {
+                let mut current = Some(from);
+                let mut remaining = parents.len() + 1;
+                while let Some(key) = current {
+                    if key == to {
+                        return true;
+                    }
+                    if remaining == 0 {
+                        break;
+                    }
+                    remaining -= 1;
+                    current = parents.get(key).and_then(|p| p.as_deref());
+                }
+                false
+            };
+            ancestor(a, b) || ancestor(b, a)
+        })
+    })
 }
 
 fn outside_interval(f: &Filters, ts: Option<i64>) -> bool {
@@ -1219,36 +1592,53 @@ fn outside_interval(f: &Filters, ts: Option<i64>) -> bool {
     }
 }
 
-/// Digest binding the original text of the anchored spans: frames of (len u64 LE, bytes) per span, in order.
-fn digest_frames<'a>(parts: impl Iterator<Item = &'a [u8]>) -> String {
-    let mut buf = Vec::new();
-    for p in parts {
-        buf.extend_from_slice(&(p.len() as u64).to_le_bytes());
-        buf.extend_from_slice(p);
-    }
-    short_digest(&buf)
-}
-
-async fn span_refs_and_digest(
+async fn match_records(
     conn: &mut sqlx::SqliteConnection,
     snapshot: &str,
     spans: &[SpanRow],
-) -> Result<(Vec<SpanRef>, String), AppError> {
-    let mut refs = Vec::with_capacity(spans.len());
-    let mut texts = Vec::with_capacity(spans.len());
-    for s in spans {
-        refs.push(SpanRef {
-            r: s.record_key.clone(),
-            b: s.block_index as u32,
-            s: s.start as u32,
-            e: s.end as u32,
-        });
-        texts.push(
-            retrieve::block_bytes(conn, snapshot, &s.record_key, s.block_index, s.start, s.end)
-                .await?,
-        );
+) -> Result<Vec<MatchRecord>, AppError> {
+    let mut keys = Vec::new();
+    for span in spans {
+        if !keys.contains(&span.record_key) {
+            keys.push(span.record_key.clone());
+        }
     }
-    Ok((refs, digest_frames(texts.iter().map(|t| t.as_slice()))))
+    let mut digests = HashMap::new();
+    for batch in keys.chunks(499) {
+        let sql = format!(
+            "SELECT key, digest FROM records WHERE snapshot_id = ? AND key IN ({})",
+            vec!["?"; batch.len()].join(",")
+        );
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql)).bind(snapshot);
+        for key in batch {
+            q = q.bind(key);
+        }
+        for row in q
+            .fetch_all(&mut *conn)
+            .await
+            .map_err(retrieve::storage_err)?
+        {
+            use sqlx::Row;
+            let digest: Vec<u8> = row.get(1);
+            let digest: [u8; 32] = digest
+                .try_into()
+                .map_err(|_| AppError::new("STORAGE_ERROR", "record digest is malformed"))?;
+            digests.insert(
+                row.get::<String, _>(0),
+                crate::transcript::reader::record_digest_hex(&digest),
+            );
+        }
+    }
+    let records = keys
+        .into_iter()
+        .map(|key| {
+            let digest = digests
+                .remove(&key)
+                .ok_or_else(|| AppError::new("STORAGE_ERROR", "matched record is missing"))?;
+            Ok(MatchRecord { key, digest })
+        })
+        .collect::<Result<Vec<_>, AppError>>()?;
+    Ok(records)
 }
 
 /// Branch disambiguation: omit when the snapshot has one leaf; otherwise the unique leaf under the match, else omit
@@ -1273,4 +1663,240 @@ async fn branch_leaf(
     let Some(k) = from_key else { return Ok(None) };
     let under = retrieve::leaves_under(conn, snapshot, Some(k)).await?;
     Ok((under.len() == 1).then(|| under[0].clone()))
+}
+
+#[cfg(test)]
+mod strategy_tests {
+    use super::*;
+    use crate::clock::{ManualClock, SharedClock};
+    use crate::embeddings::FakeProvider;
+    use crate::transcript::handle::HandleKey;
+    use std::sync::atomic::AtomicUsize;
+
+    fn select_windows(rows: &[(i64, &str, &[&str])], limit: usize) -> Vec<GMatch> {
+        let fused: Vec<_> = rows
+            .iter()
+            .map(|(id, _, _)| Fused {
+                rowid: *id,
+                logical_id: id.to_string(),
+                score: 1.0,
+                lex: Some((1, 1.0)),
+                sem: None,
+            })
+            .collect();
+        let metas = rows
+            .iter()
+            .map(|(id, run, _)| {
+                (
+                    *id,
+                    ChunkMeta {
+                        rowid: *id,
+                        session_id: "session".into(),
+                        snapshot_id: "snapshot".into(),
+                        run_key: (*run).into(),
+                        ordinal: *id,
+                        time_anchor: Some(*id),
+                        last_activity_at: None,
+                    },
+                )
+            })
+            .collect();
+        let cache = rows
+            .iter()
+            .map(|(id, _, keys)| {
+                (
+                    *id,
+                    keys.iter()
+                        .map(|key| SpanRow {
+                            record_key: (*key).into(),
+                            start: 0,
+                            end: 1,
+                            is_context: false,
+                            msg_ts: None,
+                        })
+                        .collect(),
+                )
+            })
+            .collect();
+        let mut parents = HashMap::new();
+        for key in rows.iter().flat_map(|(_, _, keys)| keys.iter()) {
+            parents.insert((*key).to_owned(), None);
+        }
+        let mut keys: Vec<_> = parents.keys().cloned().collect();
+        keys.sort();
+        for pair in keys.windows(2) {
+            parents.insert(pair[1].clone(), Some(pair[0].clone()));
+        }
+        let ancestry = HashMap::from([("snapshot".to_owned(), parents)]);
+        DefaultMatchSelector
+            .select(&fused, &metas, &cache, &ancestry, limit)
+            .pop()
+            .unwrap()
+            .matches
+    }
+
+    #[test]
+    fn covered_witnesses_leave_room_for_independent_windows() {
+        let matches = select_windows(
+            &[
+                (2, "a", &["b"]),
+                (3, "a", &["c"]),
+                (4, "a", &["d"]),
+                (10, "b", &["j"]),
+                (1, "a", &["a"]),
+                (5, "a", &["e"]),
+                (9, "b", &["i"]),
+                (11, "b", &["k"]),
+            ],
+            3,
+        );
+        assert_eq!(
+            matches.iter().map(|m| m.primary).collect::<Vec<_>>(),
+            vec![2, 4, 10]
+        );
+        assert!(matches.iter().all(|m| m.rowids.len() <= 3));
+        assert_eq!(matches[0].rowids, vec![1, 2, 3]);
+        assert_eq!(matches[2].rowids, vec![9, 10, 11]);
+    }
+
+    #[test]
+    fn record_superset_does_not_remove_an_uncovered_stronger_witness() {
+        let matches = select_windows(
+            &[(1, "a", &["a"]), (10, "b", &["a", "b"]), (20, "c", &["c"])],
+            3,
+        );
+        assert_eq!(
+            matches.iter().map(|m| m.primary).collect::<Vec<_>>(),
+            vec![1, 10, 20]
+        );
+    }
+
+    #[test]
+    fn record_containment_suppresses_only_fully_covered_anchors() {
+        let matches = select_windows(
+            &[
+                (1, "a", &["a", "b"]),
+                (10, "b", &["a"]),
+                (20, "c", &["b", "c"]),
+            ],
+            3,
+        );
+        assert_eq!(
+            matches.iter().map(|m| m.primary).collect::<Vec<_>>(),
+            vec![1, 20]
+        );
+    }
+
+    struct Retriever(Arc<AtomicUsize>);
+    impl CandidateRetriever for Retriever {
+        fn lexical<'a>(
+            &'a self,
+            _: &'a mut sqlx::SqliteConnection,
+            _: &'a Filters,
+            _: &'a str,
+            _: usize,
+        ) -> RetrievalFuture<'a, Vec<Scored>> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Ok(Vec::new()) })
+        }
+        fn semantic<'a>(
+            &'a self,
+            _: &'a mut sqlx::SqliteConnection,
+            _: &'a Filters,
+            _: &'a str,
+            _: Arc<Vec<f32>>,
+            _: retrieve::ScanLimits,
+        ) -> RetrievalFuture<'a, retrieve::ScanOutcome> {
+            Box::pin(async { Err(AppError::new("TEST", "unused")) })
+        }
+        fn literal<'a>(
+            &'a self,
+            _: &'a mut sqlx::SqliteConnection,
+            _: &'a Plan,
+            _: &'a str,
+            _: usize,
+        ) -> RetrievalFuture<'a, Vec<LiteralHit>> {
+            Box::pin(async { Err(AppError::new("TEST", "unused")) })
+        }
+    }
+    struct Selector(Arc<AtomicUsize>);
+    impl MatchSelector for Selector {
+        fn select(
+            &self,
+            _: &[Fused],
+            _: &HashMap<i64, ChunkMeta>,
+            _: &HashMap<i64, Vec<SpanRow>>,
+            _: &HashMap<String, HashMap<String, Option<String>>>,
+            _: usize,
+        ) -> Vec<Group> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Vec::new()
+        }
+    }
+    struct Renderer(Arc<AtomicUsize>);
+    impl PreviewRenderer for Renderer {
+        fn render(
+            &self,
+            _: &GMatch,
+            _: &[Vec<String>],
+            _: &Filters,
+            _: &HashMap<i64, Vec<SpanRow>>,
+            _: &HashMap<i64, String>,
+            _: usize,
+        ) -> Option<evidence::Selection> {
+            None
+        }
+        fn render_literal(&self, _: &str, _: usize, _: usize) -> (String, bool) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            ("replacement".into(), false)
+        }
+    }
+    #[tokio::test]
+    async fn strategies_are_supplied_at_construction() {
+        let tmp = tempfile::tempdir().unwrap();
+        let index = Index::open_for_test(tmp.path()).await.unwrap();
+        let cfg = Arc::new(Config::default());
+        let clock: SharedClock = Arc::new(ManualClock::new(1_790_000_000_000));
+        let embeddings = Arc::new(EmbeddingService::new(
+            index.clone(),
+            cfg.embedding.clone(),
+            cfg.search.clone(),
+            clock.clone(),
+            Arc::new(FakeProvider::new(16)),
+        ));
+        let path = tmp.path().join("key");
+        HandleKey::create(&path).unwrap();
+        let keys = KeyStore::load(&path).unwrap();
+        let leases = LeaseManager::new(index.clone(), cfg.reader.clone(), clock);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let service = SearchService::with_strategies(
+            index.clone(),
+            cfg,
+            embeddings,
+            leases,
+            keys,
+            Strategies {
+                retriever: Box::new(Retriever(calls.clone())),
+                selector: Box::new(Selector(calls.clone())),
+                renderer: Box::new(Renderer(calls.clone())),
+            },
+        );
+        let mut conn = index.reader.acquire().await.unwrap();
+        service
+            .retriever
+            .lexical(&mut conn, &Filters::default(), "q", 1)
+            .await
+            .unwrap();
+        assert!(
+            service
+                .selector
+                .select(&[], &HashMap::new(), &HashMap::new(), &HashMap::new(), 1)
+                .is_empty()
+        );
+        assert_eq!(
+            service.renderer.render_literal("source", 0, 256).0,
+            "replacement"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
 }

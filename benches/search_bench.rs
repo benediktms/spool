@@ -14,7 +14,50 @@ use spool::search::SearchService;
 use spool::storage::index::Index;
 use spool::transcript::handle::{HandleKey, KeyStore};
 use spool::transcript::lease::LeaseManager;
-use std::sync::Arc;
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
+use tracing::field::{Field, Visit};
+use tracing::{Event, Subscriber};
+use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
+
+#[derive(Default)]
+struct StageFields {
+    stage: String,
+    values: BTreeMap<String, u64>,
+}
+
+impl Visit for StageFields {
+    fn record_str(&mut self, field: &Field, value: &str) {
+        if field.name() == "stage" {
+            self.stage = value.to_owned();
+        }
+    }
+
+    fn record_u64(&mut self, field: &Field, value: u64) {
+        self.values.insert(field.name().to_owned(), value);
+    }
+
+    fn record_debug(&mut self, _: &Field, _: &dyn std::fmt::Debug) {}
+}
+
+struct StageMetrics(Arc<Mutex<BTreeMap<String, BTreeMap<String, u64>>>>);
+
+impl<S: Subscriber> Layer<S> for StageMetrics {
+    fn on_event(&self, event: &Event<'_>, _: Context<'_, S>) {
+        let mut fields = StageFields::default();
+        event.record(&mut fields);
+        if fields.stage.is_empty() {
+            return;
+        }
+        let mut stages = self.0.lock().unwrap();
+        let stage = stages.entry(fields.stage).or_default();
+        *stage.entry("events".into()).or_default() += 1;
+        for (key, value) in fields.values {
+            *stage.entry(key).or_default() += value;
+        }
+    }
+}
+
 use std::time::{Duration, Instant};
 
 struct Rng(u64);
@@ -69,7 +112,7 @@ fn rss_mib() -> f64 {
         / 1024.0
 }
 
-async fn run(n_chunks: usize) {
+async fn run(n_chunks: usize, stages: &Arc<Mutex<BTreeMap<String, BTreeMap<String, u64>>>>) {
     const DIMS: usize = 768;
     let tmp = tempfile::tempdir().unwrap();
     let index = Index::open_for_test(tmp.path()).await.unwrap();
@@ -168,7 +211,11 @@ async fn run(n_chunks: usize) {
     ] {
         // warm up
         let _ = svc.call(json!({"query": qs[0], "mode": mode})).await;
+        stages.lock().unwrap().clear();
         let mut lat = Vec::new();
+        let mut output_bytes = 0usize;
+        let mut result_sessions = 0usize;
+        let mut result_matches = 0usize;
         for (i, q) in qs.iter().enumerate() {
             let q = if mode == "semantic" || mode == "hybrid" {
                 format!("{q} variant{i}")
@@ -184,21 +231,26 @@ async fn run(n_chunks: usize) {
             let t = Instant::now();
             let r = svc.call(args).await;
             lat.push(t.elapsed());
+            let r = r.unwrap();
+            output_bytes += serde_json::to_vec(&r).unwrap().len();
+            let results = r["results"].as_array().unwrap();
+            result_sessions += results.len();
+            result_matches += results
+                .iter()
+                .map(|s| s["matches"].as_array().unwrap().len())
+                .sum::<usize>();
             if label == "literal" {
                 assert_eq!(
-                    r.unwrap()["results"].as_array().unwrap().len(),
+                    r["results"].as_array().unwrap().len(),
                     1,
                     "literal needle found exactly"
                 );
-            } else {
-                let r = r.unwrap();
-                if label.starts_with("literal, common") {
-                    assert_eq!(
-                        r["results"].as_array().unwrap().len(),
-                        10,
-                        "common word fills the page"
-                    );
-                }
+            } else if label.starts_with("literal, common") {
+                assert_eq!(
+                    r["results"].as_array().unwrap().len(),
+                    10,
+                    "common word fills the page"
+                );
             }
         }
         rows.push((
@@ -206,6 +258,10 @@ async fn run(n_chunks: usize) {
             pct(&mut lat.clone(), 0.5),
             pct(&mut lat.clone(), 0.95),
             pct(&mut lat, 0.99),
+            output_bytes,
+            result_sessions,
+            result_matches,
+            stages.lock().unwrap().clone(),
         ));
     }
     println!("\n### {n_chunks} chunks ({sessions} sessions)\n");
@@ -216,9 +272,15 @@ async fn run(n_chunks: usize) {
         vec_mib,
         rss_mib()
     );
-    println!("| mode | p50 ms | p95 ms | p99 ms |\n|---|---|---|---|");
-    for (m, a, b, c) in rows {
-        println!("| {m} | {a:.1} | {b:.1} | {c:.1} |");
+    println!(
+        "| mode | p50 ms | p95 ms | p99 ms | output bytes | sessions | matches |\n|---|---|---|---|---|---|---|"
+    );
+    for (m, a, b, c, bytes, sessions, matches, stages) in rows {
+        println!("| {m} | {a:.1} | {b:.1} | {c:.1} | {bytes} | {sessions} | {matches} |");
+        println!(
+            "stage totals for {m}: {}",
+            serde_json::to_string(&stages).unwrap()
+        );
     }
 }
 
@@ -232,12 +294,15 @@ fn main() {
     } else {
         sizes
     };
+    let stages = Arc::new(Mutex::new(BTreeMap::new()));
+    let subscriber = tracing_subscriber::registry().with(StageMetrics(stages.clone()));
+    tracing::subscriber::set_global_default(subscriber).unwrap();
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
         .build()
         .unwrap();
     for n in sizes {
-        rt.block_on(run(n));
+        rt.block_on(run(n, &stages));
     }
 }

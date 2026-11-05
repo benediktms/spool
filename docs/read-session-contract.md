@@ -116,7 +116,7 @@ To change views or context, issue a new initial read using the original match/me
 
 `session_id` identifies a catalogued session. Message, item, branch, block, record, and match references additionally identify a particular observed snapshot or verified source identity. Native IDs are metadata; native tool-call IDs alone are not safe unique selectors.
 
-A **match reference is view-independent**. It binds source identity, anchored original spans, and the expected content, but not a representation. The signed handle holds only the lease and a lease-scoped reference id (under 150 bytes); the spans and content digest live in lease-retained storage and expire with the lease.
+A **match reference is view-independent**. It binds source identity, ordered canonical messages, and their expected content digests, independently of the preview. The signed handle holds only the lease and a lease-scoped reference id (under 150 bytes). The message anchors and digests live in lease-retained storage and expire with the lease. An old match payload returns `STALE_REFERENCE` with recovery `re_search`.
 
 A **cursor is read-dependent**. It binds the resolved selection, frozen snapshot, branch, view, source policy, next item/block/byte offset, token format version, and expiry. The signed handle holds the lease, a reference id naming the lease-retained resolved selection, the verbose flag, the next position, and the token format version (under 150 bytes). Message, item and branch references carry only the lease and manifest as anchor; session and snapshot derive from the manifest. A reference whose lease expired or was swept fails with `CURSOR_EXPIRED`; one whose stored payload is gone from a live lease fails with `STALE_REFERENCE`.
 
@@ -322,7 +322,7 @@ An initial request that fails source verification returns a tool error, not a su
 
 Section 14.2 of the specification holds this contract. These sections hold the coordinated requirements:
 
-1. **Search output (14.1):** The match reference is view-independent and anchored to original spans, not to a mutable chunk ID. The output exposes the handle expiry. Branch information is enough to resolve or disambiguate the read path.
+1. **Search output (14.1):** The match reference is view-independent and anchored to canonical messages, independently of previews and mutable chunk IDs. The output exposes the handle expiry. Branch information is enough to resolve or disambiguate the read path.
 2. **Identity model (6.1):** Distinguish conversational message IDs, content blocks, original records, tool invocations, result items, and read snapshots. Native call IDs are not globally unique selectors.
 3. **Storage (10.2, 10.4):** Keep bounded, persistent manifests and lease-pinned retired snapshots. Store tool relationship and locator metadata when needed. Do not put tool payloads in the embedding corpus.
 4. **Reader (14.2):** Support fragment continuations for every large content class. Enforce output and input-I/O budgets separately. Never require a provider call.

@@ -26,6 +26,8 @@ pub fn search_request(a: &SearchArgs, now_ms: i64, tz: Tz) -> Built<Value> {
     if a.query.trim().is_empty() {
         return Err("the query must not be empty".into());
     }
+    bounded("preview-target-bytes", a.preview_target_bytes, 256, 8192)?;
+    bounded("max-bytes", a.max_bytes, 4096, u32::MAX)?;
     let mut m = Map::new();
     m.insert("query".into(), a.query.clone().into());
     put(&mut m, "mode", a.mode.map(|x| x.as_str()));
@@ -47,6 +49,8 @@ pub fn search_request(a: &SearchArgs, now_ms: i64, tz: Tz) -> Built<Value> {
         return Err("--since must be earlier than --until".into());
     }
     put(&mut m, "limit", a.limit);
+    put(&mut m, "preview_target_bytes", a.preview_target_bytes);
+    put(&mut m, "max_bytes", a.max_bytes);
     Ok(Value::Object(m))
 }
 

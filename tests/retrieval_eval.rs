@@ -857,7 +857,7 @@ async fn curated_retrieval_evaluation() {
     let a = env.ok(json!({"query": "sqlite storage decision", "mode": "lexical", "session_ids": [FORK_ID]})).await;
     let b = env.ok(json!({"query": "postgres storage decision", "mode": "lexical", "session_ids": [FORK_ID]})).await;
     let ex = |v: &Value| {
-        v["results"][0]["matches"][0]["excerpt"]
+        v["results"][0]["matches"][0]["preview"]["text"]
             .as_str()
             .unwrap_or("")
             .to_string()
@@ -1154,7 +1154,7 @@ async fn hosted_evaluation(cfg: Config) -> Result<Value, &'static str> {
         if !complete_result(&result, "lexical") {
             return Err("branch check incomplete");
         }
-        let excerpt = result["results"][0]["matches"][0]["excerpt"]
+        let excerpt = result["results"][0]["matches"][0]["preview"]["text"]
             .as_str()
             .ok_or("branch result missing")?;
         if excerpt.contains(forbidden) {

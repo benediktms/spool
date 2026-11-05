@@ -27,15 +27,19 @@ pub struct Anchor {
     pub manifest: String,
 }
 
-/// View-independent payload stored in `lease_refs`: binds the manifest, anchored original spans
-/// and expected content. The signed handle is a `RefHandle`.
+/// View-independent payload stored with the lease.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MatchRef {
     #[serde(rename = "m")]
     pub manifest: String,
-    pub spans: Vec<SpanRef>,
-    /// blake3 (hex, first 32 chars) of the concatenated anchored span bytes.
-    pub content: String,
+    pub version: u32,
+    pub records: Vec<MatchRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MatchRecord {
+    pub key: String,
+    pub digest: String,
 }
 
 /// Signed handle to a `lease_refs` row: `[lease, ref_id]`.

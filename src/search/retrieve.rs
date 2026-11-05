@@ -436,7 +436,6 @@ pub async fn load_chunks(
 #[derive(Debug, Clone)]
 pub struct SpanRow {
     pub record_key: String,
-    pub block_index: i64,
     pub start: i64,
     pub end: i64,
     pub is_context: bool,
@@ -466,7 +465,6 @@ pub async fn load_spans(
         {
             out.entry(r.get(0)).or_default().push(SpanRow {
                 record_key: r.get(1),
-                block_index: r.get(2),
                 start: r.get(3),
                 end: r.get(4),
                 is_context: r.get::<i64, _>(5) != 0,
@@ -586,29 +584,6 @@ pub async fn first_prompts(
     Ok(out)
 }
 
-/// Bytes `[start, end)` of a block's text (original span content for the match digest).
-pub async fn block_bytes(
-    conn: &mut SqliteConnection,
-    snapshot: &str,
-    record_key: &str,
-    idx: i64,
-    start: i64,
-    end: i64,
-) -> Result<Vec<u8>, AppError> {
-    let v: Option<Vec<u8>> = sqlx::query_scalar(
-        "SELECT substr(CAST(text AS BLOB), ?, ?) FROM blocks WHERE snapshot_id = ? AND record_key = ? AND idx = ?",
-    )
-    .bind(start + 1)
-    .bind((end - start).max(0))
-    .bind(snapshot)
-    .bind(record_key)
-    .bind(idx)
-    .fetch_optional(&mut *conn)
-    .await
-    .map_err(storage_err)?;
-    v.ok_or_else(|| AppError::new("STORAGE_ERROR", "the local index could not be read"))
-}
-
 /// Leaf message keys of the branch tree under `from_key` (inclusive), at most two (callers only need 0/1/many).
 pub async fn leaves_under(
     conn: &mut SqliteConnection,
@@ -642,7 +617,6 @@ pub async fn leaves_under(
 pub struct LiteralHit {
     pub session_id: String,
     pub snapshot_id: String,
-    pub role: String,
     /// Timestamp of the message holding the hit.
     pub ts: Option<i64>,
     /// Time anchor of the chunk that holds the hit (what filters and `matched_at` use); `None` if unknown.
@@ -651,8 +625,6 @@ pub struct LiteralHit {
     pub block_index: i64,
     pub byte_start: i64,
     pub hit_text: Vec<u8>,
-    pub window: String,
-    pub window_covers_all: bool,
 }
 
 /// Time anchor of the active chunk whose new-content (non-context) span holds byte `{a}.bpos` of the hit's block
@@ -733,15 +705,12 @@ pub async fn literal(
         .map(|r| LiteralHit {
             session_id: r.get("sid"),
             snapshot_id: r.get("snap"),
-            role: r.get("role"),
             ts: r.get("mts"),
             anchor: r.get("chunk_anchor"),
             record_key: r.get("rk"),
             block_index: r.get("bi"),
             byte_start: r.get("byte_start"),
             hit_text: r.get("hit_text"),
-            window: r.get("win"),
-            window_covers_all: r.get::<i64, _>("whole") != 0,
         })
         .collect())
 }
