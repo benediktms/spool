@@ -130,7 +130,7 @@ Do not materialize all root-to-leaf paths or duplicate the entire session per br
 
 ### 5.1 `conversation`
 
-Return retained user/assistant conversational text and permitted attachment metadata. Keep roles, text, code, block order, and timestamps. Exclude tool payloads, reasoning, system/developer instructions, known injected context, and harness-generated compaction or branch summaries.
+Return retained user/assistant conversational text and permitted attachment metadata. Keep roles, text, code, block order, and timestamps. Exclude tool payloads (other than structured user-input exchange text: question text as assistant, selected answers and user notes as user), reasoning, system/developer instructions, known injected context, and harness-generated compaction or branch summaries.
 
 The reader reconstructs original messages from retained blocks; it does not return rendered embedding chunks with synthetic overlap.
 

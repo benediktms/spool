@@ -251,3 +251,105 @@ fn claude_compaction_is_summary_and_keeps_one_chain() {
     assert!(warnings.is_empty());
     assert_eq!(graph.path_to("cc-a2"), ["cc-u1", "cc-a1", "cc-u2", "cc-a2"]);
 }
+
+#[test]
+fn claude_user_input_exchange_is_conversational_and_resolves_identically() {
+    use serde_json::json;
+    let q1 = "Where should the \"files\" live?\nPick one.";
+    let q2 = "Which format?";
+    let lines = [
+        json!({"type":"user","uuid":"u1","sessionId":"s","timestamp":"2026-10-10T10:00:00Z","message":{"role":"user","content":"start"}}),
+        json!({"type":"assistant","uuid":"a1","parentUuid":"u1","message":{"id":"m1","role":"assistant","content":[
+            {"type":"tool_use","id":"ask-1","name":"AskUserQuestion","input":{"questions":[
+                {"question":q1,"header":"MUST_NOT_INDEX_HEADER","multiSelect":false,"options":[
+                    {"label":"MUST_NOT_INDEX_OPTION_LABEL","description":"MUST_NOT_INDEX_OPTION_DESCRIPTION"}]},
+                {"question":q2,"header":"Fmt","options":[]}]}}]}}),
+        json!({"type":"user","uuid":"u2","parentUuid":"a1","message":{"role":"user","content":[
+            {"type":"tool_result","tool_use_id":"ask-1","content":"MUST_NOT_INDEX_RESULT_STRING"}]},
+            "toolUseResult":{"questions":[{"question":q1},{"question":q2}],
+                "answers":{q1:"~/.agents/people/",q2:"toml"},
+                "annotations":{q2:{"notes":"my own note"}}}}),
+        json!({"type":"assistant","uuid":"a2","parentUuid":"u2","message":{"id":"m2","role":"assistant","content":[
+            {"type":"tool_use","id":"other-1","name":"Bash","input":{"questions":[{"question":"MUST_NOT_INDEX_OTHER_TOOL"}]}}]}}),
+        json!({"type":"user","uuid":"u3","parentUuid":"a2","message":{"role":"user","content":[
+            {"type":"tool_result","tool_use_id":"other-1","content":"MUST_NOT_INDEX_OTHER_RESULT"}]},
+            "toolUseResult":{"questions":[{"question":q1}],"answers":{q1:"MUST_NOT_INDEX_OTHER_ANSWER"}}}),
+    ];
+    let bytes = lines
+        .iter()
+        .map(|line| format!("{line}\n"))
+        .collect::<String>()
+        .into_bytes();
+    let (_, sink) = parse(&ClaudeAdapter, &bytes);
+
+    let exchange: Vec<_> = sink
+        .messages
+        .iter()
+        .filter(|message| message.record_key != "u1")
+        .map(|message| {
+            (
+                message.record_key.as_str(),
+                message.role,
+                message
+                    .blocks
+                    .iter()
+                    .map(|block| block.text.as_str())
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        exchange,
+        [
+            ("a1", Role::Assistant, vec![q1, q2]),
+            (
+                "u2",
+                Role::User,
+                vec!["~/.agents/people/", "toml", "my own note"]
+            ),
+        ]
+    );
+    let kind = |key: &str| sink.records.iter().find(|r| r.key == key).unwrap().kind;
+    assert_eq!(kind("a1"), RecordKind::Message);
+    assert_eq!(kind("u2"), RecordKind::Message);
+    assert_eq!(kind("a2"), RecordKind::ToolCall);
+    assert_eq!(kind("u3"), RecordKind::ToolResult);
+    assert_eq!(sink.calls.len(), 2);
+    assert_eq!(sink.results.len(), 2);
+    let answer = sink.results.iter().find(|r| r.record_key == "u2").unwrap();
+    assert_eq!(answer.turn_id.as_deref(), Some("u1"));
+    assert_eq!(
+        answer.call.as_ref().map(|(k, i)| (k.as_str(), *i)),
+        Some(("a1", 0))
+    );
+
+    let indexed = sink
+        .messages
+        .iter()
+        .flat_map(|m| m.blocks.iter().map(|b| b.text.as_str()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!indexed.contains("MUST_NOT_INDEX"));
+
+    for record in &sink.records {
+        let resolved = ClaudeAdapter
+            .resolve_locator(
+                &mut Cursor::new(bytes.as_slice()),
+                &record.locator,
+                &record.digest,
+                1024 * 1024,
+            )
+            .unwrap();
+        for message in sink.messages.iter().filter(|m| m.record_key == record.key) {
+            for block in &message.blocks {
+                let found = resolved
+                    .blocks
+                    .iter()
+                    .find(|b| b.index == block.index && b.kind == BlockKind::Text)
+                    .unwrap();
+                assert_eq!(found.bytes, block.text.as_bytes());
+                assert_eq!(found.fidelity, Fidelity::Verbatim);
+            }
+        }
+    }
+}

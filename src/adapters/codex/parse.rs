@@ -1,4 +1,4 @@
-use super::{Content, Line, Payload};
+use super::{Content, Line, Payload, USER_INPUT_TOOL, answer_texts, question_texts};
 use crate::adapters::AdapterError;
 use crate::adapters::jsonl::{Emission, LineParser, Occurrences, ParseCx, RawRecord, SessionFacts};
 use crate::domain::{
@@ -79,6 +79,7 @@ pub(crate) struct ParseState {
     /// Message identities already retained, shared by `response_item` and `event_msg` aliases.
     seen: HashSet<String>,
     calls_by_turn: HashMap<(String, String), Option<(String, u32)>>,
+    user_input_calls: HashSet<String>,
 }
 
 impl LineParser for ParseState {
@@ -243,6 +244,28 @@ fn retain_message(
     });
 }
 
+fn exchange_blocks(texts: Vec<String>) -> Vec<TextBlock> {
+    texts
+        .into_iter()
+        .zip(0..)
+        .map(|(text, index)| TextBlock {
+            index,
+            origin: BlockOrigin::Authored,
+            text,
+        })
+        .collect()
+}
+
+/// A conversational exchange rides on the tool record: the record becomes a message while
+/// its call or result metadata is still emitted.
+fn retain_exchange(cx: &mut ParseCx<'_>, rec: &mut Pending, role: Role, texts: Vec<String>) {
+    let blocks = exchange_blocks(texts);
+    if !blocks.is_empty() {
+        rec.meta.kind = RecordKind::Message;
+        retain_message(cx, rec, role, None, blocks);
+    }
+}
+
 fn tool_call(rec: &mut Pending, call_id: Option<String>, name: Option<String>) {
     rec.meta.kind = RecordKind::ToolCall;
     rec.out.calls.push(ToolCallMeta {
@@ -281,6 +304,8 @@ impl ParseState {
             turn_metadata,
             call_id,
             name,
+            arguments,
+            output,
             is_error,
             ..
         } = p;
@@ -295,8 +320,25 @@ impl ParseState {
                 turn_metadata.as_ref(),
             ),
             Some("compaction" | "context_compaction") => rec.meta.kind = RecordKind::Summary,
-            Some("function_call") => tool_call(rec, call_id, name),
-            Some("function_call_output") => self.tool_result(rec, call_id, is_error),
+            Some("function_call") => {
+                let user_input = name.as_deref() == Some(USER_INPUT_TOOL);
+                let questions = user_input
+                    .then(|| arguments.as_ref().map(question_texts))
+                    .flatten();
+                if user_input {
+                    self.user_input_calls.extend(call_id.clone());
+                }
+                tool_call(rec, call_id, name);
+                retain_exchange(cx, rec, Role::Assistant, questions.unwrap_or_default());
+            }
+            Some("function_call_output") => {
+                let answered = call_id
+                    .as_ref()
+                    .is_some_and(|id| self.user_input_calls.contains(id));
+                let answers = output.as_ref().filter(|_| answered).map(answer_texts);
+                self.tool_result(rec, call_id, is_error);
+                retain_exchange(cx, rec, Role::User, answers.unwrap_or_default());
+            }
             Some("local_shell_call" | "custom_tool_call") => rec.meta.kind = RecordKind::ToolCall,
             Some("custom_tool_call_output") => rec.meta.kind = RecordKind::ToolResult,
             Some(_) => {

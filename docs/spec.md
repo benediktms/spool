@@ -22,7 +22,7 @@ The product MUST:
 - Run one persistent daemon per user and configured state directory, independently of any agent harness.
 - Support concurrent MCP clients and remain useful while ingestion is running or the embedding provider is unavailable.
 - Index actual user and assistant conversational text, including commentary, final answers, and code blocks written in those messages.
-- Exclude tool payloads, tool results, reasoning, system instructions, and generated compaction or branch summaries from the search corpus.
+- Exclude tool payloads, tool results (except the structured user-input exchanges in 5.2), reasoning, system instructions, and generated compaction or branch summaries from the search corpus.
 - Provide full-text, semantic, and hybrid search, plus a literal substring mode for exact symbols and error text.
 - Retain source provenance and retrieve original records without modifying source sessions.
 - Use hosted embeddings, initially OpenAI `text-embedding-3-small` with 768 dimensions.
@@ -34,7 +34,7 @@ The product MUST:
 
 Do not implement generated summaries, semantic episodes, topic extraction, a knowledge graph, decision consolidation, agent memory updates, LLM reranking, query rewriting by an LLM, transcript editing, automatic session resumption, a web UI, cloud synchronization, multi-user hosting, remote network access of any kind (including an HTTP listener), MCP administration tools, or arbitrary filesystem search.
 
-Do not import raw tool output into the searchable corpus as an optimization or fallback. A phrase found only in a tool result is deliberately not discoverable through the global conversation search index. The source-reading tools recover tool evidence after a session has been identified.
+Do not import raw tool output into the searchable corpus as an optimization or fallback. The only exception is the question and answer text of structured user-input exchanges (5.2). A phrase found only in a tool result is deliberately not discoverable through the global conversation search index. The source-reading tools recover tool evidence after a session has been identified.
 
 ### 1.2 Release scope
 
@@ -231,6 +231,7 @@ These signatures are architectural sketches; production types should reflect own
 | Genuine user conversational text | Include | Conversation view |
 | Assistant text, including commentary and final answers | Include | Conversation view |
 | Code blocks, errors, and paths written in conversational text | Include verbatim | Conversation view |
+| Structured user-input exchanges (`AskUserQuestion`, `request_user_input`) | Include question text as assistant and selected answers and user notes as user; exclude options, descriptions, headers, and ids | Conversation view |
 | Tool invocation arguments | Exclude | With-tools/raw view |
 | Tool result text | Exclude, even inside a user-role envelope | With-tools/raw view |
 | Reasoning/thinking blocks | Exclude | Raw view only if explicitly enabled |
@@ -973,7 +974,7 @@ Example `BRANCH_REQUIRED` payload (illustrative IDs; the formal shape is a requi
 
 ##### 14.2.4.1 `conversation`
 
-Return retained user and assistant conversational text and permitted attachment metadata. Keep roles, text, code, block order, and timestamps. Exclude tool payloads, reasoning, system and developer instructions, known injected context, and harness-generated compaction or branch summaries.
+Return retained user and assistant conversational text and permitted attachment metadata. Keep roles, text, code, block order, and timestamps. Exclude tool payloads (other than structured user-input exchange text), reasoning, system and developer instructions, known injected context, and harness-generated compaction or branch summaries.
 
 The reader reconstructs original messages from retained blocks. It does not return rendered embedding chunks with synthetic overlap.
 

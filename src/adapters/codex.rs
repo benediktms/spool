@@ -4,10 +4,11 @@ mod resolve;
 use super::jsonl::{JsonlHarness, first_line};
 use super::{AdapterError, ProbeResult};
 use crate::domain::{HarnessKind, ResolvedBlock};
-use serde::Deserialize;
-use serde::de::IgnoredAny;
+use serde::de::{IgnoredAny, MapAccess, Visitor};
+use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::fmt;
 pub struct CodexAdapter;
 #[derive(Deserialize, Default)]
 pub(crate) struct Line {
@@ -38,6 +39,8 @@ struct Payload {
     text: Option<String>,
     call_id: Option<String>,
     name: Option<String>,
+    arguments: Option<Value>,
+    output: Option<Value>,
     #[serde(rename = "is_error")]
     is_error: Option<bool>,
     turn_id: Option<String>,
@@ -63,7 +66,7 @@ struct Content {
 impl JsonlHarness for CodexAdapter {
     const KIND: HarnessKind = HarnessKind::Codex;
     const PARSER_VERSION: &'static str =
-        "codex-rollout-cab328f2+git-remote+content-kinds+compacted";
+        "codex-rollout-cab328f2+git-remote+content-kinds+compacted+user-input";
     const MALFORMED_DETAIL: &'static str = "invalid complete JSONL rollout line";
     type Parser = parse::ParseState;
 
@@ -100,4 +103,81 @@ impl JsonlHarness for CodexAdapter {
     ) -> Result<(Option<String>, Vec<ResolvedBlock>), AdapterError> {
         resolve::resolve_line(line)
     }
+}
+
+/// The only Codex tool whose question and answer text is conversational.
+const USER_INPUT_TOOL: &str = "request_user_input";
+
+#[derive(Deserialize, Default)]
+struct UserInputArguments {
+    #[serde(default)]
+    questions: Vec<UserInputQuestion>,
+}
+#[derive(Deserialize)]
+struct UserInputQuestion {
+    question: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct UserInputOutput {
+    answers: OrderedAnswers,
+}
+#[derive(Deserialize)]
+struct AnswerEntry {
+    #[serde(default)]
+    answers: Vec<String>,
+}
+
+/// Answer strings flattened in the output's own key order, which `serde_json::Map` would not keep.
+struct OrderedAnswers(Vec<String>);
+
+impl<'de> Deserialize<'de> for OrderedAnswers {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct AnswersVisitor;
+        impl<'de> Visitor<'de> for AnswersVisitor {
+            type Value = OrderedAnswers;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a map of question ids to answers")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut out = Vec::new();
+                while let Some((_, entry)) = map.next_entry::<IgnoredAny, AnswerEntry>()? {
+                    out.extend(entry.answers);
+                }
+                Ok(OrderedAnswers(out))
+            }
+        }
+        deserializer.deserialize_map(AnswersVisitor)
+    }
+}
+
+fn non_empty(mut texts: Vec<String>) -> Vec<String> {
+    texts.retain(|text| !text.is_empty());
+    texts
+}
+
+/// Question strings from `request_user_input` arguments (a JSON string). Options are ignored.
+fn question_texts(arguments: &Value) -> Vec<String> {
+    let parsed = arguments
+        .as_str()
+        .and_then(|raw| serde_json::from_str::<UserInputArguments>(raw).ok())
+        .unwrap_or_default();
+    non_empty(
+        parsed
+            .questions
+            .into_iter()
+            .filter_map(|question| question.question)
+            .collect(),
+    )
+}
+
+/// Selected answers and `user_note:` strings from a `request_user_input` output (a JSON string).
+/// A non-JSON output (an error) yields nothing.
+fn answer_texts(output: &Value) -> Vec<String> {
+    let parsed = output
+        .as_str()
+        .and_then(|raw| serde_json::from_str::<UserInputOutput>(raw).ok());
+    non_empty(parsed.map(|parsed| parsed.answers.0).unwrap_or_default())
 }

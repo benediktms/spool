@@ -1,4 +1,4 @@
-use super::Line;
+use super::{Line, USER_INPUT_TOOL, answer_texts, question_texts};
 use crate::adapters::AdapterError;
 use crate::adapters::jsonl::{json_block, verbatim_block};
 use crate::domain::{BlockKind, ResolvedBlock};
@@ -23,15 +23,36 @@ fn project_blocks(json: &Value) -> Result<Vec<ResolvedBlock>, AdapterError> {
     let item_type = json.pointer("/payload/type").and_then(Value::as_str);
     let block = match (json.get("type").and_then(Value::as_str), item_type) {
         (Some("response_item"), Some("message")) => return Ok(message_blocks(json)),
-        (Some("response_item"), Some("function_call")) => json
-            .pointer("/payload/arguments")
-            .map(|v| json_block(0, BlockKind::ToolCall, v, "invalid Codex tool arguments"))
-            .transpose()?,
-        (Some("response_item"), Some("function_call_output")) => json
-            .pointer("/payload/output")
-            .filter(|v| !v.is_null())
-            .map(|v| json_block(0, BlockKind::ToolResult, v, "invalid Codex tool result"))
-            .transpose()?,
+        (Some("response_item"), Some("function_call")) => {
+            let mut blocks = Vec::new();
+            let arguments = json.pointer("/payload/arguments");
+            if json.pointer("/payload/name").and_then(Value::as_str) == Some(USER_INPUT_TOOL) {
+                exchange_blocks(&mut blocks, arguments.map(question_texts));
+            }
+            if let Some(v) = arguments {
+                blocks.push(json_block(
+                    0,
+                    BlockKind::ToolCall,
+                    v,
+                    "invalid Codex tool arguments",
+                )?);
+            }
+            return Ok(blocks);
+        }
+        (Some("response_item"), Some("function_call_output")) => {
+            let mut blocks = Vec::new();
+            let output = json.pointer("/payload/output").filter(|v| !v.is_null());
+            exchange_blocks(&mut blocks, output.map(answer_texts));
+            if let Some(v) = output {
+                blocks.push(json_block(
+                    0,
+                    BlockKind::ToolResult,
+                    v,
+                    "invalid Codex tool result",
+                )?);
+            }
+            return Ok(blocks);
+        }
         (Some("event_msg"), Some("UserMessage" | "AgentMessage")) => event_text_block(json),
         _ => None,
     };
@@ -67,4 +88,10 @@ fn event_text_block(json: &Value) -> Option<ResolvedBlock> {
         .or_else(|| json.pointer("/payload/text"))
         .and_then(Value::as_str)?;
     Some(verbatim_block(0, BlockKind::Text, text))
+}
+
+fn exchange_blocks(blocks: &mut Vec<ResolvedBlock>, texts: Option<Vec<String>>) {
+    for (text, index) in texts.unwrap_or_default().iter().zip(0..) {
+        blocks.push(verbatim_block(index, BlockKind::Text, text));
+    }
 }

@@ -371,3 +371,138 @@ fn codex_compacted_and_metadata_envelopes_keep_full_coverage() {
     assert!(warnings.is_empty());
     assert_eq!(graph.path_to("after"), ["before", "after"]);
 }
+
+#[test]
+fn codex_user_input_exchange_is_conversational_and_resolves_identically() {
+    use serde_json::json;
+    let question = |text: &str| json!({"header":"MUST_NOT_INDEX_HEADER","id":"qid","question":text,"options":[{"label":"MUST_NOT_INDEX_OPTION_LABEL","description":"MUST_NOT_INDEX_OPTION_DESCRIPTION"}]});
+    let arguments = json!({"questions":[question("How closely \u{2019}follow\u{2019} the list?"), question("Which \"expiry\" style?")]}).to_string();
+    let output = r#"{"answers":{"zz_second_id_sorts_last":{"answers":["Match filters only","user_note: don't suggest more"]},"aa_first_id_sorts_first":{"answers":["Expiration Date"]}}}"#;
+    let item = |turn: &str, payload: serde_json::Value| json!({"type":"response_item","turn_id":turn,"payload":payload});
+    let lines = [
+        json!({"type":"session_meta","payload":{"id":"cx","source":"cli"}}),
+        item(
+            "t1",
+            json!({"type":"message","role":"user","content":[{"type":"input_text","text":"go"}]}),
+        ),
+        item(
+            "t1",
+            json!({"type":"function_call","name":"request_user_input","call_id":"c1","arguments":arguments}),
+        ),
+        item(
+            "t1",
+            json!({"type":"function_call_output","call_id":"c1","output":output}),
+        ),
+        item(
+            "t1",
+            json!({"type":"function_call","name":"shell","call_id":"c2","arguments":arguments}),
+        ),
+        item(
+            "t1",
+            json!({"type":"function_call_output","call_id":"c2","output":output}),
+        ),
+        item(
+            "t1",
+            json!({"type":"function_call","name":"request_user_input","call_id":"c3","arguments":arguments}),
+        ),
+        item(
+            "t1",
+            json!({"type":"function_call_output","call_id":"c3","output":"MUST_NOT_INDEX request failed"}),
+        ),
+        json!({"type":"retained_context","payload":{"type":"function_call","name":"request_user_input","call_id":"c9","arguments":arguments}}),
+    ];
+    let bytes = lines
+        .iter()
+        .map(|line| format!("{line}\n"))
+        .collect::<String>()
+        .into_bytes();
+    let (_, sink) = parse(&CodexAdapter, &bytes);
+
+    let exchange: Vec<_> = sink
+        .messages
+        .iter()
+        .skip(1)
+        .map(|message| {
+            (
+                message.role,
+                message
+                    .blocks
+                    .iter()
+                    .map(|b| b.text.as_str())
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        exchange,
+        [
+            (
+                Role::Assistant,
+                vec![
+                    "How closely \u{2019}follow\u{2019} the list?",
+                    "Which \"expiry\" style?"
+                ]
+            ),
+            (
+                Role::User,
+                vec![
+                    "Match filters only",
+                    "user_note: don't suggest more",
+                    "Expiration Date"
+                ]
+            ),
+            (
+                Role::Assistant,
+                vec![
+                    "How closely \u{2019}follow\u{2019} the list?",
+                    "Which \"expiry\" style?"
+                ]
+            ),
+        ]
+    );
+    let kinds: Vec<_> = sink.records.iter().map(|r| r.kind).collect();
+    assert_eq!(
+        kinds,
+        [
+            RecordKind::Control,
+            RecordKind::Message,
+            RecordKind::Message,
+            RecordKind::Message,
+            RecordKind::ToolCall,
+            RecordKind::ToolResult,
+            RecordKind::Message,
+            RecordKind::ToolResult,
+            RecordKind::Control,
+        ]
+    );
+    assert_eq!(sink.calls.len(), 3);
+    assert_eq!(sink.results.len(), 3);
+    let indexed = sink
+        .messages
+        .iter()
+        .flat_map(|m| m.blocks.iter().map(|b| b.text.as_str()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!indexed.contains("MUST_NOT_INDEX"));
+
+    for record in &sink.records {
+        let resolved = CodexAdapter
+            .resolve_locator(
+                &mut Cursor::new(bytes.as_slice()),
+                &record.locator,
+                &record.digest,
+                1024 * 1024,
+            )
+            .unwrap();
+        for message in sink.messages.iter().filter(|m| m.record_key == record.key) {
+            for block in &message.blocks {
+                let found = resolved
+                    .blocks
+                    .iter()
+                    .find(|b| b.index == block.index && b.kind == BlockKind::Text)
+                    .unwrap();
+                assert_eq!(found.bytes, block.text.as_bytes());
+            }
+        }
+    }
+}
