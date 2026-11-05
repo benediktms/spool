@@ -353,3 +353,68 @@ fn claude_user_input_exchange_is_conversational_and_resolves_identically() {
         }
     }
 }
+
+#[test]
+fn claude_record_types_classify_and_index_queued_human_prompts() {
+    use serde_json::json;
+    let queued = |uuid: &str, parent: &str, kind: &str, prompt: &str| {
+        json!({"type":"attachment","uuid":uuid,"parentUuid":parent,"isSidechain":false,
+            "attachment":{"type":"queued_command","prompt":prompt,"commandMode":"prompt","origin":{"kind":kind}}})
+    };
+    let lines = [
+        json!({"type":"user","uuid":"u1","sessionId":"s","timestamp":"2026-10-10T10:00:00Z","message":{"role":"user","content":"start"}}),
+        json!({"type":"ai-title","aiTitle":"Old title","sessionId":"s"}),
+        json!({"type":"api-request-blob","messages":[{"role":"user","content":"MUST_NOT_INDEX_BLOB"}]}),
+        json!({"type":"attachment","uuid":"at1","parentUuid":"u1","attachment":{"type":"file","content":"MUST_NOT_INDEX_FILE"}}),
+        queued("q1", "at1", "human", "also update the docs"),
+        queued("q2", "q1", "peer", "MUST_NOT_INDEX_PEER"),
+        json!({"type":"assistant","uuid":"a1","parentUuid":"q2","message":{"id":"m1","role":"assistant","content":[{"type":"text","text":"done"}]}}),
+        json!({"type":"permission-mode","permissionMode":"auto","sessionId":"s"}),
+        json!({"type":"ai-title","aiTitle":"New title","sessionId":"s"}),
+    ];
+    let bytes = lines
+        .iter()
+        .map(|line| format!("{line}\n"))
+        .collect::<String>()
+        .into_bytes();
+    let (manifest, sink) = parse(&ClaudeAdapter, &bytes);
+
+    assert_eq!(manifest.coverage, Coverage::Complete);
+    assert_eq!(manifest.counts.unknown_records, 0);
+    assert_eq!(manifest.native_title.as_deref(), Some("New title"));
+    let text: Vec<_> = sink
+        .messages
+        .iter()
+        .map(|m| (m.record_key.as_str(), m.role, m.blocks[0].text.as_str()))
+        .collect();
+    assert_eq!(
+        text,
+        [
+            ("u1", Role::User, "start"),
+            ("q1", Role::User, "also update the docs"),
+            ("a1", Role::Assistant, "done"),
+        ]
+    );
+    let record = |key: &str| sink.records.iter().find(|r| r.key == key).unwrap();
+    assert_eq!(record("q1").kind, RecordKind::Message);
+    assert_eq!(record("q1").turn_id.as_deref(), Some("q1"));
+    assert_eq!(record("q2").kind, RecordKind::Control);
+    assert_eq!(record("a1").turn_id.as_deref(), Some("q1"));
+    let (graph, warnings) = SessionGraph::build(&sink.records, &sink.messages);
+    assert!(warnings.is_empty());
+    assert_eq!(graph.path_to("a1"), ["u1", "q1", "a1"]);
+
+    let q1 = record("q1");
+    let resolved = ClaudeAdapter
+        .resolve_locator(
+            &mut Cursor::new(bytes.as_slice()),
+            &q1.locator,
+            &q1.digest,
+            1024 * 1024,
+        )
+        .unwrap();
+    assert_eq!(resolved.blocks.len(), 1);
+    assert_eq!(resolved.blocks[0].index, 0);
+    assert_eq!(resolved.blocks[0].kind, BlockKind::Text);
+    assert_eq!(resolved.blocks[0].bytes, b"also update the docs");
+}

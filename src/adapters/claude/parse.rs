@@ -69,6 +69,29 @@ fn push_exchange(blocks: &mut Vec<TextBlock>, content_index: u32, texts: Vec<&st
     }
 }
 
+fn queued_message(x: &Line, meta: &mut RecordMeta) -> Projection {
+    meta.kind = RecordKind::Message;
+    let text = x.queued_prompt().unwrap_or_default().to_owned();
+    Projection {
+        identity: x.uuid.as_deref().map(|id| format!("uuid:{id}")),
+        emission: Emission {
+            message: Some(MessageEntry {
+                record_key: meta.key.clone(),
+                role: Role::User,
+                phase: None,
+                blocks: vec![TextBlock {
+                    index: 0,
+                    origin: BlockOrigin::Authored,
+                    text,
+                }],
+                attachments: Vec::new(),
+                supersedes: Vec::new(),
+            }),
+            ..Emission::default()
+        },
+    }
+}
+
 fn observe_timestamp(cx: &mut ParseCx<'_>, timestamp: Option<i64>) {
     cx.observe_activity(timestamp);
     if let Some(timestamp) = timestamp {
@@ -120,7 +143,7 @@ impl ParseState {
             .or(x.ty.as_deref());
         if cx.session.kind == SessionKind::Subagent || x.is_compact_summary == Some(true) {
             None
-        } else if role == Some("user") {
+        } else if role == Some("user") || x.queued_prompt().is_some() {
             Some(key.to_owned())
         } else if role == Some("assistant") {
             self.lineage.ancestor_turn(x.parent.as_deref())
@@ -145,14 +168,20 @@ impl ParseState {
                 emission: Emission::default(),
             };
         }
+        let retained = x.is_meta != Some(true)
+            && x.is_sidechain != Some(true)
+            && (cx.session.kind != SessionKind::Subagent || cx.options.include_subagents);
         match x.ty.as_deref() {
-            Some("user" | "assistant")
-                if x.is_meta != Some(true)
-                    && x.is_sidechain != Some(true)
-                    && (cx.session.kind != SessionKind::Subagent
-                        || cx.options.include_subagents) =>
-            {
+            Some("user" | "assistant") if retained => {
                 return self.project_message(cx, x, meta);
+            }
+            Some("attachment") if retained && x.queued_prompt().is_some() => {
+                return queued_message(x, meta);
+            }
+            Some("ai-title") => {
+                if let Some(title) = x.ai_title.take() {
+                    cx.session.title = Some(title);
+                }
             }
             Some(
                 "user"
@@ -161,7 +190,19 @@ impl ParseState {
                 | "progress"
                 | "file-history-snapshot"
                 | "last-prompt"
-                | "queue-operation",
+                | "queue-operation"
+                | "attachment"
+                | "api-request"
+                | "api-request-blob"
+                | "api-request-shape"
+                | "mode"
+                | "permission-mode"
+                | "atis-latch"
+                | "session-owner"
+                | "tools-used"
+                | "cost-state"
+                | "pr-link"
+                | "file-history-delta",
             ) => {}
             Some("summary" | "compact_boundary") => meta.kind = RecordKind::Summary,
             Some(_) | None => {

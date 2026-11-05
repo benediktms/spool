@@ -35,8 +35,34 @@ pub(crate) struct Line {
     message: Option<Message>,
     #[serde(rename = "toolUseResult")]
     tool_use_result: Option<Value>,
+    attachment: Option<Attachment>,
+    #[serde(rename = "aiTitle")]
+    ai_title: Option<String>,
     #[serde(flatten)]
     _rest: HashMap<String, IgnoredAny>,
+}
+#[derive(Deserialize)]
+struct Attachment {
+    #[serde(rename = "type")]
+    ty: Option<String>,
+    prompt: Option<Value>,
+    origin: Option<Origin>,
+}
+#[derive(Deserialize)]
+struct Origin {
+    kind: Option<String>,
+}
+
+impl Line {
+    /// A prompt the person typed while a turn was running. Claude stores it only as an attachment.
+    fn queued_prompt(&self) -> Option<&str> {
+        let a = self.attachment.as_ref()?;
+        (self.ty.as_deref() == Some("attachment")
+            && a.ty.as_deref() == Some("queued_command")
+            && a.origin.as_ref()?.kind.as_deref() == Some("human"))
+        .then(|| a.prompt.as_ref()?.as_str())
+        .flatten()
+    }
 }
 #[derive(Deserialize, Default)]
 struct Message {
@@ -70,7 +96,7 @@ struct Block {
 impl JsonlHarness for ClaudeAdapter {
     const KIND: HarnessKind = HarnessKind::Claude;
     const PARSER_VERSION: &'static str =
-        "claude-jsonl-session-browser-2026-10.1+late-cwd+compaction+user-input";
+        "claude-jsonl-session-browser-2026-10.1+late-cwd+compaction+user-input+record-types";
     const MALFORMED_DETAIL: &'static str = "invalid complete JSONL record";
     type Parser = parse::ParseState;
 

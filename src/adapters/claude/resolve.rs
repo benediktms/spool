@@ -11,6 +11,9 @@ pub(super) fn resolve_line(
     let json = serde_json::from_slice::<Value>(line).ok();
     let native_id = x.as_ref().and_then(|record| record.uuid.clone());
     let blocks = match (x.as_ref(), json.as_ref()) {
+        (Some(x), _) if let Some(prompt) = x.queued_prompt() => {
+            vec![verbatim_block(0, BlockKind::Text, prompt)]
+        }
         (Some(x), Some(json)) => message_blocks(x, json)?,
         _ => Vec::new(),
     };
