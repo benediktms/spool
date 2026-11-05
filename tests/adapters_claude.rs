@@ -418,3 +418,39 @@ fn claude_record_types_classify_and_index_queued_human_prompts() {
     assert_eq!(resolved.blocks[0].kind, BlockKind::Text);
     assert_eq!(resolved.blocks[0].bytes, b"also update the docs");
 }
+
+#[test]
+fn claude_split_message_keeps_text_written_before_a_tool_call() {
+    use serde_json::json;
+    let lines = [
+        json!({"type":"user","uuid":"u1","sessionId":"s","message":{"role":"user","content":"check CI"}}),
+        json!({"type":"assistant","uuid":"a1","parentUuid":"u1","message":{"id":"m1","role":"assistant","content":[{"type":"text","text":"Checking the failed job"}]}}),
+        json!({"type":"assistant","uuid":"a2","parentUuid":"a1","message":{"id":"m1","role":"assistant","content":[{"type":"tool_use","id":"c1","name":"Bash","input":{}}]}}),
+        json!({"type":"user","uuid":"u2","parentUuid":"a2","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"c1","content":"ok"}]}}),
+        json!({"type":"assistant","uuid":"a3","parentUuid":"u2","message":{"id":"m2","role":"assistant","content":[{"type":"text","text":"CI is green"}]}}),
+    ];
+    let bytes = lines
+        .iter()
+        .map(|line| format!("{line}\n"))
+        .collect::<String>()
+        .into_bytes();
+    let (_, sink) = parse(&ClaudeAdapter, &bytes);
+    let text: Vec<_> = sink
+        .messages
+        .iter()
+        .map(|m| (m.record_key.as_str(), m.blocks[0].text.as_str()))
+        .collect();
+    assert_eq!(
+        text,
+        [
+            ("u1", "check CI"),
+            ("a1", "Checking the failed job"),
+            ("a3", "CI is green")
+        ]
+    );
+    let call = sink.results[0].call.as_ref().map(|(k, i)| (k.as_str(), *i));
+    assert_eq!(call, Some(("a2", 0)));
+    let (graph, warnings) = SessionGraph::build(&sink.records, &sink.messages);
+    assert!(warnings.is_empty());
+    assert_eq!(graph.path_to("a3"), ["u1", "a1", "a3"]);
+}

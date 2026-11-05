@@ -258,12 +258,7 @@ impl ParseState {
             infer_result_turn(meta, &out.emission.results);
         }
 
-        if has_text
-            || out
-                .identity
-                .as_ref()
-                .is_some_and(|id| self.message_keys.contains_key(id))
-        {
+        if has_text {
             out.emission.message = Some(MessageEntry {
                 record_key: meta.key.clone(),
                 role,
