@@ -122,7 +122,7 @@ fn plist_has_the_required_launchd_shape_and_lints() {
         "<key>RunAtLoad</key><true/>",
         "<key>SuccessfulExit</key><false/>",
         "<key>ThrottleInterval</key><integer>30</integer>",
-        "<key>ProcessType</key><string>Background</string>",
+        "<key>ProcessType</key><string>Standard</string>",
     ] {
         assert!(text.contains(want), "missing {want}\n{text}");
     }
