@@ -1308,6 +1308,40 @@ fn doctor_probe_provider_refuses_without_consent_and_never_calls_out() {
 }
 
 #[test]
+fn doctor_warns_when_the_local_model_is_not_installed() {
+    let (_t, home) = temp_home();
+    assert!(run(&home, &["init"]).status.success());
+    let cfg = std::fs::read_to_string(home.join("config.toml"))
+        .unwrap()
+        .replace("provider = \"openai\"", "provider = \"local\"")
+        .replace(
+            "model = \"text-embedding-3-small\"",
+            "model = \"nomic-embed-text-v1.5\"",
+        );
+    std::fs::write(home.join("config.toml"), cfg).unwrap();
+
+    let o = run(&home, &["doctor", "--probe-provider", "--json"]);
+    let v: Value = serde_json::from_str(&out(&o)).unwrap();
+    let check = |name: &str| {
+        v["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == name)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(check("embedding")["status"], "warn");
+    assert!(
+        check("embedding")["detail"]
+            .as_str()
+            .unwrap()
+            .contains("spool models install")
+    );
+    assert_eq!(check("provider")["status"], "fail");
+}
+
+#[test]
 fn doctor_flags_a_broken_config() {
     let (_t, home) = temp_home();
     std::fs::create_dir_all(&home).unwrap();

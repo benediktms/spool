@@ -4,7 +4,8 @@
 //! Provider connectivity is tested only with `--probe-provider`, using a fixed harmless string.
 
 use super::remote::Remote;
-use crate::config::{Config, Paths, mode_of};
+use crate::config::{Config, EmbeddingConfig, Paths, mode_of};
+use crate::embeddings::local;
 use crate::service::{Definition, ServiceManager};
 use crate::transcript::handle::HandleKey;
 use serde::Serialize;
@@ -223,7 +224,7 @@ pub async fn run(
                 a.ok("source", detail);
             }
         }
-        embedding_checks(&mut a, cfg, cred.as_deref(), probe_provider).await;
+        embedding_checks(&mut a, paths, cfg, cred.as_deref(), probe_provider).await;
     }
 
     daemon_check(&mut a, paths, cfg.as_ref()).await;
@@ -287,8 +288,78 @@ pub async fn run(
     Report { ok, checks: a.0 }
 }
 
-async fn embedding_checks(a: &mut Acc, cfg: &Config, cred: Option<&std::path::Path>, probe: bool) {
+async fn local_embedding_checks(a: &mut Acc, paths: &Paths, e: &EmbeddingConfig, probe: bool) {
+    let dir = local::model_dir(paths);
+    let revision = local::NOMIC_V15.revision;
+    let mut verified = false;
+    if !e.enabled {
+        a.ok("embedding", "disabled by config: lexical-only");
+    } else if local::installed(&dir).is_err() {
+        a.warn(
+            "embedding",
+            format!(
+                "local model {} is not installed: lexical-only. Run `spool models install`",
+                local::LOCAL_MODEL_NAME
+            ),
+        );
+    } else {
+        let check = dir.clone();
+        match tokio::task::spawn_blocking(move || local::verify(&check)).await {
+            Ok(Ok(())) => {
+                verified = true;
+                a.ok(
+                    "embedding",
+                    format!(
+                        "local semantic enabled: {}@{revision}, {} dimensions, text stays on this machine (local model verified)",
+                        local::LOCAL_MODEL_NAME,
+                        local::LOCAL_DIMENSIONS
+                    ),
+                );
+            }
+            Ok(Err(err)) => a.fail(
+                "embedding",
+                format!("local model verification failed: {err:#}"),
+            ),
+            Err(_) => a.fail("embedding", "local model verification was interrupted"),
+        }
+    }
+    if probe {
+        if verified {
+            match crate::embeddings::probe_local_provider(e, dir).await {
+                Ok(o) => a.ok(
+                    "provider",
+                    format!(
+                        "probe succeeded: {} dimensions in {} ms",
+                        o.dimensions, o.latency_ms
+                    ),
+                ),
+                Err(err) => a.fail("provider", format!("probe failed: {err}")),
+            }
+        } else {
+            a.fail(
+                "provider",
+                "probe not attempted: needs embedding.enabled and a verified local model",
+            );
+        }
+    } else {
+        a.ok(
+            "provider",
+            "not probed (use --probe-provider to embed one fixed harmless string locally)",
+        );
+    }
+}
+
+async fn embedding_checks(
+    a: &mut Acc,
+    paths: &Paths,
+    cfg: &Config,
+    cred: Option<&std::path::Path>,
+    probe: bool,
+) {
     let e = &cfg.embedding;
+    if e.provider == "local" {
+        return local_embedding_checks(a, paths, e, probe).await;
+    }
     let has_cred = cred.map(|p| p.is_file()).unwrap_or(false);
     let usable = e.enabled && e.hosted_processing_approved && has_cred;
     if !e.enabled {

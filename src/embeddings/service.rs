@@ -19,7 +19,7 @@ use parking_lot::{Mutex, RwLock};
 use serde::Serialize;
 use sqlx::{QueryBuilder, Row, Sqlite};
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -1220,6 +1220,21 @@ pub async fn probe_provider(
                 .retryable(true)
                 .ambiguous(true)
         })??;
+    Ok(ProbeOutcome {
+        dimensions: resp.vectors.first().map_or(0, Vec::len),
+        latency_ms: started.elapsed().as_millis() as u64,
+    })
+}
+
+/// Local counterpart of `probe_provider`: embeds the fixed probe text with the installed model (loading it).
+pub async fn probe_local_provider(
+    cfg: &EmbeddingConfig,
+    model_dir: PathBuf,
+) -> Result<ProbeOutcome, EmbedError> {
+    let provider = LocalProvider::new(model_dir, cfg);
+    let started = Instant::now();
+    let inputs = [PROBE_TEXT.to_string()];
+    let resp = provider.embed(Purpose::Query, &inputs).await?;
     Ok(ProbeOutcome {
         dimensions: resp.vectors.first().map_or(0, Vec::len),
         latency_ms: started.elapsed().as_millis() as u64,

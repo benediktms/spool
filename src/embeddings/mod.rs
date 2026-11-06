@@ -21,6 +21,6 @@ pub use provider::{
 };
 pub use service::{
     BudgetLine, BudgetView, EmbedProgress, EmbeddingService, EmbeddingState, EmbeddingStatus,
-    ProbeOutcome, VectorCoverage, probe_provider,
+    ProbeOutcome, VectorCoverage, probe_local_provider, probe_provider,
 };
 pub use tokenizer::tokenizer;
