@@ -135,6 +135,16 @@ async fn stdio_client_reaches_daemon_tool_over_ipc() {
     let properties = &search.input_schema["properties"];
     assert!(properties.get("preview_target_bytes").is_some());
     assert!(properties.get("max_bytes").is_some());
+    assert_eq!(properties["matches_per_session"]["maximum"], 32);
+    let mut request = CallToolRequestParams::new("search_sessions");
+    request.arguments = Some(
+        serde_json::json!({"query":"synthetic", "mode":"lexical", "matches_per_session":32})
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    let expanded = client.call_tool(request).await.unwrap();
+    assert_eq!(expanded.is_error, Some(false));
 
     let r = client
         .call_tool(CallToolRequestParams::new("index_status"))

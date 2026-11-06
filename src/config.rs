@@ -138,7 +138,7 @@ cfg_struct!(SearchConfig {
     default_mode: String = "hybrid".into(),
     default_limit: usize = 10,
     max_limit: usize = 50,
-    max_matches_per_session: usize = 3,
+    max_matches_per_session: usize = 32,
     candidate_limit: usize = 200,
     max_candidate_limit: usize = 2000,
     rrf_constant: u32 = 60,
@@ -339,8 +339,8 @@ impl Config {
             "search.candidate_limit must be <= max_candidate_limit"
         );
         ensure!(
-            s.max_matches_per_session >= 1 && s.max_matches_per_session <= 3,
-            "search.max_matches_per_session must be in 1..=3"
+            s.max_matches_per_session >= 1 && s.max_matches_per_session <= 32,
+            "search.max_matches_per_session must be in 1..=32"
         );
         ensure!(
             s.max_search_response_bytes >= 4096,
