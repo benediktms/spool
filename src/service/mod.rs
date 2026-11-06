@@ -317,7 +317,7 @@ impl ServiceManager {
   </dict>
   <key>ThrottleInterval</key><integer>{throttle}</integer>
   <key>ExitTimeOut</key><integer>{exit_timeout}</integer>
-  <key>ProcessType</key><string>Background</string>
+  <key>ProcessType</key><string>Standard</string>
   <key>StandardOutPath</key><string>{out}</string>
   <key>StandardErrorPath</key><string>{err}</string>
   <key>EnvironmentVariables</key>
