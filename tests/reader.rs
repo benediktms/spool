@@ -482,6 +482,16 @@ async fn argument_validation_and_policy_rules() {
     let e = env
         .err(json!({"session_id": sid, "selection": {"kind": "match", "match_ref": m}}))
         .await;
+    assert_eq!(e.code, "STALE_REFERENCE");
+    let key = env.keys.current();
+    let message = spool::transcript::refs::MessageRef::decode(&key, &m).unwrap();
+    let legacy = key.sign(
+        spool::transcript::handle::HandleKind::Message,
+        &serde_json::to_vec(&message).unwrap(),
+    );
+    let e = env
+        .err(json!({"session_id": sid, "selection": {"kind": "match", "match_ref": legacy}}))
+        .await;
     assert_eq!(e.code, "INVALID_ARGUMENT");
 }
 
@@ -1975,4 +1985,35 @@ async fn search_max_bytes_omits_previews_before_references() {
             "INVALID_ARGUMENT"
         );
     }
+}
+
+#[tokio::test]
+async fn legacy_reference_payloads_open_the_same_selection() {
+    use spool::transcript::handle::HandleKind;
+    use spool::transcript::refs::{BranchRef, MessageRef};
+
+    let env = Env::new().await;
+    let (sid, _) = env.indexed("legacy.jsonl", &linear(6)).await;
+    let first = env.ok(json!({"session_id": sid, "max_items": 2})).await;
+    let key = env.keys.current();
+    let message =
+        MessageRef::decode(&key, first["items"][0]["message_ref"].as_str().unwrap()).unwrap();
+    let item = ItemRef::decode(&key, first["items"][0]["item_ref"].as_str().unwrap()).unwrap();
+    let branch =
+        BranchRef::decode(&key, first["selection"]["branch_ref"].as_str().unwrap()).unwrap();
+    let legacy_message = key.sign(HandleKind::Message, &serde_json::to_vec(&message).unwrap());
+    let legacy_item = key.sign(HandleKind::Item, &serde_json::to_vec(&item).unwrap());
+    let legacy_branch = key.sign(HandleKind::Branch, &serde_json::to_vec(&branch).unwrap());
+    let message_read = env.ok(json!({"session_id": sid, "selection": {"kind": "message", "message_ref": legacy_message, "before": 0, "after": 0}})).await;
+    let item_read = env
+        .ok(json!({"session_id": sid, "selection": {"kind": "item", "item_ref": legacy_item}}))
+        .await;
+    let branch_read = env.ok(json!({"session_id": sid, "selection": {"kind": "session", "branch_ref": legacy_branch}})).await;
+    assert_eq!(text_of(&items(&message_read)[0]), msg_text(0));
+    assert_eq!(text_of(&items(&item_read)[0]), msg_text(0));
+    assert_eq!(items(&branch_read).len(), 6);
+    let continued = env
+        .ok(json!({"cursor": first["page"]["next_cursor"]}))
+        .await;
+    assert_eq!(text_of(&items(&continued)[0]), msg_text(2));
 }
