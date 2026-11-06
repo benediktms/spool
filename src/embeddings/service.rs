@@ -4,6 +4,7 @@
 use super::budget::{Ledger, Reservation, Reserve, budget_day, next_reset_ms};
 use super::cache::QueryCache;
 use super::health::{CircuitInfo, Health};
+use super::local::{self, LocalProvider};
 use super::openai::{OpenAiProvider, profile_spec, read_credential};
 use super::provider::*;
 use super::tokenizer::tokenizer;
@@ -36,8 +37,12 @@ pub enum EmbeddingState {
     NotApproved,
     NoCredential,
     Disabled,
+    /// Local provider selected but its model files are not installed.
+    ModelMissing,
     AuthBlocked,
-    BudgetExhausted { resets_at_ms: i64 },
+    BudgetExhausted {
+        resets_at_ms: i64,
+    },
     Degraded(CircuitInfo),
 }
 
@@ -230,6 +235,7 @@ impl EmbedError {
                 Disabled => "set embedding.enabled = true",
                 Auth => "fix the provider credential, then run the CLI provider probe",
                 UnsupportedModel => "fix embedding.model / embedding.dimensions",
+                ModelMissing => "run `spool models install`, then restart the daemon",
                 BudgetExhausted => "wait for the daily budget reset or raise the configured budget",
                 _ => "use lexical search or retry later",
             }
@@ -272,6 +278,9 @@ impl EmbeddingService {
         clock: SharedClock,
     ) -> anyhow::Result<Self> {
         let e = &cfg.embedding;
+        if e.provider == "local" {
+            return Ok(Self::local_from_config(index, cfg, paths, clock));
+        }
         let spec = profile_spec(e)?;
         let closed = |kind, detail: Option<String>| {
             (
@@ -314,6 +323,37 @@ impl EmbeddingService {
             }
             None => service,
         })
+    }
+
+    fn local_from_config(index: Index, cfg: &Config, paths: &Paths, clock: SharedClock) -> Self {
+        let e = &cfg.embedding;
+        let dir = local::model_dir(paths);
+        let (provider, gate) = if !e.enabled {
+            (
+                Arc::new(Unavailable(local::profile_spec(e))) as Arc<dyn EmbeddingProvider>,
+                Some(Gate {
+                    kind: EmbedErrorKind::Disabled,
+                    detail: None,
+                }),
+            )
+        } else if local::installed(&dir).is_ok() {
+            (
+                Arc::new(LocalProvider::new(dir, e)) as Arc<dyn EmbeddingProvider>,
+                None,
+            )
+        } else {
+            (
+                Arc::new(Unavailable(local::profile_spec(e))) as Arc<dyn EmbeddingProvider>,
+                Some(Gate {
+                    kind: EmbedErrorKind::ModelMissing,
+                    detail: Some(format!(
+                        "local model {} is not installed. Run `spool models install`",
+                        local::LOCAL_MODEL_NAME
+                    )),
+                }),
+            )
+        };
+        Self::build(index, e.clone(), cfg.search.clone(), clock, provider, gate)
     }
 
     fn build(
@@ -387,6 +427,7 @@ impl EmbeddingService {
                 match g.kind {
                     NotApproved => "hosted embedding is not approved",
                     NoCredential => "no usable provider credential",
+                    ModelMissing => "local embedding model is not installed",
                     _ => "embeddings are disabled",
                 },
             )),
@@ -431,6 +472,7 @@ impl EmbeddingService {
             match g.kind {
                 EmbedErrorKind::NotApproved => EmbeddingState::NotApproved,
                 EmbedErrorKind::NoCredential => EmbeddingState::NoCredential,
+                EmbedErrorKind::ModelMissing => EmbeddingState::ModelMissing,
                 _ => EmbeddingState::Disabled,
             }
         } else if self.health.blocked() == Some(EmbedErrorKind::Auth) {

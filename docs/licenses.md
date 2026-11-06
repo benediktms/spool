@@ -2,22 +2,24 @@
 
 Generated from `cargo metadata --locked` (all packages in the resolved graph, including dev/test and platform-specific crates that are not linked on macOS). Regenerate with `scripts/license-inventory.sh`. This is an inventory of declared SPDX expressions, not legal advice.
 
-Total crates: 390
+Total crates: 463
 
 | License expression | Crates |
 |---|---|
-| MIT OR Apache-2.0 | 223 |
-| MIT | 67 |
+| MIT OR Apache-2.0 | 255 |
+| MIT | 92 |
 | Apache-2.0 OR MIT | 24 |
 | Unicode-3.0 | 18 |
+| MIT/Apache-2.0 | 13 |
 | Unlicense OR MIT | 9 |
-| MIT/Apache-2.0 | 8 |
+| Apache-2.0 | 9 |
 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | 5 |
-| Apache-2.0 | 5 |
 | BSD-3-Clause | 4 |
+| Apache-2.0/MIT | 3 |
+| Zlib OR Apache-2.0 OR MIT | 3 |
 | Apache-2.0 OR ISC OR MIT | 3 |
-| Apache-2.0/MIT | 2 |
 | CC0-1.0 OR MIT-0 OR Apache-2.0 | 2 |
+| Apache-2.0 OR MIT OR Zlib | 2 |
 | MIT OR Apache-2.0 OR LGPL-2.1-or-later | 2 |
 | ISC | 2 |
 | Unlicense/MIT | 2 |
@@ -27,20 +29,21 @@ Total crates: 390
 | ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0) | 1 |
 | CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception | 1 |
 | MIT-0 | 1 |
+| Apache-2.0 / MIT | 1 |
 | Zlib | 1 |
 | MIT OR Apache-2.0 OR Zlib | 1 |
 | Apache-2.0 AND ISC | 1 |
-| Zlib OR Apache-2.0 OR MIT | 1 |
+| Apache-2.0 OR BSL-1.0 | 1 |
 | (MIT OR Apache-2.0) AND Unicode-3.0 | 1 |
 | Apache-2.0 OR BSL-1.0 OR MIT | 1 |
 
 ## Crates by license expression
 
 ### MIT OR Apache-2.0
-ahash 0.8.12, allocator-api2 0.2.21, android_system_properties 0.1.6, anstream 1.0.0, anstyle 1.0.14, anstyle-parse 1.0.0, anstyle-query 1.1.5, anstyle-wincon 3.0.11, anyhow 1.0.104, apalis 1.0.0, apalis-codec 1.0.0, arrayvec 0.7.8, base64 0.22.1, base64 0.23.1, bitflags 2.13.2, block-buffer 0.10.4, block-buffer 0.12.1, bstr 1.13.1, bumpalo 3.20.3, cc 1.8.0, cfg-if 1.0.5, chacha20 0.10.2, chrono 0.4.45, clap 4.6.7, clap_builder 4.6.7, clap_derive 4.6.7, clap_lex 1.1.1, cmake 0.1.58, colorchoice 1.0.5, core-foundation 0.10.1, core-foundation-sys 0.8.7, cpufeatures 0.2.17, cpufeatures 0.3.1, crc 3.4.0, crc-catalog 2.5.0, crossbeam-queue 0.3.14, crossbeam-utils 0.8.23, crypto-common 0.1.6, crypto-common 0.2.2, defmt 0.3.101, defmt 1.2.0, defmt-macros 1.2.0, defmt-parser 1.1.0, digest 0.10.7, digest 0.11.3, displaydoc 0.2.7, dyn-clone 1.0.20, either 1.19.0, errno 0.3.14, etcetera 0.11.0, find-msvc-tools 0.1.14, form_urlencoded 1.2.2, fraction 0.17.0, futures 0.3.34, futures-channel 0.3.34, futures-core 0.3.34, futures-executor 0.3.34, futures-intrusive 0.5.0, futures-io 0.3.34, futures-macro 0.3.34, futures-sink 0.3.34, futures-task 0.3.34, futures-util 0.3.34, getrandom 0.2.17, getrandom 0.3.4, getrandom 0.4.3, gix-actor 0.44.1, gix-config 0.62.2, gix-config-value 0.21.1, gix-date 0.18.1, gix-discover 0.57.1, gix-error 0.5.2, gix-fs 0.24.1, gix-glob 0.29.1, gix-hash 0.28.1, gix-hashtable 0.18.1, gix-lock 26.0.1, gix-object 0.66.1, gix-parallel 0.50.1, gix-path 0.14.1, gix-ref 0.69.1, gix-sec 0.16.1, gix-tempfile 26.0.1, gix-trace 0.3.1, gix-url 0.40.1, gix-utils 0.5.2, gix-validate 0.13.1, hash32 0.3.1, hashbrown 0.16.1, hashbrown 0.17.1, hashlink 0.11.1, heapless 0.8.0, heck 0.5.0, hex 0.4.3, hkdf 0.13.0, hmac 0.13.0, http 1.5.0, httparse 1.10.1, hybrid-array 0.4.15, iana-time-zone 0.1.65, iana-time-zone-haiku 0.1.2, idna 1.1.0, ipnet 2.12.2, is_terminal_polyfill 1.70.2, itoa 1.0.18, jni 0.22.4, jni-macros 0.22.4, jni-sys 0.4.1, jni-sys-macros 0.4.1, jobserver 0.1.35, js-sys 0.3.106, lazy_static 1.5.1, libc 0.2.190, lock_api 0.4.14, log 0.4.34, md-5 0.11.0, memmap2 0.9.12, num 0.4.3, num-bigint 0.4.8, num-complex 0.4.6, num-integer 0.1.47, num-iter 0.1.46, num-rational 0.4.2, num-traits 0.2.19, once_cell 1.21.4, once_cell_polyfill 1.70.2, openssl-probe 0.2.1, parking_lot 0.12.5, parking_lot_core 0.9.12, pastey 0.2.3, percent-encoding 2.3.2, pkg-config 0.3.34, proc-macro2 1.0.107, quinn 0.11.12, quinn-proto 0.11.19, quinn-udp 0.5.16, quote 1.0.47, rand 0.10.3, rand_core 0.10.1, rand_pcg 0.10.2, ref-cast 1.0.27, ref-cast-impl 1.0.27, regex 1.13.1, regex-automata 0.4.18, regex-syntax 0.8.11, reqwest 0.13.5, rustc_version 0.4.1, rustls-pki-types 1.15.1, rustls-platform-verifier 0.7.1, rustls-platform-verifier-android 0.2.0, rustversion 1.0.23, scopeguard 1.2.0, security-framework 3.7.0, security-framework-sys 2.17.0, semver 1.0.28, serde 1.0.229, serde_core 1.0.229, serde_derive 1.0.229, serde_derive_internals 0.30.0, serde_json 1.0.154, serde_spanned 1.1.2, sha1 0.11.0, sha1dc 0.1.5, sha2 0.10.9, sha2 0.11.0, shlex 2.0.1, signal-hook-registry 1.4.8, simdutf8 0.1.5, smallvec 1.16.3, socket2 0.6.5, sqlx 0.9.0, sqlx-core 0.9.0, sqlx-macros 0.9.0, sqlx-macros-core 0.9.0, sqlx-mysql 0.9.0, sqlx-postgres 0.9.0, sqlx-sqlite 0.9.0, stable_deref_trait 1.2.1, syn 2.0.119, syn 3.0.8, tempfile 3.27.0, thiserror 2.0.21, thiserror-impl 2.0.21, thread_local 1.1.10, tokio-rustls 0.26.6, toml 1.1.8+spec-1.1.0, toml_datetime 1.1.2+spec-1.1.0, toml_edit 0.25.17+spec-1.1.0, toml_parser 1.1.5+spec-1.1.0, toml_writer 1.1.3+spec-1.1.0, typenum 1.20.1, unicode-bidi 0.3.18, unicode-normalization 0.1.25, url 2.5.8, wasm-bindgen 0.2.129, wasm-bindgen-futures 0.4.79, wasm-bindgen-macro 0.2.129, wasm-bindgen-macro-support 0.2.129, wasm-bindgen-shared 0.2.129, web-sys 0.3.106, web-time 1.1.0, windows 0.62.2, windows-collections 0.3.2, windows-core 0.62.2, windows-future 0.3.2, windows-implement 0.60.2, windows-interface 0.59.3, windows-link 0.2.1, windows-numerics 0.3.1, windows-result 0.4.1, windows-strings 0.5.1, windows-sys 0.52.0, windows-sys 0.61.2, windows-targets 0.52.6, windows-threading 0.2.1, windows_aarch64_gnullvm 0.52.6, windows_aarch64_msvc 0.52.6, windows_i686_gnu 0.52.6, windows_i686_gnullvm 0.52.6, windows_i686_msvc 0.52.6, windows_x86_64_gnu 0.52.6, windows_x86_64_gnullvm 0.52.6, windows_x86_64_msvc 0.52.6
+ahash 0.8.12, allocator-api2 0.2.21, android_system_properties 0.1.6, anstream 1.0.0, anstyle 1.0.14, anstyle-parse 1.0.0, anstyle-query 1.1.5, anstyle-wincon 3.0.11, anyhow 1.0.104, apalis 1.0.0, apalis-codec 1.0.0, arrayvec 0.7.8, base64 0.22.1, base64 0.23.1, bitflags 2.13.2, block-buffer 0.10.4, block-buffer 0.12.1, bstr 1.13.1, bumpalo 3.20.3, candle-core 0.11.1, candle-nn 0.11.1, candle-transformers 0.11.1, cc 1.8.0, cfg-if 1.0.5, chacha20 0.10.2, chrono 0.4.45, clap 4.6.7, clap_builder 4.6.7, clap_derive 4.6.7, clap_lex 1.1.1, cmake 0.1.58, colorchoice 1.0.5, core-foundation 0.10.1, core-foundation-sys 0.8.7, cpufeatures 0.2.17, cpufeatures 0.3.1, crc 3.4.0, crc-catalog 2.5.0, crc32fast 1.5.4, crossbeam-deque 0.8.8, crossbeam-epoch 0.9.21, crossbeam-queue 0.3.14, crossbeam-utils 0.8.23, crypto-common 0.1.6, crypto-common 0.2.2, daachorse 3.0.3, dary_heap 0.3.9, defmt 0.3.101, defmt 1.2.0, defmt-macros 1.2.0, defmt-parser 1.1.0, derive_builder 0.20.2, derive_builder_core 0.20.2, derive_builder_macro 0.20.2, digest 0.10.7, digest 0.11.3, displaydoc 0.2.7, dyn-clone 1.0.20, either 1.19.0, errno 0.3.14, etcetera 0.11.0, find-msvc-tools 0.1.14, form_urlencoded 1.2.2, fraction 0.17.0, futures 0.3.34, futures-channel 0.3.34, futures-core 0.3.34, futures-executor 0.3.34, futures-intrusive 0.5.0, futures-io 0.3.34, futures-macro 0.3.34, futures-sink 0.3.34, futures-task 0.3.34, futures-util 0.3.34, getrandom 0.2.17, getrandom 0.3.4, getrandom 0.4.3, gix-actor 0.44.1, gix-config 0.62.2, gix-config-value 0.21.1, gix-date 0.18.1, gix-discover 0.57.1, gix-error 0.5.2, gix-fs 0.24.1, gix-glob 0.29.1, gix-hash 0.28.1, gix-hashtable 0.18.1, gix-lock 26.0.1, gix-object 0.66.1, gix-parallel 0.50.1, gix-path 0.14.1, gix-ref 0.69.1, gix-sec 0.16.1, gix-tempfile 26.0.1, gix-trace 0.3.1, gix-url 0.40.1, gix-utils 0.5.2, gix-validate 0.13.1, half 2.7.1, hash32 0.3.1, hashbrown 0.16.1, hashbrown 0.17.1, hashlink 0.11.1, heapless 0.8.0, heck 0.5.0, hermit-abi 0.5.3, hex 0.4.3, hkdf 0.13.0, hmac 0.13.0, http 1.5.0, httparse 1.10.1, hybrid-array 0.4.15, iana-time-zone 0.1.65, iana-time-zone-haiku 0.1.2, idna 1.1.0, ipnet 2.12.2, is_terminal_polyfill 1.70.2, itertools 0.14.0, itoa 1.0.18, jni 0.22.4, jni-macros 0.22.4, jni-sys 0.4.1, jni-sys-macros 0.4.1, jobserver 0.1.35, js-sys 0.3.106, lazy_static 1.5.1, libc 0.2.190, lock_api 0.4.14, log 0.4.34, md-5 0.11.0, memmap2 0.9.12, monostate 0.1.18, monostate-impl 0.1.18, num 0.4.3, num-bigint 0.4.8, num-complex 0.4.6, num-integer 0.1.47, num-iter 0.1.46, num-rational 0.4.2, num-traits 0.2.19, num_cpus 1.17.0, once_cell 1.21.4, once_cell_polyfill 1.70.2, openssl-probe 0.2.1, parking_lot 0.12.5, parking_lot_core 0.9.12, paste 1.0.15, pastey 0.2.3, percent-encoding 2.3.2, pkg-config 0.3.34, ppv-lite86 0.2.21, proc-macro2 1.0.107, quinn 0.11.12, quinn-proto 0.11.19, quinn-udp 0.5.16, quote 1.0.47, rand 0.10.3, rand 0.9.5, rand_chacha 0.9.0, rand_core 0.10.1, rand_core 0.9.5, rand_distr 0.5.1, rand_pcg 0.10.2, rayon 1.12.0, rayon-core 1.13.0, ref-cast 1.0.27, ref-cast-impl 1.0.27, regex 1.13.1, regex-automata 0.4.18, regex-syntax 0.8.11, reqwest 0.13.5, rustc_version 0.4.1, rustls-pki-types 1.15.1, rustls-platform-verifier 0.7.1, rustls-platform-verifier-android 0.2.0, rustversion 1.0.23, scopeguard 1.2.0, security-framework 3.7.0, security-framework-sys 2.17.0, semver 1.0.28, seq-macro 0.3.6, serde 1.0.229, serde_core 1.0.229, serde_derive 1.0.229, serde_derive_internals 0.30.0, serde_json 1.0.154, serde_spanned 1.1.2, sha1 0.11.0, sha1dc 0.1.5, sha2 0.10.9, sha2 0.11.0, shlex 2.0.1, signal-hook-registry 1.4.8, simdutf8 0.1.5, smallvec 1.16.3, socket2 0.6.5, sqlx 0.9.0, sqlx-core 0.9.0, sqlx-macros 0.9.0, sqlx-macros-core 0.9.0, sqlx-mysql 0.9.0, sqlx-postgres 0.9.0, sqlx-sqlite 0.9.0, stable_deref_trait 1.2.1, static_assertions 1.1.0, syn 2.0.119, syn 3.0.8, tempfile 3.27.0, thiserror 1.0.69, thiserror 2.0.21, thiserror-impl 1.0.69, thiserror-impl 2.0.21, thread_local 1.1.10, tokio-rustls 0.26.6, toml 1.1.8+spec-1.1.0, toml_datetime 1.1.2+spec-1.1.0, toml_edit 0.25.17+spec-1.1.0, toml_parser 1.1.5+spec-1.1.0, toml_writer 1.1.3+spec-1.1.0, typed-path 0.13.0, typenum 1.20.1, unicode-bidi 0.3.18, unicode-normalization 0.1.25, unicode-segmentation 1.13.3, unicode_categories 0.1.1, url 2.5.8, wasm-bindgen 0.2.129, wasm-bindgen-futures 0.4.79, wasm-bindgen-macro 0.2.129, wasm-bindgen-macro-support 0.2.129, wasm-bindgen-shared 0.2.129, web-sys 0.3.106, web-time 1.1.0, windows 0.62.2, windows-collections 0.3.2, windows-core 0.62.2, windows-future 0.3.2, windows-implement 0.60.2, windows-interface 0.59.3, windows-link 0.2.1, windows-numerics 0.3.1, windows-result 0.4.1, windows-strings 0.5.1, windows-sys 0.52.0, windows-sys 0.61.2, windows-targets 0.52.6, windows-threading 0.2.1, windows_aarch64_gnullvm 0.52.6, windows_aarch64_msvc 0.52.6, windows_i686_gnu 0.52.6, windows_i686_gnullvm 0.52.6, windows_i686_msvc 0.52.6, windows_x86_64_gnu 0.52.6, windows_x86_64_gnullvm 0.52.6, windows_x86_64_msvc 0.52.6
 
 ### MIT
-apalis-core 1.0.0, apalis-sqlite 1.0.0, atoi 2.0.0, bytes 1.12.1, cfg_aliases 0.2.2, combine 4.6.8, darling 0.24.1, darling_core 0.24.1, darling_macro 0.24.1, data-encoding 2.11.1, dotenvy 0.15.7, email_address 0.2.9, fancy-regex 0.19.2, faster-hex 0.10.1, fluent-uri 0.4.1, fs_extra 1.3.0, generic-array 0.14.9, http-body 1.1.0, http-body-util 0.1.5, hyper 1.12.0, hyper-util 0.1.21, jsonschema 0.58.6, jsonschema-regex 0.58.6, jsonschema-value 0.58.6, libsqlite3-sys 0.37.0, matchers 0.2.0, micromap 0.3.0, mio 1.2.4, nix 0.31.3, nu-ansi-term 0.50.3, outref 0.5.2, prodash 31.0.1, redox_syscall 0.5.18, referencing 0.58.6, schannel 0.1.29, schemars 1.2.2, schemars_derive 1.2.2, sharded-slab 0.1.7, slab 0.4.12, spin 0.9.9, strsim 0.11.1, strum 0.28.0, strum_macros 0.28.0, synstructure 0.14.0, tiktoken-rs 0.12.1, tokio 1.53.2, tokio-macros 2.7.2, tokio-stream 0.1.19, tokio-util 0.7.20, tower 0.5.3, tower-http 0.6.11, tower-layer 0.3.3, tower-service 0.3.3, tracing 0.1.44, tracing-attributes 0.1.31, tracing-core 0.1.36, tracing-log 0.2.0, tracing-subscriber 0.3.23, try-lock 0.2.5, ulid 3.0.0, uuid-simd 0.8.0, valuable 0.1.1, vsimd 0.8.0, want 0.3.2, winnow 1.0.4, zmij 1.0.23, zstd 0.13.3
+apalis-core 1.0.0, apalis-sqlite 1.0.0, atoi 2.0.0, bytes 1.12.1, castaway 0.2.4, cfg_aliases 0.2.2, combine 4.6.8, compact_str 0.9.1, crunchy 0.2.4, darling 0.20.11, darling 0.24.1, darling_core 0.20.11, darling_core 0.24.1, darling_macro 0.20.11, darling_macro 0.24.1, data-encoding 2.11.1, dotenvy 0.15.7, dyn-stack 0.13.2, dyn-stack-macros 0.1.3, email_address 0.2.9, fancy-regex 0.17.0, fancy-regex 0.19.2, faster-hex 0.10.1, float8 0.7.0, fluent-uri 0.4.1, fs_extra 1.3.0, gemm 0.19.0, gemm-c32 0.19.0, gemm-c64 0.19.0, gemm-common 0.19.0, gemm-f16 0.19.0, gemm-f32 0.19.0, gemm-f64 0.19.0, generic-array 0.14.9, http-body 1.1.0, http-body-util 0.1.5, hyper 1.12.0, hyper-util 0.1.21, jsonschema 0.58.6, jsonschema-regex 0.58.6, jsonschema-value 0.58.6, libm 0.2.16, libsqlite3-sys 0.37.0, matchers 0.2.0, micromap 0.3.0, mio 1.2.4, nix 0.31.3, nom 7.1.3, nu-ansi-term 0.50.3, outref 0.5.2, prodash 31.0.1, pulp 0.22.3, pulp-wasm-simd-flag 0.1.1, raw-cpuid 11.6.0, reborrow 0.5.5, redox_syscall 0.5.18, referencing 0.58.6, schannel 0.1.29, schemars 1.2.2, schemars_derive 1.2.2, sharded-slab 0.1.7, slab 0.4.12, spin 0.9.9, strsim 0.11.1, strum 0.28.0, strum_macros 0.28.0, synstructure 0.14.0, sysctl 0.6.0, tiktoken-rs 0.12.1, tokio 1.53.2, tokio-macros 2.7.2, tokio-stream 0.1.19, tokio-util 0.7.20, tower 0.5.3, tower-http 0.6.11, tower-layer 0.3.3, tower-service 0.3.3, tracing 0.1.44, tracing-attributes 0.1.31, tracing-core 0.1.36, tracing-log 0.2.0, tracing-subscriber 0.3.23, try-lock 0.2.5, ulid 3.0.0, uuid-simd 0.8.0, valuable 0.1.1, vsimd 0.8.0, want 0.3.2, winnow 1.0.4, zip 9.4.1, zmij 1.0.23, zstd 0.13.3
 
 ### Apache-2.0 OR MIT
 atomic-waker 1.1.2, autocfg 1.5.1, bit-set 0.8.0, bit-vec 0.8.0, cmov 0.5.4, ctutils 0.4.3, equivalent 1.0.2, event-listener 5.4.2, fastrand 2.5.0, idna_adapter 1.2.2, indexmap 2.14.2, parking 2.2.1, pin-project 1.1.13, pin-project-internal 1.1.13, pin-project-lite 0.2.17, portable-atomic 1.15.0, portable-atomic-util 0.2.8, process-wrap 10.0.1, rustc-hash 2.1.3, simd_cesu8 1.2.0, utf8_iter 1.0.4, utf8parse 0.2.2, uuid 1.28.0, zeroize 1.9.1
@@ -48,29 +51,35 @@ atomic-waker 1.1.2, autocfg 1.5.1, bit-set 0.8.0, bit-vec 0.8.0, cmov 0.5.4, ctu
 ### Unicode-3.0
 icu_collections 2.3.0, icu_locale_core 2.3.0, icu_normalizer 2.3.0, icu_normalizer_data 2.3.0, icu_properties 2.3.0, icu_properties_data 2.3.0, icu_provider 2.3.1, litemap 0.8.3, potential_utf 0.1.6, tinystr 0.8.4, writeable 0.6.4, yoke 0.8.3, yoke-derive 0.8.4, zerofrom 0.1.8, zerofrom-derive 0.1.8, zerotrie 0.2.5, zerovec 0.11.8, zerovec-derive 0.11.6
 
+### MIT/Apache-2.0
+base64 0.13.1, bitflags 1.3.2, enum-as-inner 0.6.1, futures-timer 3.0.4, ident_case 1.0.1, minimal-lexical 0.2.1, num-cmp 0.1.0, serde_plain 1.0.2, stringprep 0.1.5, unicode-normalization-alignments 0.1.12, unicode-properties 0.1.4, vcpkg 0.2.15, version_check 0.9.5
+
 ### Unlicense OR MIT
 aho-corasick 1.1.5, byteorder 1.5.0, jiff 0.2.39, jiff-core 0.1.2, jiff-static 0.2.39, jiff-tzdb 0.1.9, jiff-tzdb-platform 0.1.3, memchr 2.8.3, winapi-util 0.1.11
 
-### MIT/Apache-2.0
-bitflags 1.3.2, futures-timer 3.0.4, ident_case 1.0.1, num-cmp 0.1.0, stringprep 0.1.5, unicode-properties 0.1.4, vcpkg 0.2.15, version_check 0.9.5
+### Apache-2.0
+esaxx-rs 0.1.10, rmcp 3.5.1, rmcp-macros 3.5.1, safetensors 0.8.0, spm_precompiled 0.1.4, sync_wrapper 1.0.2, tokenizers 0.23.2, unicode-bom 2.0.3, unicode-general-category 1.1.0
 
 ### Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
 linux-raw-sys 0.12.1, rustix 1.1.5, wasi 0.11.1+wasi-snapshot-preview1, wasip2 1.0.4+wasi-0.2.12, wit-bindgen 0.57.1
 
-### Apache-2.0
-rmcp 3.5.1, rmcp-macros 3.5.1, sync_wrapper 1.0.2, unicode-bom 2.0.3, unicode-general-category 1.1.0
-
 ### BSD-3-Clause
 sha1_smol 1.0.1, subtle 2.6.1, zstd-safe 7.3.0, zstd-sys 2.1.1+zstd.1.5.7
+
+### Apache-2.0/MIT
+bytecount 0.6.9, flume 0.12.0, rayon-cond 0.4.0
+
+### Zlib OR Apache-2.0 OR MIT
+bytemuck 1.25.2, bytemuck_derive 1.12.1, tinyvec 1.13.3
 
 ### Apache-2.0 OR ISC OR MIT
 hyper-rustls 0.27.10, rustls 0.23.45, rustls-native-certs 0.8.4
 
-### Apache-2.0/MIT
-bytecount 0.6.9, flume 0.12.0
-
 ### CC0-1.0 OR MIT-0 OR Apache-2.0
 constant_time_eq 0.4.2, dunce 1.0.5
+
+### Apache-2.0 OR MIT OR Zlib
+macro_rules_attribute 0.2.3, macro_rules_attribute-proc_macro 0.2.3
 
 ### MIT OR Apache-2.0 OR LGPL-2.1-or-later
 r-efi 5.3.0, r-efi 6.0.0
@@ -99,6 +108,9 @@ blake3 1.8.7
 ### MIT-0
 borrow-or-share 0.2.4
 
+### Apache-2.0 / MIT
+fnv 1.0.7
+
 ### Zlib
 foldhash 0.2.0
 
@@ -108,8 +120,8 @@ lru-slab 0.1.3
 ### Apache-2.0 AND ISC
 ring 0.17.14
 
-### Zlib OR Apache-2.0 OR MIT
-tinyvec 1.13.3
+### Apache-2.0 OR BSL-1.0
+ryu 1.0.23
 
 ### (MIT OR Apache-2.0) AND Unicode-3.0
 unicode-ident 1.0.27

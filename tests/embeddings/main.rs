@@ -2,6 +2,7 @@
 //! Synthetic data only; the only sockets are on 127.0.0.1.
 
 mod http;
+mod local;
 mod service;
 mod tokenizer;
 

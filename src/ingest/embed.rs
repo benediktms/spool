@@ -28,7 +28,7 @@ pub struct EmbedStats {
 pub fn map_embed_error(e: &EmbedError) -> Option<IngestError> {
     use EmbedErrorKind::*;
     let (kind, retryable) = match e.kind {
-        NotApproved | NoCredential | Disabled => return None,
+        NotApproved | NoCredential | Disabled | ModelMissing => return None,
         Auth => (IngestErrorKind::AuthBlocked, false),
         BudgetExhausted => (IngestErrorKind::BudgetDeferred, false),
         RateLimited | Server | Network | Timeout | Unavailable => {

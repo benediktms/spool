@@ -282,6 +282,7 @@ impl ControlService {
             crate::embeddings::EmbeddingState::NotApproved
                 | crate::embeddings::EmbeddingState::NoCredential
                 | crate::embeddings::EmbeddingState::Disabled
+                | crate::embeddings::EmbeddingState::ModelMissing
         ) || (!usable && vectors_pending > 0)
         {
             states.push("lexical_only");

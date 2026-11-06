@@ -340,7 +340,8 @@ async fn settle(
                         match st.state {
                             EmbeddingState::NotApproved
                             | EmbeddingState::NoCredential
-                            | EmbeddingState::Disabled => settle_indexed(idx, &s.id).await,
+                            | EmbeddingState::Disabled
+                            | EmbeddingState::ModelMissing => settle_indexed(idx, &s.id).await,
                             EmbeddingState::BudgetExhausted { resets_at_ms } => {
                                 set(
                                     "deferred",
