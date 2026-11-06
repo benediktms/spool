@@ -153,6 +153,10 @@ pub trait EmbeddingProvider: Send + Sync {
     fn is_hosted(&self) -> bool {
         true
     }
+    /// Daily token budgets and the request ledger apply.
+    fn metered(&self) -> bool {
+        true
+    }
     fn embed<'a>(
         &'a self,
         purpose: Purpose,

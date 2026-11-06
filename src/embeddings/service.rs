@@ -437,7 +437,7 @@ impl EmbeddingService {
             EmbeddingState::AuthBlocked
         } else if let Some(c) = circuit.clone().filter(|c| c.blocked) {
             EmbeddingState::Degraded(c)
-        } else if budget.ingest.exhausted && budget.query.exhausted {
+        } else if self.provider.metered() && budget.ingest.exhausted && budget.query.exhausted {
             EmbeddingState::BudgetExhausted { resets_at_ms }
         } else if let Some(c) = circuit {
             EmbeddingState::Degraded(c)
@@ -719,6 +719,11 @@ impl EmbeddingService {
             self.health.failure(&e, now);
             e
         };
+        if !provider.metered() {
+            return self
+                .dispatch_unmetered(provider, purpose, inputs, dispatched_flag)
+                .await;
+        }
         let (outcome, res) = self
             .ledger
             .reserve(profile_id, purpose, tokens, self.limit(purpose))
@@ -754,16 +759,7 @@ impl EmbeddingService {
         if let Some(f) = dispatched_flag {
             f.store(true, Ordering::SeqCst);
         }
-        let limit =
-            Duration::from_secs(self.cfg.request_timeout_seconds.max(1)) + OUTER_TIMEOUT_SLACK;
-        let result = match tokio::time::timeout(limit, provider.embed(purpose, inputs)).await {
-            Ok(r) => r,
-            Err(_) => Err(
-                EmbedError::new(EmbedErrorKind::Timeout, "request timed out after send")
-                    .retryable(true)
-                    .ambiguous(true),
-            ),
-        };
+        let result = self.embed_with_timeout(provider, purpose, inputs).await;
         let out = match result {
             Ok(resp) => {
                 let used = resp.usage_tokens.unwrap_or(tokens);
@@ -783,6 +779,48 @@ impl EmbeddingService {
         guard.armed = false;
         self.refresh_usage().await;
         out
+    }
+
+    async fn embed_with_timeout(
+        &self,
+        provider: &dyn EmbeddingProvider,
+        purpose: Purpose,
+        inputs: &[String],
+    ) -> Result<EmbedResponse, EmbedError> {
+        let limit =
+            Duration::from_secs(self.cfg.request_timeout_seconds.max(1)) + OUTER_TIMEOUT_SLACK;
+        match tokio::time::timeout(limit, provider.embed(purpose, inputs)).await {
+            Ok(r) => r,
+            Err(_) => Err(
+                EmbedError::new(EmbedErrorKind::Timeout, "request timed out after send")
+                    .retryable(true)
+                    .ambiguous(true),
+            ),
+        }
+    }
+
+    /// Unmetered providers (local inference) skip the ledger: no reservation, budget or in-flight guard.
+    async fn dispatch_unmetered(
+        &self,
+        provider: &dyn EmbeddingProvider,
+        purpose: Purpose,
+        inputs: &[String],
+        dispatched_flag: Option<&AtomicBool>,
+    ) -> Result<(EmbedResponse, u64), EmbedError> {
+        if let Some(f) = dispatched_flag {
+            f.store(true, Ordering::SeqCst);
+        }
+        match self.embed_with_timeout(provider, purpose, inputs).await {
+            Ok(resp) => {
+                self.health.success();
+                let used = resp.usage_tokens.unwrap_or(0);
+                Ok((resp, used))
+            }
+            Err(e) => {
+                self.health.failure(&e, self.clock.now_ms());
+                Err(e)
+            }
+        }
     }
 
     // ---- queries -----------------------------------------------------------------------------------------

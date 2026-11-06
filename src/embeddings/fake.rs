@@ -65,6 +65,7 @@ pub struct FakeProvider {
     spec: ProfileSpec,
     limits: ProviderLimits,
     hosted: bool,
+    metered: bool,
     n_concepts: usize,
     words: HashMap<String, usize>,
     faults: Mutex<Faults>,
@@ -104,6 +105,7 @@ impl FakeProvider {
             },
             limits: ProviderLimits::OPENAI,
             hosted: false,
+            metered: true,
             n_concepts: groups.len(),
             words,
             faults: Mutex::default(),
@@ -120,6 +122,11 @@ impl FakeProvider {
     /// Treat the fake as hosted so consent gating applies to it.
     pub fn hosted(mut self, hosted: bool) -> Self {
         self.hosted = hosted;
+        self
+    }
+    /// Exempt the fake from token budgets and the request ledger (a local provider).
+    pub fn metered(mut self, metered: bool) -> Self {
+        self.metered = metered;
         self
     }
     pub fn with_limits(mut self, limits: ProviderLimits) -> Self {
@@ -293,6 +300,9 @@ impl EmbeddingProvider for FakeProvider {
     }
     fn is_hosted(&self) -> bool {
         self.hosted
+    }
+    fn metered(&self) -> bool {
+        self.metered
     }
     fn embed<'a>(
         &'a self,
