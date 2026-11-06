@@ -285,6 +285,35 @@ fn the_spec_command_surface_parses() {
 }
 
 #[test]
+fn models_install_refuses_files_that_do_not_match_the_pinned_digests() {
+    let (_t, home) = temp_home();
+    let src = _t.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    for f in &spool::embeddings::local::NOMIC_V15.files {
+        std::fs::write(src.join(f.name), b"not the model").unwrap();
+    }
+
+    let o = run(
+        &home,
+        &["models", "install", "--from-dir", src.to_str().unwrap()],
+    );
+    assert!(!o.status.success());
+    let e = err(&o);
+    assert!(
+        e.contains("size mismatch") || e.contains("checksum mismatch"),
+        "{e}"
+    );
+
+    let models = home.join("models/nomic-embed-text-v1.5");
+    assert!(
+        !models
+            .join(spool::embeddings::local::NOMIC_V15.revision)
+            .exists()
+    );
+    assert!(!models.join(".staging").exists());
+}
+
+#[test]
 fn unknown_values_are_rejected_by_clap() {
     assert!(parse(&["search", "q", "--mode", "fuzzy"]).is_err());
     assert!(parse(&["read", "s", "--source-policy", "x"]).is_err());

@@ -81,6 +81,11 @@ pub enum Cmd {
         #[command(subcommand)]
         sub: Option<McpCmd>,
     },
+    /// Install the local embedding model.
+    Models {
+        #[command(subcommand)]
+        action: ModelsCmd,
+    },
     /// Inspect configuration.
     Config {
         #[command(subcommand)]
@@ -108,6 +113,16 @@ pub struct InitArgs {
 pub enum YesNo {
     Yes,
     No,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ModelsCmd {
+    /// Download (or copy) the pinned nomic-embed-text-v1.5 files and verify their SHA-256 digests.
+    Install {
+        /// Read the pinned files from this directory instead of downloading them.
+        #[arg(long, value_name = "DIR")]
+        from_dir: Option<std::path::PathBuf>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
