@@ -20,8 +20,13 @@ copied from documentation. `Cargo.lock` is written and pins the set (nothing is 
 | `rmcp` | 3.5.1 | features `server client macros schemars transport-io transport-child-process` (`client` + child-process only exercise it in tests; the shipped bridge uses server + `transport-io`) |
 | `rustix` | 1.x | `fs std process` (flock, openat, geteuid) |
 | `gix-discover` / `gix-config` / `gix-url` | 0.57.1 / 0.62.2 / 0.40.1 | project resolution (`src/projects.rs`): repository discovery incl. linked worktrees, repository-local config with includes, remote URL parsing. `default-features = false`; `sha1` on the first two (gix-hash refuses to build without a hash feature) |
+| `candle-core` / `candle-nn` / `candle-transformers` | 0.11.1 | local `nomic-embed-text-v1.5` inference (`src/embeddings/local.rs`). `default-features = false`: pure Rust CPU (gemm), no native library, no build-time download |
+| `tokenizers` | 0.23.2 | model tokenizer for the local provider. `default-features = false`: no `onig`, no C++ `esaxx`, no progress bar. `candle-core` already enables its `fancy-regex` backend. The pinned WordPiece `tokenizer.json` and a fixture of the same component types load without further features |
+| `sha2` | 0.10 | SHA-256 verification of the pinned model files (`spool models install`, `spool doctor`) |
 
 The gix sub-crates were chosen over the `gix` umbrella crate by `cargo tree -e normal` on a scratch crate: the three sub-crates resolve to 72 unique packages (33 `gix-*`), `gix` with `default-features = false` to 121 (63 `gix-*`). Adds 40 crates to the workspace graph, all `MIT OR Apache-2.0` or similarly permissive (`docs/licenses.md`).
+
+Local embedding provider (2026-11-06): release binary size (`cargo build --release --locked --bin spool`, macOS arm64) grew from 25,267,008 bytes at `1eef4a4` to 30,017,008 bytes (+4.75 MB). The model weights are not part of the binary; `spool models install` fetches them.
 
 All are stable releases; no prerelease is used. (Spec section 2 noted that retrieved docs showed
 differing release candidates; `apalis-sqlite 1.0.0` / `apalis 1.0.0` are published stable.)

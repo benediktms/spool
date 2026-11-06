@@ -40,6 +40,7 @@ fn paths_in(root: &std::path::Path) -> Paths {
         index_db: root.join("index.sqlite"),
         jobs_db: root.join("jobs.sqlite"),
         secrets_dir: home.join("secrets"),
+        models_dir: home.join("models"),
         signing_key: home.join("secrets/key"),
     }
 }

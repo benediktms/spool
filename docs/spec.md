@@ -648,6 +648,8 @@ Send `model = "text-embedding-3-small"`, `dimensions = 768`, and float output. U
 
 The official endpoint documents input and aggregate request limits. Keep application batches comfortably below those limits and validate them again against the pinned provider contract. Starting caps are 32 input chunks and 24,000 input tokens per request, whichever is reached first. Never send an empty input. [S4]
 
+A second, local provider runs `nomic-ai/nomic-embed-text-v1.5` on the CPU and is selected with `embedding.provider = "local"`, `model = "nomic-embed-text-v1.5"`, `dimensions = 768`. The model files (weights, tokenizer, config) are pinned to one Hugging Face revision and one SHA-256 per file, and the profile identity embeds that revision and a recipe number. Queries are prefixed `search_query: ` and documents `search_document: `; token vectors are mean-pooled and L2-normalized. Input is truncated, never rejected, at the model's trained 2,048 tokens. Chunking and batching keep using the cl100k counter so the pipeline fingerprint does not change. The provider embeds one input per request and loads the model lazily on the first call. When the files are not installed the embedding state is `model_missing`: semantic search fails with a typed error and lexical search and ingestion continue. Only `spool models install` fetches the files; the daemon never downloads weights.
+
 ### 12.2 Validation and representation
 
 Validate the number of returned items, their input indices, the dimension of every vector, and the absence of NaN/infinite values. Map vectors by returned index, not an undocumented ordering assumption. Reject zero-norm vectors.
@@ -662,7 +664,7 @@ Persist document embeddings by exact rendered-input hash and profile. Use a boun
 
 Reserve estimated tokens before dispatch, record actual usage when returned, and conservatively count ambiguous outcomes against the budget. Return usage separately from billing estimates. Do not hard-code a dollar price as a permanent property of a model.
 
-Starting daily hosted-ingestion allowance: 1,000,000 input tokens. Interactive query allowance: 50,000 tokens. Both are operator-configurable. Budget exhaustion pauses only the corresponding hosted work; local indexing and existing lexical search continue. Publish the reset timezone, default UTC, and next reset timestamp.
+Starting daily hosted-ingestion allowance: 1,000,000 input tokens. Interactive query allowance: 50,000 tokens. Both are operator-configurable. Token budgets and the request ledger apply only to metered (hosted) providers; the local provider is exempt. Budget exhaustion pauses only the corresponding hosted work; local indexing and existing lexical search continue. Publish the reset timezone, default UTC, and next reset timestamp.
 
 Query requests and ingestion batches use separate concurrency permits. A slow backfill must not leave an interactive query waiting behind every pending document batch. A provider-wide limiter still respects the account's overall rate limits.
 
@@ -1317,6 +1319,8 @@ provider = "openai"
 model = "text-embedding-3-small"
 dimensions = 768
 profile_generation = 1
+# Local alternative (no text leaves the machine; run `spool models install` first):
+#   provider = "local", model = "nomic-embed-text-v1.5", dimensions = 768
 credential_file = "secrets/provider.key"
 batch_max_inputs = 32
 batch_max_tokens = 24000
@@ -1398,7 +1402,8 @@ spool service stop
 spool service restart
 spool status [--json]
 spool logs [--follow]
-spool doctor [--json]
+spool doctor [--json] [--probe-provider]
+spool models install [--from-dir DIR]
 
 spool search "query" [--mode hybrid|lexical|semantic|literal]
                      [--source omp] [--since 7d] [--limit 10]
@@ -1449,6 +1454,8 @@ macOS:
   secrets/                                       (mode 0700)
     handle-signing.key                           (0600)
     provider.key                                 (0600)
+  models/                                        (mode 0700)
+    nomic-embed-text-v1.5/<revision>/            (files 0600; local provider only)
 ~/Library/Logs/Spool/
 ~/Library/LaunchAgents/com.spool.daemon.plist
 ```

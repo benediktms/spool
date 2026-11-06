@@ -15,6 +15,7 @@ pub struct Paths {
     pub index_db: PathBuf,
     pub jobs_db: PathBuf,
     pub secrets_dir: PathBuf,
+    pub models_dir: PathBuf,
     pub signing_key: PathBuf,
 }
 
@@ -48,6 +49,7 @@ impl Paths {
             index_db: state_dir.join("index.sqlite"),
             jobs_db: state_dir.join("jobs.sqlite"),
             signing_key: secrets_dir.join("handle-signing.key"),
+            models_dir: root.join("models"),
             secrets_dir,
             state_dir,
             root,
@@ -318,11 +320,22 @@ impl Config {
             e.ingestion_request_concurrency >= 1 && e.query_request_concurrency >= 1,
             "embedding concurrency must be >= 1"
         );
-        ensure!(
-            e.provider == "openai",
-            "unsupported embedding.provider {:?}",
-            e.provider
-        );
+        match e.provider.as_str() {
+            "openai" => {}
+            "local" => {
+                ensure!(
+                    e.model == crate::embeddings::local::LOCAL_MODEL_NAME,
+                    "embedding.model must be {:?} when embedding.provider = \"local\"",
+                    crate::embeddings::local::LOCAL_MODEL_NAME
+                );
+                ensure!(
+                    e.dimensions == crate::embeddings::local::LOCAL_DIMENSIONS,
+                    "embedding.dimensions must be {} when embedding.provider = \"local\"",
+                    crate::embeddings::local::LOCAL_DIMENSIONS
+                );
+            }
+            _ => anyhow::bail!("unsupported embedding.provider {:?}", e.provider),
+        }
         crate::clock::Tz::parse(&e.budget_timezone)
             .map_err(|m| anyhow::anyhow!("embedding.budget_timezone: {m}"))?;
         let s = &self.search;

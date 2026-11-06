@@ -8,6 +8,7 @@ pub mod doctor;
 pub mod init;
 pub mod logs;
 pub mod mcpcfg;
+pub mod models;
 pub mod remote;
 pub mod requests;
 pub mod timeparse;
@@ -16,7 +17,8 @@ use crate::clock::{self, SharedClock};
 use crate::config::{Config, Paths};
 use crate::service::{ServiceConfig, ServiceManager, SystemRunner};
 use args::{
-    Cmd, ConfigCmd, DaemonCmd, HandlesCmd, IndexArgs, JobsCmd, McpCmd, ServiceCmd, SourcesCmd,
+    Cmd, ConfigCmd, DaemonCmd, HandlesCmd, IndexArgs, JobsCmd, McpCmd, ModelsCmd, ServiceCmd,
+    SourcesCmd,
 };
 use clap::Parser;
 use remote::{CliError, Remote, print_json, render_kv};
@@ -138,6 +140,9 @@ pub async fn execute(cli: Cli, paths: Paths, clock: SharedClock) -> Result<(), C
                 print!("{s}");
             }
         }
+        Cmd::Models {
+            action: ModelsCmd::Install { from_dir },
+        } => models::install(&paths, from_dir.as_deref()).await?,
         Cmd::Logs { follow, lines } => logs::run(&paths, follow, lines).await?,
         Cmd::Doctor {
             json,

@@ -46,6 +46,10 @@ hosted_processing_approved = false
 provider = "openai"
 model = "text-embedding-3-small"
 dimensions = 768
+# Local alternative, no text leaves the machine (run `spool models install` first):
+# provider = "local"
+# model = "nomic-embed-text-v1.5"
+# dimensions = 768
 profile_generation = 1
 credential_file = "secrets/provider.key"   # mode 0600; holds only the API key
 endpoint = "https://api.openai.com/v1/embeddings"

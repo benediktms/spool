@@ -121,6 +121,8 @@ For q02, the relevant session ranked sixth in hybrid and first in semantic mode.
 reserved 1,022 ingestion and 256 query tokens, with no ambiguous usage. The ledger recorded
 the same completed usage values, which can include estimates.
 
+Results for the local `nomic-embed-text-v1.5` provider come from a separate run and are not comparable with the hosted figures above.
+
 ## Controlled private-corpus preparation
 
 `tests/controlled_retrieval_eval.rs` can search a private, frozen SQLite copy without

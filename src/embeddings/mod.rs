@@ -4,6 +4,7 @@ pub mod budget;
 pub mod cache;
 pub mod fake;
 pub mod health;
+pub mod local;
 pub mod openai;
 pub mod provider;
 mod service;
@@ -12,6 +13,7 @@ pub mod vectors;
 
 pub use fake::FakeProvider;
 pub use health::CircuitInfo;
+pub use local::LocalProvider;
 pub use openai::OpenAiProvider;
 pub use provider::{
     EmbedError, EmbedErrorKind, EmbedResponse, EmbeddingProvider, ProfileSpec, ProviderLimits,
@@ -19,6 +21,6 @@ pub use provider::{
 };
 pub use service::{
     BudgetLine, BudgetView, EmbedProgress, EmbeddingService, EmbeddingState, EmbeddingStatus,
-    ProbeOutcome, VectorCoverage, probe_provider,
+    ProbeOutcome, VectorCoverage, probe_local_provider, probe_provider,
 };
 pub use tokenizer::tokenizer;

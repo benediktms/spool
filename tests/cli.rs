@@ -285,6 +285,35 @@ fn the_spec_command_surface_parses() {
 }
 
 #[test]
+fn models_install_refuses_files_that_do_not_match_the_pinned_digests() {
+    let (_t, home) = temp_home();
+    let src = _t.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    for f in &spool::embeddings::local::NOMIC_V15.files {
+        std::fs::write(src.join(f.name), b"not the model").unwrap();
+    }
+
+    let o = run(
+        &home,
+        &["models", "install", "--from-dir", src.to_str().unwrap()],
+    );
+    assert!(!o.status.success());
+    let e = err(&o);
+    assert!(
+        e.contains("size mismatch") || e.contains("checksum mismatch"),
+        "{e}"
+    );
+
+    let models = home.join("models/nomic-embed-text-v1.5");
+    assert!(
+        !models
+            .join(spool::embeddings::local::NOMIC_V15.revision)
+            .exists()
+    );
+    assert!(!models.join(".staging").exists());
+}
+
+#[test]
 fn unknown_values_are_rejected_by_clap() {
     assert!(parse(&["search", "q", "--mode", "fuzzy"]).is_err());
     assert!(parse(&["read", "s", "--source-policy", "x"]).is_err());
@@ -1276,6 +1305,40 @@ fn doctor_probe_provider_refuses_without_consent_and_never_calls_out() {
         .clone();
     assert_eq!(p["status"], "fail");
     assert!(p["detail"].as_str().unwrap().contains("not attempted"));
+}
+
+#[test]
+fn doctor_warns_when_the_local_model_is_not_installed() {
+    let (_t, home) = temp_home();
+    assert!(run(&home, &["init"]).status.success());
+    let cfg = std::fs::read_to_string(home.join("config.toml"))
+        .unwrap()
+        .replace("provider = \"openai\"", "provider = \"local\"")
+        .replace(
+            "model = \"text-embedding-3-small\"",
+            "model = \"nomic-embed-text-v1.5\"",
+        );
+    std::fs::write(home.join("config.toml"), cfg).unwrap();
+
+    let o = run(&home, &["doctor", "--probe-provider", "--json"]);
+    let v: Value = serde_json::from_str(&out(&o)).unwrap();
+    let check = |name: &str| {
+        v["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == name)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(check("embedding")["status"], "warn");
+    assert!(
+        check("embedding")["detail"]
+            .as_str()
+            .unwrap()
+            .contains("spool models install")
+    );
+    assert_eq!(check("provider")["status"], "fail");
 }
 
 #[test]

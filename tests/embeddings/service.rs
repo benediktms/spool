@@ -470,6 +470,32 @@ async fn query_budget_exhaustion_is_a_typed_error_and_leaves_ingestion_alone() {
 }
 
 #[tokio::test]
+async fn unmetered_provider_ignores_budgets_and_the_ledger() {
+    let cfg = spool::config::EmbeddingConfig {
+        daily_ingestion_token_budget: 0,
+        daily_query_token_budget: 0,
+        ..emb_cfg()
+    };
+    let (_dir, index) = open_index().await;
+    let clock = ManualClock::new(NOON);
+    let fake = Arc::new(FakeProvider::new(DIMS).metered(false));
+    let svc = service_over(&index, &clock, &fake, cfg);
+
+    let p = svc
+        .embed_documents(docs(0..3), &AtomicBool::new(false))
+        .await
+        .unwrap();
+    assert_eq!(p.embedded, 3);
+    assert!(!p.budget_exhausted);
+    svc.embed_query("sqlite storage question", Duration::from_secs(2))
+        .await
+        .unwrap();
+
+    assert_eq!(svc.status().state, EmbeddingState::Ready);
+    assert!(states(&index).await.is_empty());
+}
+
+#[tokio::test]
 async fn interrupted_requests_survive_a_kill_and_count_against_the_budget() {
     let h = harness().await;
     // what a killed process leaves behind: a dispatched row and a never-dispatched reservation

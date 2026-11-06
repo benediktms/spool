@@ -62,6 +62,13 @@ impl ProviderLimits {
         max_tokens_per_input: crate::config::PROVIDER_MAX_INPUT_TOKENS,
         max_tokens_per_request: 300_000,
     };
+    /// Local inference runs one input per forward pass, so a dispatch holds one chunk and a query waits for at
+    /// most one chunk.
+    pub const LOCAL: Self = Self {
+        max_inputs_per_request: 1,
+        max_tokens_per_input: crate::config::PROVIDER_MAX_INPUT_TOKENS,
+        max_tokens_per_request: crate::config::PROVIDER_MAX_INPUT_TOKENS,
+    };
 }
 
 #[derive(Debug, Clone)]
@@ -84,6 +91,8 @@ pub enum EmbedErrorKind {
     Timeout,
     BadResponse,
     UnsupportedModel,
+    /// The local model files are not installed; semantic search is unavailable, lexical search continues.
+    ModelMissing,
     BudgetExhausted,
     /// Circuit open or provider otherwise known to be unavailable; no request was sent.
     Unavailable,
@@ -103,6 +112,7 @@ impl EmbedErrorKind {
             Self::Timeout => "timeout",
             Self::BadResponse => "bad_response",
             Self::UnsupportedModel => "unsupported_model",
+            Self::ModelMissing => "model_missing",
             Self::BudgetExhausted => "budget_exhausted",
             Self::Unavailable => "unavailable",
             Self::Cancelled => "cancelled",
@@ -151,6 +161,10 @@ pub trait EmbeddingProvider: Send + Sync {
     fn limits(&self) -> ProviderLimits;
     /// True when input text leaves the machine (consent gating applies).
     fn is_hosted(&self) -> bool {
+        true
+    }
+    /// Daily token budgets and the request ledger apply.
+    fn metered(&self) -> bool {
         true
     }
     fn embed<'a>(
