@@ -63,6 +63,14 @@ Without approval or without a credential the daemon keeps lexical indexing and s
 (`lexical_only` state; the two causes are reported distinctly by `spool doctor` and status).
 Tests use a local fake server on 127.0.0.1 and never the network.
 
+## Local embedding provider
+
+With `embedding.provider = "local"` chunk text and search queries are embedded on this machine and
+never leave it; no consent flag or credential is involved. `spool models install` contacts
+huggingface.co only to download the pinned model files and sends no user data; `--from-dir` makes no
+network request. Every file is checked against a pinned size and SHA-256 before it is installed, and
+the daemon never downloads weights.
+
 ## Logs, diagnostics, telemetry
 
 * Logs are local, structured, size-rotated files (`~/Library/Logs/Spool/spool.log` on macOS,

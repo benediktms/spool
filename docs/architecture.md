@@ -56,6 +56,7 @@ macOS: ~/Library/Application Support/Spool/          Linux: ~/.local/state/spool
   config.toml                  (0600)
   state/ (0700)  index.sqlite  jobs.sqlite  daemon.lock  spool.sock      (files 0600)
   secrets/ (0700) handle-signing.key  provider.key                       (0600)
+  models/ (0700)  nomic-embed-text-v1.5/<revision>/ (local provider; files 0600)
 macOS logs: ~/Library/Logs/Spool/     Linux logs: <state>/logs/
 macOS service: ~/Library/LaunchAgents/com.spool.daemon.plist
 Linux service: ~/.config/systemd/user/spool-daemon.service

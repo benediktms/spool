@@ -90,6 +90,39 @@ and `embedding.daily_query_token_budget` before enabling hosted processing if ne
 can delay vector coverage. Hybrid search falls back to lexical search when query embedding is
 unavailable; semantic-only search returns an error instead.
 
+## Local embeddings
+
+With `provider = "local"` Spool embeds on the CPU with `nomic-embed-text-v1.5` (Apache-2.0). No
+text leaves the machine and no credential or token budget is involved. The model needs about
+550 MB of memory while loaded (about 1.1 GB briefly during load) and stays loaded for the life of
+the daemon. Embedding uses all CPU cores and takes roughly 1 to 2 seconds per chunk, so a large
+backfill takes a while; hybrid queries can fall back to lexical search while it runs, and the first
+query after a start loads the model.
+
+1. Install the pinned files (547 MB, SHA-256 verified; use `--from-dir DIR` to copy them from a
+   directory instead of downloading):
+
+   ```sh
+   spool models install
+   ```
+
+2. In the `[embedding]` section of `config.toml` set `provider = "local"`,
+   `model = "nomic-embed-text-v1.5"` and `dimensions = 768`. Leave `enabled = true`.
+3. Check the install and the model, then restart the daemon:
+
+   ```sh
+   spool doctor --probe-provider
+   spool service restart
+   ```
+
+4. Backfill with `spool index rebuild --embeddings-only` and watch `spool status --json`. Queries
+   switch to the local profile when every published chunk has a local vector; vectors of the
+   previous profile stay in the database until their chunks go away. Restoring the previous
+   `[embedding]` section reactivates that profile once it covers the corpus.
+
+Without the model files the state is `model_missing`: lexical search works, semantic search
+reports `spool models install` as the recovery.
+
 ## Running the daemon
 
 * Foreground: `spool daemon run` (Ctrl-C / SIGTERM stops it; graceful target 15 s).
