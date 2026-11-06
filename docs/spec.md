@@ -719,7 +719,7 @@ score(chunk) = sum over available retrievers of 1 / (60 + rank)
 
 Ranks start at one. Missing candidates contribute zero. This is a deterministic ranking heuristic, not a calibrated relevance probability.
 
-Group by session and score each session by its highest-ranking surviving chunk. Do not sum every chunk score and thereby reward long sessions. Return up to three distinct matching spans per session, merging adjacent/overlapping spans from the same branch and suppressing duplicate context.
+Group by session and score each session by its highest-ranking surviving chunk. Do not sum every chunk score and thereby reward long sessions. Return up to the requested number of distinct matching spans per session, merging adjacent/overlapping spans from the same branch and suppressing duplicate context.
 
 When duplicates leave fewer than the requested number of sessions, candidate retrieval may expand within the local time budget, up to 2,000 candidates per retriever. Never expand without a bound.
 
@@ -727,7 +727,7 @@ Keep default ordering relevance-first, with deterministic ID tie-breaks. An expl
 
 ### 13.6 Coverage and result limits
 
-Default: ten sessions, maximum fifty, at most three matches each. Bound excerpts and the entire response; do not return the complete transcript as part of search. If limits truncate a response, report it and preserve valid read references.
+Default: ten sessions, maximum fifty, and at most three matches each. The configured match ceiling defaults to 32; an omitted request uses three or the ceiling if lower. Bound excerpts and the entire response; do not return the complete transcript as part of search. If limits truncate a response, report it and preserve valid read references.
 
 Return the index epoch always. Return `coverage` (lexical/vector counts, scan freshness) only when degraded: `pending_sessions > 0`, `embedded_chunks < active_chunks`, or `mode_used` differs from `mode_requested`; `index_status` always reports full numbers. `coverage.pending_sessions` counts present, policy-eligible sessions in pending or deferred state; it excludes missing sources, excluded sessions, disabled subagent kinds, and inert manual-backfill candidates. Do not claim "no such conversation exists" when the index contains only the configured recent/backfilled subset.
 
@@ -1331,7 +1331,7 @@ budget_timezone = "UTC"
 default_mode = "hybrid"
 default_limit = 10
 max_limit = 50
-max_matches_per_session = 3
+max_matches_per_session = 32
 candidate_limit = 200
 max_candidate_limit = 2000
 rrf_constant = 60

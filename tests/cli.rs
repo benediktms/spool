@@ -1375,6 +1375,29 @@ fn config_example_is_valid_and_equals_the_built_in_defaults() {
 }
 
 #[test]
+fn match_limit_config_bounds() {
+    let root = Path::new("/tmp/spool-example-root");
+    for cap in [1, 2, 3, 32] {
+        assert!(
+            spool::config::Config::parse(
+                &format!("[search]\nmax_matches_per_session = {cap}"),
+                root
+            )
+            .is_ok()
+        );
+    }
+    for cap in [0, 33] {
+        assert!(
+            spool::config::Config::parse(
+                &format!("[search]\nmax_matches_per_session = {cap}"),
+                root
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
 fn init_enable_source_enables_only_the_named_source() {
     let (_t, home) = temp_home();
     let o = run(&home, &["init", "--enable-source", "omp"]);

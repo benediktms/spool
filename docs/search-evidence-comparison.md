@@ -208,3 +208,42 @@ At 15k the candidate's median p50/p99 in milliseconds were lexical 9.2/15.2, lit
 The 15k candidate emitted 994,102 lexical response bytes across 600 sessions and 837 matches, compared with main's 979,595 bytes, 600 sessions and 809 matches. The common-literal workload emitted 968,640 versus 966,840 bytes, both across 300 sessions and 900 matches. Thus timing compares the same inputs but not identical output shapes or match counts. For the frozen real-corpus capture, preview text was 1,142,119 versus 675,141 bytes and exhaustive indexed reads were 36,725,015 versus 12,168,316 serialized bytes; these costs must be considered alongside the quality gains.
 
 Candidate-only preview events at 15k had median total elapsed time across each full mode workload of 12.5 ms lexical, 13.5 ms semantic and 16.0 ms hybrid; the 100k single run measured 10.8, 11.9 and 12.0 ms respectively. Main emits no equivalent phase events, so these numbers do not support a baseline preview-phase ratio. At 15k, whole-process user CPU ranged 13.09–13.65 s main and 13.68–14.27 s candidate, including seeding; peak RSS ranged 79.4–79.9 MiB and 78.4–78.8 MiB respectively. At 100k, user CPU was 89.49 versus 90.72 s and peak RSS 77.2 versus 74.0 MiB, again including seeding. Process CPU, wall time and RSS are not per-query measurements. One machine, a small sample and any host contention limit causal or general performance claims.
+
+## Offline selector policy probe
+
+The offline probe tested marginal query-unit support and true ordinal adjacency, alone and together. It used the frozen lexical corpus and literal probes above. The production selector, renderer and reader did not change. The unchanged probe reproduced all 55 ordered session lists, 729 canonical anchor sets and read-item sequences. It also reproduced 1,484 pages and 36,725,015 serialized read bytes. All reads completed.
+
+| Policy | All calls / pages / bytes | Top-session calls / pages / bytes | First-relevant calls / pages / bytes | Preview bytes |
+| --- | --- | --- | --- | ---: |
+| Baseline | 729 / 1,484 / 36,725,015 | 120 / 275 / 7,082,113 | 105 / 246 / 6,405,217 | 1,142,119 |
+| Diversity only | 729 / 1,494 / 36,988,680 | 120 / 284 / 7,309,290 | 105 / 255 / 6,638,694 | 1,168,113 |
+| Adjacency only | 732 / 1,462 / 35,961,466 | 120 / 267 / 6,827,837 | 105 / 238 / 6,150,941 | 1,146,836 |
+| Combined | 732 / 1,471 / 36,214,201 | 120 / 276 / 7,055,014 | 105 / 247 / 6,384,418 | 1,168,922 |
+
+The combined policy fails the acceptance gates. Read bytes fall in all three scopes, but all-query calls increase. Pages increase for both the top and first relevant sessions. Preview bytes also increase. All policies preserve the 55 ordered session lists, and all reads complete without errors. These are output counts for this frozen corpus, not latency or runtime performance results.
+
+The combined preview and read recover the `codex_remote_secret` answer, including the log-exposure cause. Neither stage supplies ingestion as the trigger for `project_migration_trigger`. Both stages regress `old_cursors` from sufficient to misleading. They show an older `UnsupportedVersion` account and omit the later `CURSOR_EXPIRED` and `new_read` correction. The combined read also recovers the `claude_cwd_filter` cause. A private per-query assessment records evidence for all 45 positive queries. Some grades use matching frozen answer phrases or retained baseline items. Those checks do not establish that added passages contain no conflicting claims, so the full misleading-result audit remains unverified.
+
+The isolated phases each considered 4,782 candidate windows across 496 selector groups. The baseline and diversity phases selected 729 windows. The adjacency and combined phases selected 732. These are offline work counts, not production cost measurements. Each phase took about 20–21 seconds before capture serialization on this machine. The probe preloaded indexed bodies and does not establish a runtime loading strategy.
+
+The raw captures, per-query evidence, selector traces and exact probe source remain in a private local directory. The captured probe source SHA-256 is `5413ccc74b74fab6a4b2c8ab420fd207258386d6953c1c24bb81acc311f422ca`. The combined-policy test exits with a failed assertion because its numeric gates fail. No policy tuning followed the result.
+
+## Compact read references
+
+A subsequent codec change issued compact message, item and branch references with a version 2 envelope, retaining version 1 object decoding. On the same frozen lexical and literal replay, all 55 ordered session lists, 491 session match counts, 729 canonical anchor sets and reconstructed read-item content and provenance matched the complete-passages capture. Preview text matched exactly at 1,142,119 UTF-8 bytes. All reads completed without errors. These comparisons preserve the prior evidence identities; they do not add new subjective quality grades.
+
+| Scope | Calls | Baseline pages / bytes | Compact pages / bytes |
+| --- | ---: | ---: | ---: |
+| All matches | 729 | 1,484 / 36,725,015 | 1,384 / 33,096,804 |
+| Top lexical session | 120 | 275 / 7,082,113 | 256 / 6,463,270 |
+| First relevant lexical session | 105 | 246 / 6,405,217 | 227 / 5,812,170 |
+
+These are serialized output volumes for one frozen indexed-only capture, not runtime performance measurements. An older binary rejects newly issued version 2 references with its existing unsupported-version recovery; after rollback those references require a new read or search. Existing version 1 references and cursors remain readable by the updated binary.
+
+## Explicit match limit
+
+With the compact references above, a frozen default replay preserved all 55 session ranklists, 729 ordered anchor sets, indexed read contents and provenance, and previews. All 729 reads completed in 1,384 pages and 33,096,804 serialized bytes. This preserves the prior individual evidence assessments; it is not a new quality assessment.
+
+Two lexical retries kept their original queries, scoped to the selected session, with `limit: 1`, `matches_per_session: 32` and `max_bytes: 65536`. The credential retry returned 18 references in 65,060 MCP bytes including envelope margin, with four previews omitted; the migration retry returned 24 references in 64,618 bytes, with twelve previews omitted. Both reported truncation. Each retained the complete correction window from the frozen trace and an indexed read verified its anchors and full target-record digest. The respective correction reads took two pages / 35,714 bytes and one page / 30,177 bytes. The two searches created two ordinary leases. The controlled expanded run took 191 ms on this machine; this single observation is not a benchmark.
+
+The retries can change rankings because they are fresh searches with narrower filters. They do not make the original top-three evidence sufficient, verify the original source, or guarantee that all requested references fit every response. The page and byte reductions in the preceding section come from compact references, independently of this limit change.

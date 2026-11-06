@@ -94,9 +94,9 @@ pub struct SearchInput {
     #[serde(default)]
     #[schemars(range(min = 1, max = 50))]
     pub limit: Option<usize>,
-    /// Matches per session (default and maximum 3; larger values are clamped with a `limit_clamped` warning).
+    /// Matches per session (default 3, maximum 32 or the configured ceiling; larger values are clamped with a `limit_clamped` warning).
     #[serde(default)]
-    #[schemars(range(min = 1, max = 3))]
+    #[schemars(range(min = 1, max = 32))]
     pub matches_per_session: Option<usize>,
     /// Soft target for preview text in UTF-8 bytes (256 to 8192).
     #[serde(default)]

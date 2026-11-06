@@ -241,16 +241,22 @@ fn controlled_query_token_preflight() {
 #[tokio::test]
 #[ignore = "explicit private corpus and manifest; offline lexical retrieval"]
 async fn controlled_lexical_preview() {
-    run_controlled(false).await;
+    run_controlled(false, false).await;
 }
 
 #[tokio::test]
 #[ignore = "explicitly approved private queries; sends query text to configured provider"]
 async fn controlled_hosted_evaluation() {
-    run_controlled(true).await;
+    run_controlled(true, false).await;
 }
 
-async fn run_controlled(hosted: bool) {
+#[tokio::test]
+#[ignore = "explicit private corpus and manifest; offline expanded lexical retrieval"]
+async fn controlled_explicit_matches() {
+    run_controlled(false, true).await;
+}
+
+async fn run_controlled(hosted: bool, expanded: bool) {
     use serde_json::json;
     use spool::clock;
     use spool::config::{Config, Paths};
@@ -453,7 +459,154 @@ async fn run_controlled(hosted: bool) {
         sources,
         engine.source_read_stager(),
     );
-    let service = SearchService::new(index, cfg, embedding, leases, keys);
+    let service = SearchService::new(index.clone(), cfg, embedding, leases.clone(), keys.clone());
+    if expanded {
+        let comparison = std::process::Command::new("python3")
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/controlled_compare.py"
+            ))
+            .status()
+            .expect("default capture comparison failed to start");
+        assert!(
+            comparison.success(),
+            "default capture differs from baseline"
+        );
+        use spool::transcript::handle::HandleKind;
+        use spool::transcript::refs::{MatchRef, RefHandle};
+        let started = std::time::Instant::now();
+        let trace: Value = serde_json::from_slice(
+            &std::fs::read(
+                std::env::var_os("SPOOL_CONTROLLED_EVAL_BASELINE_TRACE")
+                    .expect("baseline trace required"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let mut captures = Vec::new();
+        for (id, primary, rowids, key, digest) in [
+            (
+                "codex_remote_secret",
+                27097,
+                vec![27096, 27097, 27098],
+                "451a3a90-e47d-461f-abf8-7ab2a3ead367",
+                "e4bea6f371f735f11533fae9e23a1b6507fbdb416ad0cf786da3a373e821777d",
+            ),
+            (
+                "project_migration_trigger",
+                27119,
+                vec![27118, 27119, 27120],
+                "b2537e6b-89d4-4c29-afbd-f49c3fe5ceb4",
+                "dee55858ab15b39be04bc731c210720b45d5607be7491d53d02da4d1a73c7e27",
+            ),
+        ] {
+            let query = manifest["queries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|q| q["id"] == id)
+                .unwrap();
+            let entry = trace
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["query_id"] == id && t["session_id"] == "ss_ea6d9471703be31b101c28ea")
+                .unwrap();
+            assert_eq!(entry["snapshot_id"], "snap_ad3ba43876b5925889052103");
+            let window = entry["candidates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["primary"] == primary && c["rowids"] == json!(rowids))
+                .unwrap();
+            let mut expected: Vec<_> = window["anchors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().to_owned())
+                .collect();
+            expected.sort();
+            let mut args = json!({"query":query["query"], "mode":"lexical", "session_ids":["ss_ea6d9471703be31b101c28ea"], "limit":1, "matches_per_session":32, "max_bytes":65536});
+            if let Some(projects) = query.get("projects") {
+                args["projects"] = projects.clone();
+            }
+            let response = service.call(args).await.unwrap();
+            let response_bytes = spool::mcp::budget::tool_result_bytes(&response, false);
+            let matches = response["results"][0]["matches"].as_array().unwrap();
+            let mut found = None;
+            for m in matches {
+                let handle = RefHandle::decode(
+                    &keys.current(),
+                    HandleKind::Match,
+                    m["match_ref"].as_str().unwrap(),
+                )
+                .unwrap();
+                let payload = leases
+                    .get_ref(&handle.lease, handle.ref_id, "match")
+                    .await
+                    .unwrap();
+                let reference: MatchRef = serde_json::from_slice(&payload).unwrap();
+                let mut actual: Vec<_> = reference.records.iter().map(|r| r.key.clone()).collect();
+                actual.sort();
+                if actual == expected {
+                    let record = reference.records.iter().find(|r| r.key == key).unwrap();
+                    let indexed_digest: Vec<u8> = sqlx::query_scalar(
+                        "SELECT digest FROM records WHERE snapshot_id = ? AND key = ?",
+                    )
+                    .bind("snap_ad3ba43876b5925889052103")
+                    .bind(key)
+                    .fetch_one(&index.reader)
+                    .await
+                    .unwrap();
+                    assert_eq!(
+                        indexed_digest
+                            .iter()
+                            .map(|b| format!("{b:02x}"))
+                            .collect::<String>(),
+                        digest
+                    );
+                    assert!(digest.starts_with(&record.digest));
+                    let read = capture_read(&reader, json!({"session_id":"ss_ea6d9471703be31b101c28ea", "source_policy":"indexed_only", "selection":{"kind":"match", "match_ref":m["match_ref"]}})).await;
+                    assert_eq!(read["complete"], true);
+                    let mut read_anchors: Vec<_> =
+                        read["pages"][0]["selection"]["anchor_message_refs"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|v| {
+                                spool::transcript::refs::MessageRef::decode(
+                                    &keys.current(),
+                                    v.as_str().unwrap(),
+                                )
+                                .unwrap()
+                                .record
+                            })
+                            .collect();
+                    read_anchors.sort();
+                    assert_eq!(read_anchors, expected);
+                    found = Some(read);
+                    break;
+                }
+            }
+            assert!(found.is_some(), "correction window missing: {id}");
+            assert!(response_bytes < 65536);
+            captures.push(
+                json!({"id":id,"response":response,"response_bytes":response_bytes,"read":found}),
+            );
+        }
+        let path =
+            std::env::var_os("SPOOL_CONTROLLED_EVAL_SNIPPETS").expect("private capture required");
+        use std::os::unix::fs::OpenOptionsExt;
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+            .unwrap();
+        serde_json::to_writer(file, &captures).unwrap();
+        println!("expanded elapsed_ms={}", started.elapsed().as_millis());
+        return;
+    }
     let mut snippets = Vec::new();
     let mut snippet_file = std::env::var_os("SPOOL_CONTROLLED_EVAL_SNIPPETS").map(|path| {
         use std::os::unix::fs::OpenOptionsExt;

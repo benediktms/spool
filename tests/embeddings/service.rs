@@ -553,7 +553,11 @@ async fn request_state_transitions_are_recorded() {
 #[tokio::test]
 async fn ingestion_and_query_have_separate_concurrency_permits() {
     // ingestion permit = 1 even when several batches are submitted at once
-    let h = harness().await;
+    let h = harness_with(spool::config::EmbeddingConfig {
+        request_timeout_seconds: 30,
+        ..emb_cfg()
+    })
+    .await;
     h.fake.set_delay(Duration::from_millis(150));
     let svc = Arc::new(h.svc);
     let cancel = Arc::new(AtomicBool::new(false));
@@ -587,8 +591,9 @@ async fn ingestion_and_query_have_separate_concurrency_permits() {
     assert_eq!(h.fake.max_in_flight(Purpose::Query), 2);
 
     // a slow backfill batch does not make an interactive query wait behind it
-    h.fake.set_delay(Duration::from_millis(400));
-    let started = Instant::now();
+    h.fake.set_delay(Duration::ZERO);
+    h.fake.fail_next(Fault::Hang);
+    let ingest_calls = h.fake.calls_for(Purpose::Ingest);
     let bg = {
         let svc = svc.clone();
         tokio::spawn(async move {
@@ -597,21 +602,20 @@ async fn ingestion_and_query_have_separate_concurrency_permits() {
                 .unwrap()
         })
     };
-    let q = {
-        let svc = svc.clone();
-        tokio::spawn(async move {
-            svc.embed_query("interactive while backfilling", Duration::from_secs(5))
-                .await
-                .unwrap()
-        })
-    };
-    q.await.unwrap();
-    bg.await.unwrap();
-    assert!(
-        started.elapsed() < Duration::from_millis(750),
-        "ran serially: {:?}",
-        started.elapsed()
-    );
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while h.fake.calls_for(Purpose::Ingest) == ingest_calls {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("ingestion did not reach the provider");
+
+    svc.embed_query("interactive while backfilling", Duration::from_secs(5))
+        .await
+        .unwrap();
+    assert!(!bg.is_finished(), "ingestion should remain blocked");
+    bg.abort();
+    assert!(bg.await.unwrap_err().is_cancelled());
 }
 
 #[tokio::test]

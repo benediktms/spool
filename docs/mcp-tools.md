@@ -50,7 +50,7 @@ Input (unknown fields are rejected; exactly one of `query` or `queries` is requi
 | `sources`, `session_ids`, `session_kinds` | filters (default kind: interactive) |
 | `projects` | 1 to 16 entries, each a project name (`app-memberships`, case-insensitive), `owner/repo` (any host), a git URL, or an absolute path inside a project. Matches of several entries are unioned |
 | `after`, `before`, `include_unknown_time` | absolute RFC 3339 timestamps only; relative dates exist only in the CLI |
-| `prefer_recent`, `limit`, `matches_per_session`, `debug_scores` | ranking and size controls; `limit` above 50 and `matches_per_session` above 3 are clamped with a `limit_clamped` warning, zero is rejected |
+| `prefer_recent`, `limit`, `matches_per_session`, `debug_scores` | ranking and size controls; `limit` above 50 and `matches_per_session` above the configured ceiling (default 32) are clamped with a `limit_clamped` warning, zero is rejected; an omitted match limit uses three or the configured ceiling if lower |
 | `preview_target_bytes` | soft target for each preview, 256 through 8,192. Default 1,200 |
 | `max_bytes` | serialized response budget, 4,096 through the server cap. Default is the server cap, normally 65,536 |
 
@@ -74,6 +74,8 @@ Behaviour worth knowing:
   and spend the query budget. `lexical` and `literal` never leave the machine.
 * If the lease bounds are exhausted the call returns `RESOURCE_LIMIT` instead of handles that
   cannot be read.
+
+To inspect more evidence in one session, repeat the same query or `queries` and its mode and filters, add `session_ids` with the chosen session, `limit: 1`, `matches_per_session: 32`, and `max_bytes: 65536`. This is a fresh search with a new lease; rankings can change. Previews may be omitted before references. Semantic and hybrid retries can call the provider again after a cache miss.
 
 CLI equivalent: `spool search "query" [--mode M] [--source ID] [--since 7d] [--until DATE] [--limit N] [--json]`.
 

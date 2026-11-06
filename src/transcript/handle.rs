@@ -142,9 +142,9 @@ impl HandleKey {
         }
     }
 
-    fn mac(&self, kind: HandleKind, epoch: u32, payload: &[u8]) -> [u8; 16] {
+    fn mac(&self, version: u8, kind: HandleKind, epoch: u32, payload: &[u8]) -> [u8; 16] {
         let mut h = blake3::Hasher::new_keyed(&self.key);
-        h.update(&[HANDLE_VERSION]);
+        h.update(&[version]);
         h.update(kind.tag().as_bytes());
         h.update(&epoch.to_le_bytes());
         h.update(payload);
@@ -155,9 +155,21 @@ impl HandleKey {
 
     /// `v1.<kind>.<epoch>.<b64 payload>.<b64 mac>`
     pub fn sign(&self, kind: HandleKind, payload: &[u8]) -> String {
-        let mac = self.mac(kind, self.epoch, payload);
+        self.sign_version(HANDLE_VERSION, kind, payload)
+    }
+
+    pub(crate) fn sign_ref(&self, kind: HandleKind, payload: &[u8]) -> String {
+        assert!(matches!(
+            kind,
+            HandleKind::Message | HandleKind::Item | HandleKind::Branch
+        ));
+        self.sign_version(2, kind, payload)
+    }
+
+    fn sign_version(&self, version: u8, kind: HandleKind, payload: &[u8]) -> String {
+        let mac = self.mac(version, kind, self.epoch, payload);
         format!(
-            "v{HANDLE_VERSION}.{}.{}.{}.{}",
+            "v{version}.{}.{}.{}.{}",
             kind.tag(),
             self.epoch,
             B64.encode(payload),
@@ -166,6 +178,30 @@ impl HandleKey {
     }
 
     pub fn verify(&self, kind: HandleKind, token: &str) -> Result<Vec<u8>, HandleError> {
+        self.verify_version(kind, token, false)
+            .map(|(_, payload)| payload)
+    }
+
+    pub(crate) fn verify_ref(
+        &self,
+        kind: HandleKind,
+        token: &str,
+    ) -> Result<(u8, Vec<u8>), HandleError> {
+        if !matches!(
+            kind,
+            HandleKind::Message | HandleKind::Item | HandleKind::Branch
+        ) {
+            return Err(HandleError::WrongKind);
+        }
+        self.verify_version(kind, token, true)
+    }
+
+    fn verify_version(
+        &self,
+        kind: HandleKind,
+        token: &str,
+        allow_v2: bool,
+    ) -> Result<(u8, Vec<u8>), HandleError> {
         let mut p = token.split('.');
         let (v, k, e, pl, m) = (p.next(), p.next(), p.next(), p.next(), p.next());
         if p.next().is_some() {
@@ -174,13 +210,17 @@ impl HandleKey {
         let (Some(v), Some(k), Some(e), Some(pl), Some(m)) = (v, k, e, pl, m) else {
             return Err(HandleError::Malformed);
         };
-        if v != format!("v{HANDLE_VERSION}") {
+        let version = if v == "v1" {
+            1
+        } else if allow_v2 && v == "v2" {
+            2
+        } else {
             return if v.starts_with('v') && v[1..].parse::<u32>().is_ok() {
                 Err(HandleError::UnsupportedVersion)
             } else {
                 Err(HandleError::Malformed)
             };
-        }
+        };
         if k != kind.tag() {
             return Err(HandleError::WrongKind);
         }
@@ -191,7 +231,7 @@ impl HandleKey {
         }
         let payload = B64.decode(pl).map_err(|_| HandleError::Malformed)?;
         let mac = B64.decode(m).map_err(|_| HandleError::Malformed)?;
-        let expect = self.mac(kind, epoch, &payload);
+        let expect = self.mac(version, kind, epoch, &payload);
         // constant-time compare
         let mut diff = (mac.len() != expect.len()) as u8;
         for (a, b) in mac.iter().zip(expect.iter()) {
@@ -200,7 +240,7 @@ impl HandleKey {
         if diff != 0 {
             return Err(HandleError::BadSignature);
         }
-        Ok(payload)
+        Ok((version, payload))
     }
 }
 

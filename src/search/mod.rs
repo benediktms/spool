@@ -625,7 +625,7 @@ impl SearchService {
             "matches_per_session",
             input
                 .matches_per_session
-                .unwrap_or(cfg.max_matches_per_session),
+                .unwrap_or(3.min(cfg.max_matches_per_session)),
             cfg.max_matches_per_session,
         )?;
         for (name, list) in [

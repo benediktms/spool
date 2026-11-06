@@ -1462,7 +1462,7 @@ async fn tool_definition_is_honest_about_hosted_modes() {
     assert!(input.get("required").is_none());
     assert!(input["properties"].get("queries").is_some());
     assert_eq!(input["properties"]["limit"]["maximum"], 50);
-    assert_eq!(input["properties"]["matches_per_session"]["maximum"], 3);
+    assert_eq!(input["properties"]["matches_per_session"]["maximum"], 32);
     assert!(t.output_schema.is_none(), "results are one JSON text copy");
     let out = output_schema();
     for f in [
@@ -2005,7 +2005,7 @@ async fn limits_are_clamped_with_a_warning() {
     )
     .await;
     let r = env
-        .ok(json!({"query": "alpha", "mode": "lexical", "limit": 500, "matches_per_session": 9}))
+        .ok(json!({"query": "alpha", "mode": "lexical", "limit": 500, "matches_per_session": 33}))
         .await;
     assert!(has_warning(&r, "limit_clamped"), "{r}");
     let n = r["warnings"]
@@ -2017,6 +2017,88 @@ async fn limits_are_clamped_with_a_warning() {
     assert_eq!(n, 2, "{r}");
     let r = env.ok(json!({"query": "alpha", "mode": "lexical"})).await;
     assert!(!has_warning(&r, "limit_clamped"));
+}
+
+#[tokio::test]
+async fn explicit_match_limit_respects_configured_ceiling() {
+    for cap in [1, 2, 3, 32] {
+        let env = Env::with(|cfg| cfg.search.max_matches_per_session = cap).await;
+        let texts: Vec<_> = (0..240)
+            .map(|i| {
+                if i % 20 == 0 {
+                    ("needle", Some(T0))
+                } else {
+                    ("filler", Some(T0))
+                }
+            })
+            .collect();
+        env.simple("limit", "omp", "/w", &texts).await;
+        let default = env.ok(json!({"query":"needle", "mode":"lexical"})).await;
+        let expanded = env
+            .ok(json!({"query":"needle", "mode":"lexical", "matches_per_session":32}))
+            .await;
+        let default_matches = default["results"][0]["matches"].as_array().unwrap();
+        let expanded_matches = expanded["results"][0]["matches"].as_array().unwrap();
+        assert_eq!(default_matches.len(), cap.min(3));
+        assert_eq!(expanded_matches.len(), cap.min(4), "{expanded}");
+        assert_eq!(has_warning(&expanded, "limit_clamped"), cap < 32);
+        let literal = env.ok(json!({"query":"needle", "mode":"literal", "session_ids":["limit"], "limit":1, "matches_per_session":32})).await;
+        let literal_matches = literal["results"][0]["matches"].as_array().unwrap();
+        assert!(literal_matches.len() <= cap);
+        if cap == 32 {
+            assert!(literal_matches.len() > 3);
+        }
+        for (a, b) in default_matches.iter().zip(expanded_matches) {
+            let (_, a) = env.decode_match(a["match_ref"].as_str().unwrap()).await;
+            let (_, b) = env.decode_match(b["match_ref"].as_str().unwrap()).await;
+            assert_eq!(a.records, b.records);
+        }
+    }
+}
+
+#[tokio::test]
+async fn scoped_expanded_semantic_retry_uses_query_cache() {
+    for entries in [0, 256] {
+        let env = Env::with(|cfg| cfg.search.query_cache_entries = entries).await;
+        env.simple("cache", "omp", "/w", &[("cache needle", Some(T0))])
+            .await;
+        env.ok(json!({"query":"cache needle", "mode":"semantic"}))
+            .await;
+        let calls = env.provider.calls_for(Purpose::Query);
+        env.ok(json!({"query":"cache needle", "mode":"semantic", "session_ids":["cache"], "limit":1, "matches_per_session":32})).await;
+        assert_eq!(
+            env.provider.calls_for(Purpose::Query),
+            calls + usize::from(entries == 0)
+        );
+    }
+}
+
+#[tokio::test]
+async fn scoped_expanded_retry_respects_hosted_consent() {
+    use std::sync::Arc;
+    let env = Env::new().await;
+    env.simple("consent", "omp", "/w", &[("consent needle", Some(T0))])
+        .await;
+    let provider = Arc::new(spool::embeddings::FakeProvider::new(16).hosted(true));
+    let embedding = Arc::new(spool::embeddings::EmbeddingService::new(
+        env.index.clone(),
+        env.cfg.embedding.clone(),
+        env.cfg.search.clone(),
+        Arc::new(env.clock.clone()),
+        provider.clone(),
+    ));
+    let search = SearchService::new(
+        env.index.clone(),
+        env.cfg.clone(),
+        embedding,
+        env.leases.clone(),
+        env.keys.clone(),
+    );
+    let args = json!({"query":"consent needle", "mode":"hybrid", "session_ids":["consent"], "limit":1, "matches_per_session":32});
+    let result = search.call(args).await.unwrap();
+    assert_eq!(result["mode_used"], "lexical");
+    assert!(has_warning(&result, "query_embedding_unavailable"));
+    assert_eq!(provider.calls_for(Purpose::Query), 0);
 }
 
 #[tokio::test]
@@ -2394,7 +2476,7 @@ async fn grouped_excerpt_match_reads_original_source() {
     let env = reader_common::Env::new().await;
     let evidence = format!("{} {}", "filler ".repeat(700), "evidenceneedle ".repeat(5));
     let successor = "unrelated ".repeat(150);
-    let (sid, _) = env
+    let (sid, path) = env
         .indexed(
             "grouped.jsonl",
             &[
@@ -2461,7 +2543,7 @@ async fn grouped_excerpt_match_reads_original_source() {
         env.keys.clone(),
     );
     let result = search
-        .call(json!({"query":"evidenceneedle", "mode":"lexical", "matches_per_session":1, "debug_scores":true}))
+        .call(json!({"query":"evidenceneedle", "mode":"lexical", "matches_per_session":32, "debug_scores":true}))
         .await
         .unwrap();
     let m = &matches_of(&result, &sid)[0];
@@ -2510,6 +2592,20 @@ async fn grouped_excerpt_match_reads_original_source() {
         String::from_utf8(text).unwrap(),
         format!("{evidence}{successor}")
     );
+    std::fs::write(
+        &path,
+        format!(
+            "{}\n{}\n",
+            reader_common::omp_header(),
+            reader_common::omp_msg("m0", None, "user", "rewritten")
+        ),
+    )
+    .unwrap();
+    let error = env.read(json!({"session_id":sid, "source_policy":"require_source", "selection":{"kind":"match", "match_ref":m["match_ref"]}})).await.unwrap_err();
+    assert!(matches!(
+        error.code.as_str(),
+        "SOURCE_CHANGED" | "STALE_REFERENCE"
+    ));
 }
 
 #[tokio::test]
