@@ -708,7 +708,7 @@ impl EmbeddingService {
         .fetch_one(&self.index.reader)
         .await
         .map_err(storage_err)?;
-        let embedded: i64 = sqlx::query_scalar("SELECT count(*) FROM chunks c JOIN sessions s ON s.active_snapshot_id = c.snapshot_id WHERE EXISTS (SELECT 1 FROM embeddings e WHERE e.profile_id = ? AND e.input_hash = c.input_hash)")
+        let embedded: i64 = sqlx::query_scalar("SELECT count(*) FROM chunks c JOIN sessions s ON s.active_snapshot_id = c.snapshot_id WHERE EXISTS (SELECT 1 FROM embeddings e INDEXED BY embeddings_key WHERE e.profile_id = ? AND e.input_hash = c.input_hash)")
             .bind(&self.profile_id)
             .fetch_one(&self.index.reader)
             .await

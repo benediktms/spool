@@ -900,6 +900,15 @@ async fn gate_is_checked_before_any_provider_work() {
 async fn vector_coverage_counts_active_chunks_without_vectors() {
     let h = harness().await;
     let w = &h.index.writer;
+    let empty = h.svc.vector_coverage().await.unwrap();
+    assert_eq!(
+        (
+            empty.total_chunks,
+            empty.embedded_chunks,
+            empty.pending_chunks
+        ),
+        (0, 0, 0)
+    );
     sqlx::query("INSERT INTO sources(id, kind, roots_json) VALUES ('s','omp','[]')")
         .execute(w)
         .await
@@ -924,13 +933,43 @@ async fn vector_coverage_counts_active_chunks_without_vectors() {
             .await
             .unwrap();
     }
+    sqlx::query("UPDATE chunks SET input_hash = ? WHERE logical_id = 'c3'")
+        .bind(digest_of(0).to_vec())
+        .execute(w)
+        .await
+        .unwrap();
     h.svc
         .embed_documents(docs(0..2), &AtomicBool::new(false))
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO embedding_profiles SELECT 'other', provider, endpoint_identity, model, dimensions, rendering_version, normalization, generation, created_at FROM embedding_profiles LIMIT 1")
+        .execute(w)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO embeddings SELECT 'other', ?, dimensions, vec, created_at FROM embeddings LIMIT 1")
+        .bind(digest_of(2).to_vec())
+        .execute(w)
         .await
         .unwrap();
     let c = h.svc.vector_coverage().await.unwrap();
     assert_eq!(
         (c.total_chunks, c.embedded_chunks, c.pending_chunks),
-        (4, 2, 2)
+        (4, 3, 1)
+    );
+    let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as("EXPLAIN QUERY PLAN SELECT 1 FROM embeddings e INDEXED BY embeddings_key WHERE e.profile_id = ? AND e.input_hash = ?")
+        .bind(&c.profile_id)
+        .bind(digest_of(0).to_vec())
+        .fetch_all(&h.index.reader)
+        .await
+        .unwrap();
+    let version: String = sqlx::query_scalar("SELECT sqlite_version()")
+        .fetch_one(&h.index.reader)
+        .await
+        .unwrap();
+    println!("SQLite {version}: {plan:?}");
+    assert!(
+        plan.iter()
+            .any(|row| row.3.contains("COVERING INDEX embeddings_key")),
+        "{plan:?}"
     );
 }

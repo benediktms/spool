@@ -361,7 +361,7 @@ impl ControlService {
         let n: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM sessions s WHERE s.index_state = 'indexed' AND s.excluded = 0 AND s.active_snapshot_id IS NOT NULL \
              AND NOT EXISTS (SELECT 1 FROM chunks c WHERE c.snapshot_id = s.active_snapshot_id AND NOT EXISTS \
-             (SELECT 1 FROM embeddings e WHERE e.profile_id = ?1 AND e.input_hash = c.input_hash))",
+             (SELECT 1 FROM embeddings e INDEXED BY embeddings_key WHERE e.profile_id = ?1 AND e.input_hash = c.input_hash))",
         )
         .bind(profile)
         .fetch_one(&self.deps.index.reader)
