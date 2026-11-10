@@ -31,9 +31,9 @@ max_source_file_bytes = 2147483648
 max_transient_attempts = 5
 
 [chunking]
-target_new_tokens = 800
+target_new_tokens = 200
 max_rendered_tokens = 1200
-overlap_tokens = 200
+overlap_tokens = 50
 version = 1
 
 [embedding]

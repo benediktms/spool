@@ -9,6 +9,7 @@ pub enum ChunkError {
     TokenLimit,
 }
 use std::sync::atomic::{AtomicBool, Ordering};
+pub(crate) const CHUNK_RECIPE: &[u8] = b"sentence-boundaries-v1";
 const PREFIX_WINDOW_BYTES: usize = 8 * 1024;
 const MAX_CHUNK_NEW_BYTES: usize = 64 * 1024;
 const MAX_CONTEXT_BYTES: usize = 64 * 1024;
@@ -178,6 +179,7 @@ fn largest_prefix<'a>(
     mut new_base: Vec<Fragment<'a>>,
     from: Fragment<'a>,
     current_tokens: usize,
+    remaining_bytes: usize,
 ) -> Result<Option<PrefixFit>, ChunkError> {
     let Env { cfg, tok, cancel } = *env;
     let Fragment {
@@ -194,7 +196,10 @@ fn largest_prefix<'a>(
     if rest.is_empty() {
         return Ok(None);
     }
-    let window_end = floor_char_boundary(rest, rest.len().min(PREFIX_WINDOW_BYTES));
+    let window_end = floor_char_boundary(
+        rest,
+        rest.len().min(PREFIX_WINDOW_BYTES).min(remaining_bytes),
+    );
     let window = &rest[..window_end];
     let same_base = full_base.len() == new_base.len();
     let hard_base_tokens = if same_base {
@@ -210,12 +215,26 @@ fn largest_prefix<'a>(
         .min(target_remaining)
         .saturating_sub(rendering_overhead)
         .saturating_sub(TOKEN_BOUNDARY_MARGIN);
+    let mut allow_after = true;
     for _ in 0..4 {
         check_cancel(cancel)?;
         let estimate = floor_char_boundary(
             window,
             prefix_tokens(tok, window, remaining_tokens, cancel)?.min(window.len()),
         );
+        let boundaries = sentence_boundaries(window);
+        let before = boundaries
+            .iter()
+            .copied()
+            .take_while(|&end| end <= estimate)
+            .last();
+        let after = boundaries.iter().copied().find(|&end| end > estimate);
+        if before.is_none() && after.is_some() && current_tokens > 0 {
+            return Ok(None);
+        }
+        let estimate = before
+            .or(after.filter(|_| allow_after && current_tokens == 0))
+            .unwrap_or(estimate);
         if estimate == 0 {
             break;
         }
@@ -236,12 +255,18 @@ fn largest_prefix<'a>(
         };
         full_base.pop();
         new_base.pop();
-        if rendered_tokens <= hard_limit && new_tokens <= target_limit {
+        if rendered_tokens <= hard_limit
+            && (new_tokens <= target_limit || (current_tokens == 0 && before.is_none()))
+        {
             return Ok(Some(PrefixFit {
                 bytes: estimate,
                 rendered_tokens,
                 new_tokens,
             }));
+        }
+        if after == Some(estimate) && before.is_none() && allow_after {
+            allow_after = false;
+            continue;
         }
         let excess = rendered_tokens
             .saturating_sub(hard_limit)
@@ -250,6 +275,29 @@ fn largest_prefix<'a>(
         remaining_tokens = remaining_tokens.saturating_sub(excess);
     }
     Ok(None)
+}
+fn sentence_boundaries(text: &str) -> Vec<usize> {
+    let mut boundaries = Vec::new();
+    let mut terminal = false;
+    for (index, ch) in text.char_indices() {
+        if ch == '\n' {
+            boundaries.push(index + ch.len_utf8());
+            terminal = false;
+        } else if ch.is_whitespace() {
+            if terminal {
+                boundaries.push(index);
+            }
+            terminal = false;
+        } else if matches!(ch, '.' | '!' | '?' | '。' | '！' | '？') {
+            terminal = true;
+        } else if !matches!(ch, '"' | '\'' | '”' | '’' | ')' | ']' | '}') {
+            terminal = false;
+        }
+    }
+    if terminal {
+        boundaries.push(text.len());
+    }
+    boundaries
 }
 fn floor_char_boundary(text: &str, mut n: usize) -> usize {
     n = n.min(text.len());
@@ -265,6 +313,17 @@ fn ceil_char_boundary(text: &str, mut n: usize) -> usize {
     }
     n
 }
+fn is_sentence_boundary(text: &str, offset: usize) -> bool {
+    if offset == 0 || offset == text.len() {
+        return true;
+    }
+    let start = ceil_char_boundary(text, offset.saturating_sub(PREFIX_WINDOW_BYTES));
+    let end = text[offset..]
+        .char_indices()
+        .nth(1)
+        .map_or(text.len(), |(i, _)| offset + i);
+    sentence_boundaries(&text[start..end]).contains(&(offset - start))
+}
 fn select_context<'a>(
     candidates: &[Fragment<'a>],
     max_tokens: usize,
@@ -279,6 +338,9 @@ fn select_context<'a>(
     'candidates: for candidate in candidates.iter().rev() {
         check_cancel(cancel)?;
         if selected.len() >= MAX_CHUNK_FRAGMENTS || selected_bytes >= MAX_CONTEXT_BYTES {
+            break;
+        }
+        if !is_sentence_boundary(&candidate.block.text, candidate.end) {
             break;
         }
         let rest = candidate.text();
@@ -308,6 +370,18 @@ fn select_context<'a>(
             break;
         }
         let mut begin = ceil_char_boundary(window, window.len().saturating_sub(estimate_len));
+        if begin > 0
+            || window_offset > 0
+            || !is_sentence_boundary(&candidate.block.text, candidate.start)
+        {
+            let Some(boundary) = sentence_boundaries(window)
+                .into_iter()
+                .find(|&end| end >= begin && end < window.len())
+            else {
+                break;
+            };
+            begin = boundary;
+        }
         for _ in 0..4 {
             check_cancel(cancel)?;
             if begin >= window.len() {
@@ -339,7 +413,14 @@ fn select_context<'a>(
                 .checked_div(rendered_tokens)
                 .unwrap_or(0)
                 .max(1);
-            begin = ceil_char_boundary(window, begin.saturating_add(shrink));
+            let next = ceil_char_boundary(window, begin.saturating_add(shrink));
+            let Some(boundary) = sentence_boundaries(window)
+                .into_iter()
+                .find(|&end| end >= next && end < window.len())
+            else {
+                break;
+            };
+            begin = boundary;
         }
         break;
     }
@@ -459,8 +540,14 @@ pub fn plan_chunks(
                         end: block.text.len(),
                         is_context: false,
                     };
-                    let prefix_fit =
-                        largest_prefix(&env, full_base, buf.current.clone(), rest, buf.tokens)?;
+                    let prefix_fit = largest_prefix(
+                        &env,
+                        full_base,
+                        buf.current.clone(),
+                        rest,
+                        buf.tokens,
+                        MAX_CHUNK_NEW_BYTES - buf.bytes,
+                    )?;
                     let mut take = prefix_fit.map_or(0, |fit| fit.bytes);
                     if take == 0 && !buf.current.is_empty() {
                         flush_current(&env, &mut plans, &mut buf, false)?;

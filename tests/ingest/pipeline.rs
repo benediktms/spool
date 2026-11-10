@@ -1000,3 +1000,41 @@ async fn publish_clears_a_path_project_when_cwd_changes_but_keeps_git_projects()
         assert_eq!(project.as_deref(), expected, "{kind}");
     }
 }
+
+#[tokio::test]
+async fn chunk_recipe_invalidates_fingerprint_with_explicit_old_config() {
+    let env = Env::with(|cfg| {
+        cfg.chunking.target_new_tokens = 800;
+        cfg.chunking.overlap_tokens = 200;
+        cfg.chunking.version = 1;
+    })
+    .await;
+    let mut old = blake3::Hasher::new();
+    old.update(b"spool-pipeline-v1");
+    for kind in [
+        spool::domain::HarnessKind::Omp,
+        spool::domain::HarnessKind::Codex,
+        spool::domain::HarnessKind::Claude,
+    ] {
+        old.update(kind.as_str().as_bytes());
+        old.update(
+            spool::adapters::adapter_for(kind)
+                .parser_version()
+                .as_bytes(),
+        );
+        old.update(&[0]);
+    }
+    old.update(&spool::ingest::engine::EXTRACTION_POLICY_VERSION.to_le_bytes());
+    for n in [800_u64, 1200, 200, 1] {
+        old.update(&n.to_le_bytes());
+    }
+    old.update(
+        spool::embeddings::tokenizer::tokenizer()
+            .identity()
+            .as_bytes(),
+    );
+    assert_ne!(
+        env.engine.pipeline_fingerprint(),
+        format!("pf1_{}", &old.finalize().to_hex()[..32])
+    );
+}

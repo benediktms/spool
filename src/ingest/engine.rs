@@ -266,6 +266,7 @@ impl IngestEngine {
             h.update(&[0]);
         }
         h.update(&EXTRACTION_POLICY_VERSION.to_le_bytes());
+        h.update(super::chunk::CHUNK_RECIPE);
         let c = self.chunk_cfg();
         for n in [
             c.target_new_tokens as u64,

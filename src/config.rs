@@ -112,9 +112,9 @@ cfg_struct!(IngestionConfig {
     max_transient_attempts: u32 = 5,
 });
 cfg_struct!(ChunkingConfig {
-    target_new_tokens: usize = 800,
+    target_new_tokens: usize = 200,
     max_rendered_tokens: usize = 1200,
-    overlap_tokens: usize = 200,
+    overlap_tokens: usize = 50,
     version: u32 = 1
 });
 cfg_struct!(EmbeddingConfig {
@@ -432,6 +432,7 @@ impl Config {
                 .update(b";");
         }
         let c = &self.chunking;
+        h.update(crate::ingest::chunk::CHUNK_RECIPE);
         h.update(
             format!(
                 "chunk:{}:{}:{}:{}:{tokenizer}",

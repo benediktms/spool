@@ -402,22 +402,22 @@ Store the exact retained text separately from the embedding rendering. Speaker l
 ### 9.2 Starting parameters
 
 ```text
-new-text target per chunk: approximately 800 tokens
+new-text target per chunk: approximately 200 tokens
 hard rendered-input limit per chunk: 1,200 tokens
-ancestral/adjacent overlap ceiling: 200 tokens, inside the hard total above
+ancestral/adjacent overlap ceiling: 50 tokens by default, inside the hard total above
 minimum new content: at least one nonempty source fragment
 ```
 
-The hard limit of 1,200 tokens includes speaker labels, separators, and overlap. The 200-token overlap is a ceiling, not a reserved amount. Shorten or omit overlap to make room for new content. Small final chunks are valid; a nominal minimum must never cause messages to be dropped.
+The hard limit of 1,200 tokens includes speaker labels, separators, and overlap. The configured overlap is a ceiling, not a reserved amount. Shorten or omit overlap to make room for new content. Small final chunks are valid; a nominal minimum must never cause messages to be dropped.
 
 ### 9.3 Algorithm
 
 Within each unbranched run:
 
 1. Visit retained message blocks in their original order.
-2. Keep a block whole where it fits. Split an oversized block at paragraph/newline boundaries, falling back to tokenizer boundaries mapped safely back to UTF-8 spans. Every source character belongs to at least one new-content fragment.
+2. Keep a block whole where it fits. Split an oversized block at sentence or paragraph/newline boundaries where they fit, falling back to tokenizer boundaries mapped safely back to UTF-8 spans. Every source character belongs to at least one new-content fragment.
 3. Pack fragments greedily until the target is reached or adding the next fragment would exceed the hard limit.
-4. Emit the chunk and, where useful, prepend at most 200 tokens of preceding conversation as marked context to the next chunk, within the hard total of 1,200 tokens.
+4. Emit the chunk and, where useful, prepend at most the configured overlap of preceding conversation as marked context to the next chunk, within the hard total of 1,200 tokens.
 5. A chunk must advance to new source content. Never emit an overlap-only chunk. Hard token limits and complete new-content coverage take precedence over overlap: shorten or omit context when necessary to fit the next fragment.
 6. Publish the final underfilled chunk as a replaceable tail. Appending new conversation may replace that tail but must not rebalance all prior sealed chunks.
 
@@ -1307,9 +1307,9 @@ max_source_file_bytes = 2147483648
 max_transient_attempts = 5
 
 [chunking]
-target_new_tokens = 800
+target_new_tokens = 200
 max_rendered_tokens = 1200
-overlap_tokens = 200
+overlap_tokens = 50
 version = 1
 
 [embedding]
@@ -1554,7 +1554,7 @@ Property and regression tests MUST establish:
 - Overlap is bounded and cannot cause non-advancing loops.
 - A new fork that changes a graph boundary causes localized rechunking only, and unchanged chunks keep their input hashes and embeddings.
 - A full streaming parse of a changed file makes no embedding request for unchanged inputs.
-- Overlap never exceeds 200 tokens and the rendered chunk never exceeds 1,200 tokens. Overlap shrinks or disappears to fit new content.
+- Overlap never exceeds the configured ceiling (at most 200 tokens) and the rendered chunk never exceeds 1,200 tokens. Overlap shrinks or disappears to fit new content.
 - Only native verified lineage links sessions. Two unrelated sessions with identical text stay separate and are never deduplicated.
 
 ### 19.3 Search correctness

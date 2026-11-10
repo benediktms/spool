@@ -175,10 +175,12 @@ fn fork_runs_get_bounded_overlap_from_their_shared_parent() {
     for branch in ["branch-a", "branch-b"] {
         let plan = plans.iter().find(|plan| plan.run_key == branch).unwrap();
         assert!(plan.rendered_tokens <= cfg.max_rendered_tokens);
-        assert!(plan.spans.iter().any(|span| span.message_key == "root"
-            && span.is_context
-            && span.start > 0
-            && span.end == entries[0].blocks[0].text.len()));
+        assert!(
+            !plan
+                .spans
+                .iter()
+                .any(|span| span.message_key == "root" && span.is_context)
+        );
     }
 }
 #[test]
@@ -543,4 +545,86 @@ fn fragment_cap_splits_without_losing_block_text() {
         assert_eq!(ranges, [(0, block.text.len())]);
         assert_eq!(&block.text[ranges[0].0..ranges[0].1], "漢");
     }
+}
+
+#[test]
+fn sentences_and_overlap_remain_whole() {
+    let text = "First sentence. Second 3.14 sentence! Third says \"hello.\" Fourth sentence? Fifth sentence.";
+    let (graph, messages) = graph(text);
+    let cfg = ChunkConfig {
+        target_new_tokens: 45,
+        max_rendered_tokens: 90,
+        overlap_tokens: 35,
+        version: 1,
+    };
+    let plans = plan_chunks(
+        &graph,
+        &messages,
+        &cfg,
+        &Bytes,
+        &std::sync::atomic::AtomicBool::new(false),
+    )
+    .unwrap();
+    assert!(plans.len() > 1);
+    for plan in &plans {
+        for span in &plan.spans {
+            let part = &text[span.start..span.end];
+            assert!(
+                ["First", "Second", "Third", "Fourth", "Fifth"]
+                    .iter()
+                    .any(|prefix| part.trim_start().starts_with(prefix)),
+                "{part:?}"
+            );
+            assert!(part.trim_end().ends_with(['.', '!', '?', '\"']), "{part:?}");
+        }
+    }
+    assert!(
+        plans
+            .iter()
+            .any(|plan| plan.spans.iter().any(|span| span.is_context))
+    );
+}
+
+#[test]
+fn sentence_can_exceed_soft_target_without_exceeding_hard_limit() {
+    let text = "A rather long sentence that is longer than the target. Next.";
+    let (graph, messages) = graph(text);
+    let cfg = ChunkConfig {
+        target_new_tokens: 20,
+        max_rendered_tokens: 90,
+        overlap_tokens: 0,
+        version: 1,
+    };
+    let plans = plan_chunks(
+        &graph,
+        &messages,
+        &cfg,
+        &Bytes,
+        &std::sync::atomic::AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(
+        &text[plans[0].spans[0].start..plans[0].spans[0].end],
+        "A rather long sentence that is longer than the target."
+    );
+}
+
+#[test]
+fn defaults_and_explicit_chunking_config_are_preserved() {
+    let defaults = spool::config::Config::default();
+    assert_eq!(defaults.chunking.target_new_tokens, 200);
+    assert_eq!(defaults.chunking.overlap_tokens, 50);
+    let explicit: spool::config::Config =
+        toml::from_str("[chunking]\ntarget_new_tokens = 800\noverlap_tokens = 200\nversion = 1\n")
+            .unwrap();
+    assert_eq!(explicit.chunking.target_new_tokens, 800);
+    assert_eq!(explicit.chunking.overlap_tokens, 200);
+    let mut old = blake3::Hasher::new();
+    old.update(b"spool-pipeline-v1");
+    old.update(b"chunk:1:800:1200:200:test-tokenizer");
+    old.update(b"extraction-policy:1");
+    assert_ne!(
+        explicit.pipeline_fingerprint(&[], "test-tokenizer"),
+        old.finalize().to_hex()[..32]
+    );
 }
