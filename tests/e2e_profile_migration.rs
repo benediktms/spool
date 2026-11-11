@@ -318,7 +318,7 @@ async fn profile_change_keeps_old_queries_until_the_published_corpus_is_covered(
 
     // ---- profile A: index and embed everything.
     env.start();
-    let (ok, out) = cli(&env.home, &["index", "--since", "30d", "--wait"]);
+    let (ok, out) = cli(&env.home, &["index", "--since", "2026-10-12", "--wait"]);
     assert!(ok, "{out}");
     let search =
         |home: &Path, q: &str| json_cli(home, &["search", q, "--mode", "semantic", "--json"]);
@@ -386,7 +386,7 @@ async fn profile_change_keeps_old_queries_until_the_published_corpus_is_covered(
     env.stop();
     env.set_ingestion_budget(1_000_000);
     env.start();
-    let (ok, out) = cli(&env.home, &["index", "--since", "30d", "--wait"]);
+    let (ok, out) = cli(&env.home, &["index", "--since", "2026-10-12", "--wait"]);
     assert!(ok, "{out}");
     wait_for("profile switch", 60, || {
         embedding_ids(&env.home).1 == target

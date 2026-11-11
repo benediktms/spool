@@ -11,7 +11,10 @@ use sha2::{Digest as _, Sha256};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 use tokenizers::{Tokenizer, TruncationDirection, TruncationParams, TruncationStrategy};
+use tokio::sync::Notify;
+use tokio::time::Instant;
 
 /// Operator-facing `embedding.model` value for the local provider.
 pub const LOCAL_MODEL_NAME: &str = "nomic-embed-text-v1.5";
@@ -21,6 +24,7 @@ pub const LOCAL_DIMENSIONS: usize = 768;
 const RECIPE: &str = "local/recipe-1";
 /// Positions the model was trained on; the candle implementation has no RoPE scaling beyond them.
 const MAX_MODEL_TOKENS: usize = 2048;
+const MODEL_IDLE: Duration = Duration::from_secs(60);
 
 pub struct ModelFile {
     pub name: &'static str,
@@ -173,11 +177,19 @@ struct Loaded {
     device: Device,
 }
 
+#[derive(Default)]
+struct ModelState {
+    loaded: Option<Loaded>,
+    last_used: Option<Instant>,
+}
+
 /// Loads the model lazily on the first embed call; inference is serialized by one lock.
 pub struct LocalProvider {
     spec: ProfileSpec,
     dir: PathBuf,
-    loaded: Arc<Mutex<Option<Loaded>>>,
+    loaded: Arc<Mutex<ModelState>>,
+    activity: Arc<Notify>,
+    reaper: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl LocalProvider {
@@ -186,6 +198,48 @@ impl LocalProvider {
             spec: profile_spec(cfg),
             dir,
             loaded: Arc::default(),
+            activity: Arc::default(),
+            reaper: Mutex::new(None),
+        }
+    }
+}
+
+impl Drop for LocalProvider {
+    fn drop(&mut self) {
+        if let Some(reaper) = self.reaper.get_mut().take() {
+            reaper.abort();
+        }
+    }
+}
+
+async fn reap_idle(
+    loaded: std::sync::Weak<Mutex<ModelState>>,
+    activity: Arc<Notify>,
+    idle: Duration,
+) {
+    loop {
+        activity.notified().await;
+        loop {
+            let Some(loaded) = loaded.upgrade() else {
+                return;
+            };
+            let deadline = match loaded.try_lock() {
+                Some(mut state) => match state.last_used {
+                    Some(last_used) if last_used + idle <= Instant::now() => {
+                        state.loaded = None;
+                        state.last_used = None;
+                        break;
+                    }
+                    Some(last_used) => last_used + idle,
+                    None => break,
+                },
+                None => break,
+            };
+            drop(loaded);
+            tokio::select! {
+                () = tokio::time::sleep_until(deadline) => {},
+                () = activity.notified() => {},
+            }
         }
     }
 }
@@ -242,30 +296,40 @@ fn embed_one(l: &Loaded, purpose: Purpose, text: &str) -> candle_core::Result<(V
 }
 
 fn infer(
-    loaded: &Mutex<Option<Loaded>>,
+    loaded: &Mutex<ModelState>,
+    activity: &Notify,
     dir: &Path,
     purpose: Purpose,
     inputs: &[String],
 ) -> Result<EmbedResponse, EmbedError> {
     let fail = |m| EmbedError::new(EmbedErrorKind::UnsupportedModel, m);
     let mut guard = loaded.lock();
-    if guard.is_none() {
-        *guard = Some(load(dir).map_err(|_| fail("local embedding model cannot be loaded"))?);
+    if guard.loaded.is_none() {
+        guard.loaded = Some(load(dir).map_err(|_| fail("local embedding model cannot be loaded"))?);
     }
-    let l = guard.as_ref().expect("loaded above");
+    let l = guard.loaded.as_ref().expect("loaded above");
 
     let mut items = Vec::with_capacity(inputs.len());
     let mut tokens = 0u64;
-    for (i, text) in inputs.iter().enumerate() {
-        let (v, n) =
-            embed_one(l, purpose, text).map_err(|_| fail("local embedding inference failed"))?;
-        tokens += n;
-        items.push((i, v));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        for (i, text) in inputs.iter().enumerate() {
+            let (v, n) = embed_one(l, purpose, text)
+                .map_err(|_| fail("local embedding inference failed"))?;
+            tokens += n;
+            items.push((i, v));
+        }
+        Ok(EmbedResponse {
+            vectors: validate_items(items, inputs.len(), LOCAL_DIMENSIONS)?,
+            usage_tokens: Some(tokens),
+        })
+    }));
+    guard.last_used = Some(Instant::now());
+    drop(guard);
+    activity.notify_one();
+    match result {
+        Ok(result) => result,
+        Err(panic) => std::panic::resume_unwind(panic),
     }
-    Ok(EmbedResponse {
-        vectors: validate_items(items, inputs.len(), LOCAL_DIMENSIONS)?,
-        usage_tokens: Some(tokens),
-    })
 }
 
 impl EmbeddingProvider for LocalProvider {
@@ -288,10 +352,21 @@ impl EmbeddingProvider for LocalProvider {
     ) -> BoxFuture<'a, Result<EmbedResponse, EmbedError>> {
         Box::pin(async move {
             check_request(&self.limits(), inputs)?;
+            {
+                let mut reaper = self.reaper.lock();
+                if reaper.is_none() {
+                    *reaper = Some(tokio::spawn(reap_idle(
+                        Arc::downgrade(&self.loaded),
+                        self.activity.clone(),
+                        MODEL_IDLE,
+                    )));
+                }
+            }
             let loaded = self.loaded.clone();
+            let activity = self.activity.clone();
             let dir = self.dir.clone();
             let inputs = inputs.to_vec();
-            tokio::task::spawn_blocking(move || infer(&loaded, &dir, purpose, &inputs))
+            tokio::task::spawn_blocking(move || infer(&loaded, &activity, &dir, purpose, &inputs))
                 .await
                 .map_err(|_| {
                     EmbedError::new(
@@ -306,6 +381,71 @@ impl EmbeddingProvider for LocalProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn idle_timer_refreshes_after_activity_and_waits_for_inference() {
+        let state = Arc::new(Mutex::new(ModelState::default()));
+        let activity = Arc::new(Notify::new());
+        let idle = Duration::from_millis(100);
+        let reaper = tokio::spawn(reap_idle(Arc::downgrade(&state), activity.clone(), idle));
+
+        state.lock().last_used = Some(Instant::now());
+        activity.notify_one();
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        let refreshed = Instant::now();
+        state.lock().last_used = Some(refreshed);
+        activity.notify_one();
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert_eq!(state.lock().last_used, Some(refreshed));
+
+        {
+            let guard = state.lock();
+            std::thread::sleep(Duration::from_millis(60));
+            assert_eq!(guard.last_used, Some(refreshed));
+        }
+        state.lock().last_used = Some(Instant::now());
+        activity.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while state.lock().last_used.is_some() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        reaper.abort();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the installed local model"]
+    async fn installed_model_unloads_and_reloads() {
+        let home = std::env::var_os("SPOOL_LOCAL_MODEL_HOME").unwrap();
+        let dir = model_dir(&Paths::from_root(home.into()).unwrap());
+        let started = std::time::Instant::now();
+        let model = load(&dir).unwrap();
+        eprintln!("initial load: {:?}", started.elapsed());
+        let state = Arc::new(Mutex::new(ModelState {
+            loaded: Some(model),
+            last_used: Some(Instant::now()),
+        }));
+        let activity = Arc::new(Notify::new());
+        let reaper = tokio::spawn(reap_idle(
+            Arc::downgrade(&state),
+            activity.clone(),
+            Duration::from_millis(50),
+        ));
+        activity.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while state.lock().loaded.is_some() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let started = std::time::Instant::now();
+        let _model = load(&dir).unwrap();
+        eprintln!("reload: {:?}", started.elapsed());
+        reaper.abort();
+    }
 
     const FIXTURE: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),

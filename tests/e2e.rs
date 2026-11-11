@@ -162,7 +162,7 @@ fn validate(name: &str, v: &Value) {
 #[tokio::test]
 async fn real_daemon_index_search_read_with_three_concurrent_clients() {
     let env = setup();
-    let (ok, out) = cli(&env.home, &["index", "--since", "30d", "--wait"]);
+    let (ok, out) = cli(&env.home, &["index", "--since", "2026-10-12", "--wait"]);
     assert!(ok, "index --wait failed: {out}");
 
     let c1 = client(&env.home).await;
