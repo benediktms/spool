@@ -119,7 +119,7 @@ fn setup(with_big: bool) -> (Home, String) {
     };
     h.start_daemon();
     if with_big {
-        let (ok, out) = cli(&h.home, &["index", "--since", "30d", "--wait"]);
+        let (ok, out) = cli(&h.home, &["index", "--since", "2026-10-12", "--wait"]);
         assert!(ok, "{out}");
     }
     (h, text)

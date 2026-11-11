@@ -213,7 +213,7 @@ fn tool(home: &Path, args: &[&str]) -> Value {
 async fn without_consent_the_provider_receives_nothing() {
     let (port, log) = fake_provider().await;
     let env = setup(port, false);
-    let (ok, out) = cli(&env.home, &["index", "--since", "30d", "--wait"]);
+    let (ok, out) = cli(&env.home, &["index", "--since", "2026-10-12", "--wait"]);
     assert!(ok, "{out}");
     let r = tool(
         &env.home,
@@ -242,7 +242,7 @@ async fn without_consent_the_provider_receives_nothing() {
 async fn with_consent_only_conversation_text_and_query_reach_the_provider() {
     let (port, log) = fake_provider().await;
     let env = setup(port, true);
-    let (ok, out) = cli(&env.home, &["index", "--since", "30d", "--wait"]);
+    let (ok, out) = cli(&env.home, &["index", "--since", "2026-10-12", "--wait"]);
     assert!(ok, "{out}");
     // embeddings are produced after text publication; wait for vector coverage
     let t = Instant::now();

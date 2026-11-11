@@ -177,7 +177,7 @@ async fn drain(c: &Client, mut r: Value) -> Value {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn codex_and_claude_fixtures_flow_through_search_and_with_tools_reads() {
     let env = setup();
-    let (ok, out) = cli(&env.home, &["index", "--since", "30d", "--wait"]);
+    let (ok, out) = cli(&env.home, &["index", "--since", "2026-10-12", "--wait"]);
     assert!(ok, "{out}");
     let mut cmd = tokio::process::Command::new(BIN);
     cmd.arg("mcp").env("SPOOL_HOME", &env.home);
