@@ -45,10 +45,7 @@ pub struct PageEnv<'a> {
 /// the first cursor of this read is issued.
 pub enum SelRef<'a> {
     Stored(i64),
-    Pending {
-        leases: &'a LeaseManager,
-        stored: CursorSel,
-    },
+    Pending(&'a LeaseManager),
 }
 
 /// Signs the references a response hands out; all anchored to the read's lease + manifest.
@@ -694,8 +691,14 @@ pub async fn assemble(
                 .unwrap_or_else(|| short_hash(""));
             let ref_id = match &env.sel_ref {
                 SelRef::Stored(id) => *id,
-                SelRef::Pending { leases, stored } => {
-                    let payload = serde_json::to_vec(stored).map_err(|_| {
+                SelRef::Pending(leases) => {
+                    let stored = CursorSel {
+                        m: env.anchor.manifest.clone(),
+                        v: env.view,
+                        p: env.policy,
+                        s: env.sel.clone(),
+                    };
+                    let payload = serde_json::to_vec(&stored).map_err(|_| {
                         AppError::new("STORAGE_ERROR", "response cannot be serialized")
                     })?;
                     leases

@@ -979,15 +979,7 @@ impl ReadService {
         );
         let sel_ref = match sel_ref {
             Some(id) => SelRef::Stored(id),
-            None => SelRef::Pending {
-                leases: &self.leases,
-                stored: CursorSel {
-                    m: anchor.manifest.clone(),
-                    v: view,
-                    p: policy,
-                    s: sel.clone(),
-                },
-            },
+            None => SelRef::Pending(&self.leases),
         };
         let env = PageEnv {
             session: SessionInfo {
