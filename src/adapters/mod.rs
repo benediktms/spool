@@ -1,5 +1,5 @@
-//! Harness adapter contract. `HarnessAdapter` is the public, sealed entry point; each harness
-//! implements the crate-internal `jsonl::JsonlHarness` hooks and inherits the shared JSONL pipeline.
+//! Harness adapter contract. `HarnessAdapter` is the public, sealed entry point; JSONL adapters
+//! implement the crate-internal `jsonl::JsonlHarness` hooks and inherit the shared JSONL pipeline.
 
 use crate::domain::*;
 use std::io::{Read, Seek};
@@ -48,6 +48,14 @@ pub struct ParseOptions {
 /// (cancellation, bounded channel closed). Adapters must call it in file order.
 pub trait RecordSink {
     fn record(&mut self, rec: RecordMeta) -> Result<(), SinkError>;
+    fn opencode_record(
+        &mut self,
+        _rec: RecordMeta,
+        _session_id: &str,
+        _message_id: &str,
+    ) -> Result<(), SinkError> {
+        Err(SinkError)
+    }
     fn message(&mut self, msg: MessageEntry) -> Result<(), SinkError>;
     fn tool_call(&mut self, call: ToolCallMeta) -> Result<(), SinkError>;
     fn tool_result(&mut self, result: ToolResultMeta) -> Result<(), SinkError>;
@@ -80,9 +88,8 @@ impl From<SinkError> for AdapterError {
     }
 }
 
-/// Sealed: every harness implements the crate-internal `jsonl::JsonlHarness` hooks and receives
-/// this trait from the shared pipeline, so limits, locator verification, and ordering cannot be
-/// bypassed.
+/// Sealed: JSONL adapters receive this trait from the shared pipeline, so limits, locator
+/// verification, and ordering cannot be bypassed.
 pub trait HarnessAdapter: Send + Sync + sealed::Sealed {
     fn kind(&self) -> HarnessKind;
     /// Part of the pipeline fingerprint.
@@ -114,5 +121,47 @@ pub fn adapter_for(kind: HarnessKind) -> &'static dyn HarnessAdapter {
         HarnessKind::Omp => &omp::OmpAdapter,
         HarnessKind::Codex => &codex::CodexAdapter,
         HarnessKind::Claude => &claude::ClaudeAdapter,
+        HarnessKind::OpenCode => &UnsupportedOpenCode,
+    }
+}
+
+struct UnsupportedOpenCode;
+
+const OPENCODE_JSONL_UNSUPPORTED: &str = "OpenCode has no JSONL adapter";
+
+impl sealed::Sealed for UnsupportedOpenCode {}
+
+impl HarnessAdapter for UnsupportedOpenCode {
+    fn kind(&self) -> HarnessKind {
+        HarnessKind::OpenCode
+    }
+
+    fn parser_version(&self) -> &'static str {
+        "unsupported"
+    }
+
+    fn probe(&self, _header: &[u8]) -> ProbeResult {
+        ProbeResult::Unsupported {
+            reason: OPENCODE_JSONL_UNSUPPORTED.into(),
+        }
+    }
+
+    fn parse_snapshot(
+        &self,
+        _source: &mut dyn Read,
+        _options: &ParseOptions,
+        _sink: &mut dyn RecordSink,
+    ) -> Result<ParsedSessionManifest, AdapterError> {
+        Err(AdapterError::Unsupported(OPENCODE_JSONL_UNSUPPORTED.into()))
+    }
+
+    fn resolve_locator(
+        &self,
+        _source: &mut dyn ReadSeek,
+        _locator: &SourceLocator,
+        _expected: &Digest,
+        _max_record_bytes: u64,
+    ) -> Result<ResolvedRecord, AdapterError> {
+        Err(AdapterError::Unsupported(OPENCODE_JSONL_UNSUPPORTED.into()))
     }
 }

@@ -174,6 +174,22 @@ pub struct NewSession<'a> {
     pub operation_id: Option<&'a str>,
 }
 
+struct LogicalSessionKey<'a> {
+    source_id: &'a str,
+    native_id: &'a str,
+    discriminator: &'a str,
+}
+
+impl NewSession<'_> {
+    fn key(&self) -> LogicalSessionKey<'_> {
+        LogicalSessionKey {
+            source_id: self.source_id,
+            native_id: self.native_id,
+            discriminator: self.discriminator,
+        }
+    }
+}
+
 pub fn kind_str(k: SessionKind) -> &'static str {
     match k {
         SessionKind::Interactive => "interactive",
@@ -191,7 +207,8 @@ pub async fn upsert_session(
     s: &NewSession<'_>,
     now_ms: i64,
 ) -> Result<(String, bool)> {
-    let id = ids::session_id(s.source_id, s.native_id, s.discriminator);
+    let key = s.key();
+    let id = ids::session_id(key.source_id, key.native_id, key.discriminator);
     let existed: Option<i64> = sqlx::query_scalar("SELECT 1 FROM sessions WHERE id = ?")
         .bind(&id)
         .fetch_optional(&mut *conn)
@@ -229,6 +246,65 @@ pub async fn upsert_session(
     .execute(&mut *conn)
     .await?;
     Ok((id, existed.is_none()))
+}
+
+pub(crate) async fn record_native_observation(
+    conn: &mut SqliteConnection,
+    session_id: &str,
+    event_sequence: Option<i64>,
+    checked_at: i64,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO native_session_observations(session_id,event_sequence,last_checked_at) VALUES (?1,?2,?3) \
+         ON CONFLICT(session_id) DO UPDATE SET event_sequence=excluded.event_sequence, last_checked_at=excluded.last_checked_at",
+    )
+    .bind(session_id)
+    .bind(event_sequence)
+    .bind(checked_at)
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+/// One native session from a completed, bounded source scan.
+pub struct NativeSessionObservation<'a> {
+    pub session: NewSession<'a>,
+    pub event_sequence: Option<i64>,
+}
+
+/// A failed scan has no publishable observations.
+pub enum NativeScan<'a> {
+    Complete(&'a [NativeSessionObservation<'a>]),
+    Failed,
+}
+
+/// Apply a completed native scan atomically. Missing-session reconciliation is separate and must
+/// verify deletion candidates against the same accepted database.
+pub async fn apply_native_scan(
+    index: &Index,
+    source_id: &str,
+    scan: NativeScan<'_>,
+    checked_at: i64,
+) -> Result<Vec<String>> {
+    let NativeScan::Complete(observations) = scan else {
+        return Ok(Vec::new());
+    };
+    if observations.len() > 500
+        || observations
+            .iter()
+            .any(|observation| observation.session.source_id != source_id)
+    {
+        return Err(sqlx::Error::Protocol("invalid native scan".into()));
+    }
+    let mut tx = index.writer.begin().await?;
+    let mut ids = Vec::with_capacity(observations.len());
+    for observation in observations {
+        let (id, _) = upsert_session(&mut tx, &observation.session, checked_at).await?;
+        record_native_observation(&mut tx, &id, observation.event_sequence, checked_at).await?;
+        ids.push(id);
+    }
+    tx.commit().await?;
+    Ok(ids)
 }
 
 async fn upsert_project_path(
@@ -670,11 +746,15 @@ pub struct SessionRow {
     pub mtime_ms: Option<i64>,
     pub dev: Option<i64>,
     pub ino: Option<i64>,
+    pub native_event_sequence: Option<i64>,
 }
 
 impl SessionRow {
-    /// `size:mtime_ms:dev:ino` of the catalogued file, if one is known.
+    /// Revision of the last catalogued source observation.
     pub fn revision(&self) -> Option<String> {
+        if let Some(sequence) = self.native_event_sequence {
+            return Some(format!("opencode_sqlite_v1:{sequence}"));
+        }
         Some(revision(
             self.len? as u64,
             self.mtime_ms?,
@@ -686,7 +766,9 @@ impl SessionRow {
 
 const SESSION_SELECT: &str = "SELECT s.id, s.source_id, s.native_id, s.session_kind, s.eligibility, s.index_state, s.index_error, s.excluded, s.source_status, \
     s.active_snapshot_id, s.generation, s.index_attempts, s.defer_until, s.task_id, s.operation_id, s.last_activity_at, s.coverage_status, \
-    f.path AS path, f.size AS len, f.mtime_ms AS mtime_ms, f.dev AS dev, f.ino AS ino FROM sessions s LEFT JOIN source_files f ON f.session_id = s.id";
+    f.path AS path, f.size AS len, f.mtime_ms AS mtime_ms, f.dev AS dev, f.ino AS ino, n.event_sequence AS native_event_sequence \
+    FROM sessions s JOIN sources src ON src.id=s.source_id LEFT JOIN source_files f ON f.session_id = s.id \
+    LEFT JOIN native_session_observations n ON n.session_id=s.id AND src.kind='opencode'";
 
 pub fn session_row(r: &sqlx::sqlite::SqliteRow) -> SessionRow {
     SessionRow {
@@ -712,6 +794,7 @@ pub fn session_row(r: &sqlx::sqlite::SqliteRow) -> SessionRow {
         mtime_ms: r.get("mtime_ms"),
         dev: r.get("dev"),
         ino: r.get("ino"),
+        native_event_sequence: r.get("native_event_sequence"),
     }
 }
 

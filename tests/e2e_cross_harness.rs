@@ -1,9 +1,9 @@
-//! Parser -> index -> reader end to end for the Codex and Claude Code adapters through the real daemon:
-//! sentinel exclusion in search, and `with_tools` turn closure / call-result linkage / orphans via
-//! `read_session` over stdio MCP. Synthetic fixtures only (`fixtures/codex`, `fixtures/claude`).
+//! Parser -> index -> reader across synthetic JSONL and OpenCode V2 sources, through real stdio MCP.
 
 use rmcp::{ServiceExt, model::CallToolRequestParams, transport::TokioChildProcess};
 use serde_json::{Value, json};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode};
+use sqlx::{Connection, Executor, SqliteConnection};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -53,11 +53,14 @@ fn wait_control_ready(home: &Path) {
     }
 }
 
-fn setup() -> Env {
-    let tmp = tempfile::Builder::new()
+fn sandbox() -> tempfile::TempDir {
+    tempfile::Builder::new()
         .prefix("sp")
         .tempdir_in("/tmp")
-        .unwrap();
+        .unwrap()
+}
+
+fn setup(tmp: tempfile::TempDir, native_db: Option<&Path>) -> Env {
     let home = tmp.path().join("h");
     let (codex, claude) = (tmp.path().join("codex"), tmp.path().join("claude/proj-a"));
     std::fs::create_dir_all(&codex).unwrap();
@@ -89,20 +92,24 @@ fn setup() -> Env {
     );
     assert!(ok, "{out}");
     let cfg = std::fs::read_to_string(home.join("config.toml")).unwrap();
-    let cfg = cfg
+    let mut cfg = cfg
         .replace("~/.codex/sessions", codex.to_str().unwrap())
         .replace(
             "~/.claude/projects",
             tmp.path().join("claude").to_str().unwrap(),
         );
+    if let Some(db) = native_db {
+        let path = toml::Value::String(db.to_str().unwrap().to_owned());
+        cfg.push_str(&format!(
+            "\n[[sources]]\nid = \"oc\"\nkind = \"opencode\"\nenabled = true\nroots = [{path}]\n"
+        ));
+    }
     let parsed: toml::Table = cfg.parse().unwrap();
     for src in parsed["sources"].as_array().unwrap() {
         if src["enabled"].as_bool() == Some(true) {
             for r in src["roots"].as_array().unwrap() {
                 assert!(
-                    r.as_str()
-                        .unwrap()
-                        .starts_with(tmp.path().to_str().unwrap()),
+                    Path::new(r.as_str().unwrap()).starts_with(tmp.path()),
                     "enabled source root {r} must be inside the temp dir: a default root would index real transcripts"
                 );
             }
@@ -116,20 +123,29 @@ fn setup() -> Env {
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    let t = Instant::now();
-    while !home.join("state/spool.sock").exists() {
-        assert!(t.elapsed() < Duration::from_secs(30));
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    wait_control_ready(&home);
-    Env {
+    let env = Env {
         _tmp: tmp,
         home,
         daemon: Some(daemon),
+    };
+    let t = Instant::now();
+    while !env.home.join("state/spool.sock").exists() {
+        assert!(t.elapsed() < Duration::from_secs(30));
+        std::thread::sleep(Duration::from_millis(50));
     }
+    wait_control_ready(&env.home);
+    env
 }
 
 type Client = rmcp::service::RunningService<rmcp::RoleClient, ()>;
+
+async fn mcp(home: &Path) -> Client {
+    let mut cmd = tokio::process::Command::new(BIN);
+    cmd.arg("mcp").env("SPOOL_HOME", home);
+    ().serve(TokioChildProcess::new(cmd).unwrap())
+        .await
+        .unwrap()
+}
 
 async fn call(c: &Client, tool: &'static str, args: Value) -> (bool, Value) {
     let mut p = CallToolRequestParams::new(tool);
@@ -176,12 +192,10 @@ async fn drain(c: &Client, mut r: Value) -> Value {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn codex_and_claude_fixtures_flow_through_search_and_with_tools_reads() {
-    let env = setup();
+    let env = setup(sandbox(), None);
     let (ok, out) = cli(&env.home, &["index", "--since", "2026-10-12", "--wait"]);
     assert!(ok, "{out}");
-    let mut cmd = tokio::process::Command::new(BIN);
-    cmd.arg("mcp").env("SPOOL_HOME", &env.home);
-    let c: Client = ().serve(TokioChildProcess::new(cmd).unwrap()).await.unwrap();
+    let c = mcp(&env.home).await;
 
     // no excluded sentinel is searchable, in any mode that touches local text
     for q in [
@@ -349,4 +363,417 @@ async fn codex_and_claude_fixtures_flow_through_search_and_with_tools_reads() {
         "the authoritative saved update replaces the earlier streamed text"
     );
     c.cancel().await.unwrap();
+}
+
+const NATIVE_QUERY: &str = "copperlattice";
+
+async fn open_native_fixture(path: &Path) -> SqliteConnection {
+    let mut writer = SqliteConnection::connect_with(
+        &SqliteConnectOptions::new()
+            .filename(path)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal),
+    )
+    .await
+    .unwrap();
+    writer
+        .execute(
+            r#"
+            PRAGMA wal_autocheckpoint=0;
+            CREATE TABLE session_v2(id TEXT PRIMARY KEY,parent_id TEXT,directory TEXT NOT NULL,title TEXT,time_updated INTEGER NOT NULL);
+            CREATE TABLE session_message(id TEXT PRIMARY KEY,session_id TEXT NOT NULL,type TEXT NOT NULL,seq INTEGER NOT NULL,data TEXT NOT NULL,UNIQUE(session_id,seq));
+            CREATE TABLE session_part(message_id TEXT NOT NULL,session_id TEXT NOT NULL,ordinal INTEGER NOT NULL,type TEXT NOT NULL,data TEXT NOT NULL,PRIMARY KEY(message_id,ordinal));
+            CREATE TABLE event_sequence(aggregate_id TEXT PRIMARY KEY,seq INTEGER NOT NULL);
+            BEGIN;
+            INSERT INTO session_v2 VALUES ('ses_native',NULL,'/synthetic','Native fixture',1795104000000);
+            INSERT INTO event_sequence VALUES ('ses_native',41);
+            INSERT INTO session_message VALUES
+              ('msg_z','ses_native','user',2,'{"text":"A native fixture question"}'),
+              ('msg_b','ses_native','assistant',7,'{"content":[{"type":"text","text":"An inline basaltbeacon answer"}]}'),
+              ('msg_a','ses_native','assistant',11,'{"content":[]}');
+            INSERT INTO session_part VALUES
+              ('msg_a','ses_native',4,'text','{"text":"Second piece"}'),
+              ('msg_a','ses_native',0,'reasoning','{"text":"privatequartz"}'),
+              ('msg_a','ses_native',2,'text','{"text":"First copperlattice piece"}');
+            COMMIT;
+            "#,
+        )
+        .await
+        .unwrap();
+    writer
+}
+
+fn index(home: &Path) {
+    let (ok, out) = cli(home, &["index", "--since", "2026-10-12", "--wait"]);
+    assert!(ok, "{out}");
+}
+
+async fn lexical(c: &Client, query: &str, source: &str) -> Value {
+    let (err, r) = call(
+        c,
+        "search_sessions",
+        json!({"query":query,"mode":"lexical","sources":[source],"session_kinds":["interactive","unknown"]}),
+    )
+    .await;
+    assert!(!err, "{r}");
+    r
+}
+
+fn match_request(search: &Value) -> Value {
+    let result = &search["results"][0];
+    let m = &result["matches"][0];
+    assert!(
+        result["session_id"].is_string(),
+        "no search result: {search}"
+    );
+    assert!(m["match_ref"].is_string(), "no match reference: {search}");
+    let mut request = json!({
+        "session_id": result["session_id"],
+        "source_policy": "require_source",
+        "verbose": true,
+        "selection": {"kind":"match","match_ref":m["match_ref"]}
+    });
+    if let Some(branch) = m.get("branch_ref") {
+        request["selection"]["branch_ref"] = branch.clone();
+    }
+    request
+}
+
+async fn verified_match(c: &Client, request: &Value, text: &str, record: Option<&str>) {
+    let (err, r) = call(c, "read_session", request.clone()).await;
+    assert!(!err, "{r}");
+    let r = drain(c, r).await;
+    let items = r["items"].as_array().unwrap();
+    assert!(!items.is_empty(), "{r}");
+    assert!(
+        items
+            .iter()
+            .all(|i| i["provenance"]["origin"] == "verified_source"),
+        "{r}"
+    );
+    assert!(
+        items.iter().any(|i| {
+            record.is_none_or(|id| i["provenance"]["native_record_id"] == id)
+                && i["blocks"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|b| b["data"].as_str().is_some_and(|s| s.contains(text)))
+        }),
+        "{r}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn opencode_v2_and_jsonl_search_and_verify_source_changes() {
+    let tmp = sandbox();
+    let db = tmp.path().join("native.db");
+    let mut writer = open_native_fixture(&db).await;
+    assert!(db.with_file_name("native.db-wal").metadata().unwrap().len() > 0);
+    let env = setup(tmp, Some(&db));
+    index(&env.home);
+    let c = mcp(&env.home).await;
+
+    let codex = match_request(&lexical(&c, "Commentary is indexed", "codex").await);
+    verified_match(&c, &codex, "Commentary is indexed", None).await;
+    let native = match_request(&lexical(&c, NATIVE_QUERY, "oc").await);
+    verified_match(&c, &native, "First copperlattice piece", Some("msg_a")).await;
+    let inline = match_request(&lexical(&c, "basaltbeacon", "oc").await);
+    verified_match(&c, &inline, "An inline basaltbeacon answer", Some("msg_b")).await;
+    assert_eq!(
+        lexical(&c, "privatequartz", "oc").await["results"],
+        json!([])
+    );
+
+    writer.execute(
+        r#"BEGIN;
+           INSERT INTO session_message VALUES ('msg_new','ses_native','user',15,'{"text":"A later feldsparbridge question"}');
+           UPDATE event_sequence SET seq=64 WHERE aggregate_id='ses_native';
+           COMMIT;"#,
+    ).await.unwrap();
+    verified_match(&c, &native, "First copperlattice piece", Some("msg_a")).await;
+    index(&env.home);
+    let append = match_request(&lexical(&c, "feldsparbridge", "oc").await);
+    verified_match(
+        &c,
+        &append,
+        "A later feldsparbridge question",
+        Some("msg_new"),
+    )
+    .await;
+
+    // Edit an old row, without changing either its message sequence or session time.
+    writer.execute(
+        r#"BEGIN;
+           UPDATE session_part SET data='{"text":"Changed azuritespire piece"}' WHERE message_id='msg_a' AND ordinal=2;
+           UPDATE event_sequence SET seq=65 WHERE aggregate_id='ses_native';
+           COMMIT;"#,
+    ).await.unwrap();
+    let mut prefer_source = native;
+    prefer_source["source_policy"] = json!("prefer_source");
+    let (err, changed) = call(&c, "read_session", prefer_source).await;
+    assert!(err, "{changed}");
+    assert!(
+        matches!(
+            changed["error"]["code"].as_str(),
+            Some("SOURCE_CHANGED" | "STALE_REFERENCE")
+        ),
+        "{changed}"
+    );
+
+    writer.close().await.unwrap();
+    index(&env.home);
+    let changed = match_request(&lexical(&c, "azuritespire", "oc").await);
+    verified_match(&c, &changed, "Changed azuritespire piece", Some("msg_a")).await;
+    assert_eq!(lexical(&c, NATIVE_QUERY, "oc").await["results"], json!([]));
+
+    let moved = db.with_extension("moved");
+    std::fs::rename(&db, &moved).unwrap();
+    std::fs::copy(&moved, &db).unwrap();
+    let (err, replacement) = call(&c, "read_session", changed).await;
+    assert!(err, "{replacement}");
+    assert_eq!(replacement["error"]["code"], "SOURCE_CHANGED");
+    let (ok, doctor) = cli(&env.home, &["doctor", "--json"]);
+    assert!(!ok, "{doctor}");
+    let report: Value = serde_json::from_str(&doctor).unwrap();
+    assert!(
+        report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|check| { check["name"] == "source_identity" && check["code"] == "SOURCE_MOVED" }),
+        "{report}"
+    );
+    verified_match(&c, &codex, "Commentary is indexed", None).await;
+    c.cancel().await.unwrap();
+}
+
+fn opencode_command(bin: &Path, spool_home: &Path, project: &Path) -> tokio::process::Command {
+    let root = project.parent().unwrap();
+    let mut cmd = tokio::process::Command::new(bin);
+    cmd.env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", root.join("home"))
+        .env("XDG_CONFIG_HOME", root.join("config"))
+        .env("XDG_DATA_HOME", root.join("data"))
+        .env("XDG_STATE_HOME", root.join("state"))
+        .env("XDG_CACHE_HOME", root.join("cache"))
+        .env("XDG_RUNTIME_DIR", root.join("runtime"))
+        .env("TMPDIR", root)
+        .env("OPENCODE_DB", root.join("client.db"))
+        .env("OPENCODE_DISABLE_AUTOUPDATE", "true")
+        .env("OPENCODE_DISABLE_FREE_MODELS", "true")
+        .env("OPENCODE_DISABLE_MODELS_FETCH", "true")
+        .env("SPOOL_HOME", spool_home)
+        .env("SPOOL_FAKE_API_KEY", "local-fixture")
+        .current_dir(project)
+        .kill_on_drop(true);
+    cmd
+}
+
+async fn model_request(socket: &mut tokio::net::TcpStream) -> Option<Value> {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+    let mut reader = BufReader::new(socket);
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    if line.is_empty() {
+        return None;
+    }
+    assert!(line.starts_with("POST /v1/chat/completions "), "{line}");
+    let mut length = None;
+    loop {
+        line.clear();
+        assert_ne!(reader.read_line(&mut line).await.unwrap(), 0);
+        if line == "\r\n" {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':')
+            && name.eq_ignore_ascii_case("content-length")
+        {
+            length = Some(value.trim().parse::<usize>().unwrap());
+        }
+    }
+    let length = length.expect("model request uses Content-Length");
+    assert!(length <= 2_000_000);
+    let mut body = vec![0; length];
+    reader.read_exact(&mut body).await.unwrap();
+    Some(serde_json::from_slice(&body).unwrap())
+}
+
+fn find_json(value: &Value, key: &str) -> Option<Value> {
+    match value {
+        Value::Object(map) if map.contains_key(key) => Some(value.clone()),
+        Value::Object(map) => map.values().find_map(|v| find_json(v, key)),
+        Value::Array(items) => items.iter().find_map(|v| find_json(v, key)),
+        Value::String(text) => serde_json::from_str::<Value>(text)
+            .ok()
+            .and_then(|v| find_json(&v, key)),
+        _ => None,
+    }
+}
+
+fn model_has_tool(tools: &[Value], name: &str) -> bool {
+    tools.iter().any(|tool| tool["function"]["name"] == name)
+}
+
+fn model_delta(request: &Value, stage: &mut u8) -> (Value, &'static str) {
+    let Some(tools) = request["tools"]
+        .as_array()
+        .filter(|tools| !tools.is_empty())
+    else {
+        return (json!({"content":"Spool smoke fixture"}), "stop");
+    };
+    assert!(model_has_tool(tools, "spool_search_sessions"));
+    assert!(model_has_tool(tools, "spool_read_session"));
+    let messages = request["messages"].as_array().unwrap();
+    let result = messages.iter().rev().find(|m| m["role"] == "tool");
+    let (name, args, id) = match *stage {
+        0 => {
+            assert!(result.is_none(), "{request}");
+            (
+                "spool_search_sessions",
+                json!({"query":NATIVE_QUERY,"mode":"lexical","sources":["oc"],"session_kinds":["interactive","unknown"]}),
+                "call_smoke_search",
+            )
+        }
+        1 => {
+            let result = result.and_then(|m| find_json(&m["content"], "results"));
+            let args = match_request(&result.expect("OpenCode model received MCP search results"));
+            ("spool_read_session", args, "call_smoke_read")
+        }
+        2 => {
+            let r = result
+                .and_then(|m| find_json(&m["content"], "items"))
+                .expect("OpenCode model received MCP read result");
+            assert!(
+                r["items"].as_array().unwrap().iter().any(|i| {
+                    i["provenance"]["origin"] == "verified_source"
+                        && i["provenance"]["native_record_id"] == "msg_a"
+                        && i["blocks"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .any(|b| b["data"] == "First copperlattice piece")
+                }),
+                "{r}"
+            );
+            *stage = 3;
+            return (json!({"content":"Verified Spool match"}), "stop");
+        }
+        _ => return (json!({"content":"Spool smoke fixture"}), "stop"),
+    };
+    *stage += 1;
+    (
+        json!({"tool_calls":[{"index":0,"id":id,"type":"function","function":{"name":name,"arguments":args.to_string()}}]}),
+        "tool_calls",
+    )
+}
+
+async fn model_stub(listener: tokio::net::TcpListener) {
+    use tokio::io::AsyncWriteExt;
+    let mut stage = 0;
+    while stage < 3 {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let Some(request) = model_request(&mut socket).await else {
+            continue;
+        };
+        let (mut delta, finish) = model_delta(&request, &mut stage);
+        delta["role"] = json!("assistant");
+        let chunk = |delta: Value, reason: Value| {
+            json!({
+                "id":"fixture","object":"chat.completion.chunk","created":0,"model":"fixture",
+                "choices":[{"index":0,"delta":delta,"finish_reason":reason}]
+            })
+        };
+        let body = format!(
+            "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+            chunk(delta, Value::Null),
+            chunk(json!({}), json!(finish))
+        );
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires SPOOL_OPENCODE_V2_BIN pointing to OpenCode V2.3.2"]
+async fn opencode_v2_client_searches_and_reopens_match() {
+    let bin = std::fs::canonicalize(
+        std::env::var_os("SPOOL_OPENCODE_V2_BIN").expect("set SPOOL_OPENCODE_V2_BIN"),
+    )
+    .expect("resolve OpenCode executable");
+    let tmp = sandbox();
+    let project = tmp.path().join("oc/project");
+    std::fs::create_dir_all(&project).unwrap();
+    let version = opencode_command(&bin, &tmp.path().join("h"), &project)
+        .arg("--version")
+        .output()
+        .await
+        .unwrap();
+    assert!(version.status.success(), "{version:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&version.stdout).trim(),
+        "opencode v2.3.2"
+    );
+
+    let db = tmp.path().join("native.db");
+    open_native_fixture(&db).await.close().await.unwrap();
+    let env = setup(tmp, Some(&db));
+    index(&env.home);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+    let config = Command::new(BIN)
+        .args(["mcp", "config", "--client", "opencode"])
+        .env("SPOOL_HOME", &env.home)
+        .output()
+        .unwrap();
+    assert!(config.status.success(), "{config:?}");
+    let mut config: Value = serde_json::from_slice(&config.stdout).unwrap();
+    config["mcp"]["servers"]["spool"]["codemode"] = json!(false);
+    config["model"] = json!("fake/fixture");
+    config["providers"] = json!({"fake":{
+        "name":"Local smoke fake",
+        "env":["SPOOL_FAKE_API_KEY"],
+        "package":"@opencode/ai/providers/openai-compatible",
+        "settings":{"baseURL":base_url,"encoding":"none","timeout":5000},
+        "models":{"fixture":{"name":"Fixture","capabilities":{"tools":true},"limit":{"context":65536,"output":4096}}}
+    }});
+    std::fs::write(project.join("opencode.json"), config.to_string()).unwrap();
+
+    let mut client = opencode_command(&bin, &env.home, &project);
+    client.args([
+        "--standalone",
+        "run",
+        "--model",
+        "fake/fixture",
+        "--title",
+        "Spool smoke",
+        "--format",
+        "json",
+        "--auto",
+        "Search Spool for copperlattice and reopen the match.",
+    ]);
+    let (completed, output) = tokio::time::timeout(Duration::from_secs(45), async {
+        let model = model_stub(listener);
+        let run = client.output();
+        tokio::pin!(model, run);
+        tokio::select! {
+            () = &mut model => (true, run.await),
+            output = &mut run => (false, output),
+        }
+    })
+    .await
+    .expect("OpenCode did not complete the search and read loop");
+    let output = output.unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stdout}\n{stderr}");
+    assert!(
+        completed && stdout.contains("Verified Spool match"),
+        "{stdout}\n{stderr}"
+    );
 }

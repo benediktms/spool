@@ -3,10 +3,10 @@
 
 use super::chunk::{ChunkConfig, ChunkMessage, ChunkPlan, TokenCounter, plan_chunks};
 use super::embed::{EmbedStats, embed_missing};
-use super::publish::{PublishOutcome, publish};
+use super::publish::{NativePublishGuard, PublishExpectation, PublishOutcome, publish_guarded};
 use super::stage::{
-    self, AfterParse, CPU, SnapshotKind, StageContext, StageError, Staged, build_graph,
-    load_session, open_recorded, revision4, stage_with_hook,
+    self, AfterParse, CPU, NativeObservation, SessionRow, SnapshotKind, StageContext, StageError,
+    Staged, build_graph, load_session, open_recorded, stage_with_hook,
 };
 use crate::adapters::{ParseOptions, RecordSink, SinkError, adapter_for};
 use crate::clock::SharedClock;
@@ -14,6 +14,7 @@ use crate::config::Config;
 use crate::domain::*;
 use crate::embeddings::EmbeddingService;
 use crate::ipc::AppError;
+use crate::source::revision4;
 use crate::sources::SourceRegistry;
 use crate::storage::index::Index;
 use crate::transcript::service::{SourceReadStager, StagedRead};
@@ -21,7 +22,7 @@ use futures::future::BoxFuture;
 use parking_lot::Mutex;
 use sqlx::Row;
 use std::collections::{HashMap, HashSet};
-use std::io::{BufReader, Read};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -32,8 +33,7 @@ pub const EXTRACTION_POLICY_VERSION: u32 = 1;
 #[derive(Debug, Clone)]
 pub struct IndexRequest {
     pub session_id: String,
-    /// `size:mtime_ms:dev:ino` observed by discovery (extra components ignored). Never trusted:
-    /// the engine re-stats the catalog path and always indexes the current file.
+    /// Discovery's source-specific revision hint. The engine opens and validates the source itself.
     pub observed_source_revision: Option<String>,
     pub fingerprint: Option<String>,
 }
@@ -43,7 +43,7 @@ pub enum DeferReason {
     /// Rewritten/truncated/replaced while parsing; staging discarded, rediscover.
     SourceChanged,
     SourceDisabled,
-    /// `max_record_bytes` | `max_source_file_bytes`; visible as `index_state='failed'`.
+    /// Source budget; visible as `index_state='failed'`.
     LimitExceeded(&'static str),
 }
 
@@ -335,6 +335,22 @@ impl IngestEngine {
         if !self.sources.is_enabled(&row.source_id) {
             return Ok(IndexOutcome::Deferred(DeferReason::SourceDisabled));
         }
+        let native_path = self.sources.opencode_database_path(&row.source_id);
+        if native_path.is_none() && self.sources.kind(&row.source_id) == Some(HarnessKind::OpenCode)
+        {
+            return Ok(IndexOutcome::Deferred(DeferReason::SourceDisabled));
+        }
+        self.index_enabled(sid, row, native_path.as_deref(), cancel)
+            .await
+    }
+
+    async fn index_enabled(
+        &self,
+        sid: &str,
+        row: SessionRow,
+        native_path: Option<&Path>,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<IndexOutcome, IngestError> {
         if cancel.load(Ordering::Relaxed) {
             return Err(StageError::Cancelled.into());
         }
@@ -348,24 +364,45 @@ impl IngestEngine {
         .map_err(IngestError::storage)?;
 
         // 2. Compare against the current source observation.
-        let opened = match open_recorded(
-            &self.index,
-            &self.sources,
-            &self.clock,
-            sid,
-            &row.source_id,
-            row.path.as_deref(),
-        )
-        .await
-        {
-            Ok(o) => o,
-            Err(StageError::SourceMissing) => return Ok(IndexOutcome::SourceMissing),
-            Err(e) => return Err(e.into()),
-        };
-        let cur4 = revision4(&opened.info);
-        drop(opened);
         let fp = self.pipeline_fingerprint();
-        let memo_tail = format!("|{fp}|{cur4}");
+        let mut native = None;
+        let current_revision = if let Some(path) = native_path {
+            let observation = match NativeObservation::open(&self.index, &row, path, &cancel).await
+            {
+                Ok(observation) => observation,
+                Err(error) => return self.stage_failed(error, sid, &fp, "unobserved").await,
+            };
+            let scanned: Option<i64> = sqlx::query_scalar::<_, Option<i64>>(
+                "SELECT event_sequence FROM native_session_observations WHERE session_id=?",
+            )
+            .bind(sid)
+            .fetch_optional(&self.index.writer)
+            .await
+            .map_err(IngestError::storage)?
+            .flatten();
+            if scanned != Some(observation.seq) {
+                return Ok(IndexOutcome::Deferred(DeferReason::SourceChanged));
+            }
+            let revision = observation.revision();
+            native = Some(observation);
+            revision
+        } else {
+            match open_recorded(
+                &self.index,
+                &self.sources,
+                &self.clock,
+                sid,
+                &row.source_id,
+                row.path.as_deref(),
+            )
+            .await
+            {
+                Ok(opened) => revision4(&opened.info),
+                Err(StageError::SourceMissing) => return Ok(IndexOutcome::SourceMissing),
+                Err(e) => return Err(e.into()),
+            }
+        };
+        let memo_tail = format!("|{fp}|{current_revision}");
         if let Some(err) = row
             .index_error
             .as_deref()
@@ -385,6 +422,11 @@ impl IngestEngine {
                         "max_source_file_bytes",
                     )));
                 }
+                "limit_exceeded:max_native_projection_bytes" => {
+                    return Ok(IndexOutcome::Deferred(DeferReason::LimitExceeded(
+                        "max_native_projection_bytes",
+                    )));
+                }
                 _ => {}
             }
         }
@@ -396,11 +438,19 @@ impl IngestEngine {
                 .map_err(IngestError::storage)?;
             if let Some(s) = snap {
                 let rev: String = s.get("source_revision");
-                let covered = rev
-                    .strip_prefix(cur4.as_str())
-                    .is_some_and(|t| t.starts_with(':'))
-                    && s.get::<String, _>("fingerprint") == fp;
+                let same_revision = if native.is_some() {
+                    rev == current_revision
+                } else {
+                    rev.strip_prefix(current_revision.as_str())
+                        .is_some_and(|t| t.starts_with(':'))
+                };
+                let covered = same_revision && s.get::<String, _>("fingerprint") == fp;
                 if covered {
+                    if let Some(source) = native.as_mut()
+                        && let Err(error) = source.verify(&self.index, &row, &cancel).await
+                    {
+                        return self.stage_failed(error, sid, &fp, &current_revision).await;
+                    }
                     // Duplicate delivery / lost ack / retry after an embedding failure.
                     if row.index_state != "indexed" || row.index_error.is_some() {
                         // Published content is current; only the catalog bookkeeping (e.g. 'pending') is stale.
@@ -431,17 +481,17 @@ impl IngestEngine {
 
         // 3. Stage a snapshot of the observed prefix.
         let hook = self.fail.after_parse.lock().clone();
-        let staged = match stage_with_hook(
-            &self.stage_context(&fp),
-            sid,
-            SnapshotKind::Indexed,
-            cancel.clone(),
-            hook,
-        )
-        .await
-        {
+        let ctx = self.stage_context(&fp);
+        let staged = if let Some(source) = native.as_mut() {
+            source
+                .stage(&ctx, sid, &row, SnapshotKind::Indexed, cancel.clone(), hook)
+                .await
+        } else {
+            stage_with_hook(&ctx, sid, SnapshotKind::Indexed, cancel.clone(), hook).await
+        };
+        let staged = match staged {
             Ok(s) => s,
-            Err(e) => return self.stage_failed(e, sid, &fp, &cur4).await,
+            Err(e) => return self.stage_failed(e, sid, &fp, &current_revision).await,
         };
         let Staged {
             snapshot_id,
@@ -467,16 +517,43 @@ impl IngestEngine {
             let _ = stage::delete_snapshot(&self.index, &snapshot_id).await;
             return Err(StageError::Cancelled.into());
         }
-        let outcome = publish(
+        let guard = if let (Some(source), Some(path)) = (native.as_mut(), native_path) {
+            if let Err(error) = source.verify(&self.index, &row, &cancel).await {
+                let _ = stage::delete_snapshot(&self.index, &snapshot_id).await;
+                return self.stage_failed(error, sid, &fp, &current_revision).await;
+            }
+            Some(NativePublishGuard {
+                source_id: &row.source_id,
+                sources: &self.sources,
+                path,
+                seq: source.seq,
+                db: &mut source.db,
+                cancel: &cancel,
+            })
+        } else {
+            None
+        };
+        let outcome = publish_guarded(
             &self.index,
             &self.clock,
             sid,
             &snapshot_id,
-            generation,
-            &fp,
+            PublishExpectation {
+                generation,
+                fingerprint: &fp,
+                native: guard,
+            },
             &plan,
         )
-        .await?;
+        .await;
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(error) if native.is_some() => {
+                let _ = stage::delete_snapshot(&self.index, &snapshot_id).await;
+                return self.stage_failed(error, sid, &fp, &current_revision).await;
+            }
+            Err(error) => return Err(error.into()),
+        };
         let new_generation = match outcome {
             PublishOutcome::Superseded => return Ok(IndexOutcome::Superseded),
             PublishOutcome::Excluded => return Ok(IndexOutcome::Excluded),
@@ -634,6 +711,34 @@ impl IngestEngine {
             .sources
             .kind(&row.source_id)
             .ok_or_else(|| IngestError::permanent("source is not configured"))?;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let sink = if harness == HarnessKind::OpenCode {
+            let path = self
+                .sources
+                .opencode_database_path(&row.source_id)
+                .filter(|_| self.sources.is_enabled(&row.source_id))
+                .ok_or_else(|| IngestError::permanent("source is not enabled"))?;
+            let mut observation =
+                NativeObservation::open(&self.index, &row, &path, &cancel).await?;
+            let projection = observation
+                .project(&self.index, &self.cfg.ingestion, &row, &cancel)
+                .await?;
+            let mut sink = Collect::default();
+            stage::emit_native(&row.native_id, projection, &mut sink)?;
+            observation.verify(&self.index, &row, &cancel).await?;
+            sink
+        } else {
+            self.collect_jsonl(session_id, &row, harness).await?
+        };
+        self.estimate_collected(sink, cancel).await
+    }
+
+    async fn collect_jsonl(
+        &self,
+        session_id: &str,
+        row: &SessionRow,
+        harness: HarnessKind,
+    ) -> Result<Collect, IngestError> {
         let opened = open_recorded(
             &self.index,
             &self.sources,
@@ -655,15 +760,14 @@ impl IngestEngine {
             .acquire_owned()
             .await
             .map_err(|_| IngestError::from(StageError::Cancelled))?;
-        let (file, len) = (opened.file, opened.info.len);
+        let source = self
+            .sources
+            .session_source(&row.source_id)
+            .ok_or_else(|| IngestError::permanent("source is not configured"))?;
         let collected = tokio::task::spawn_blocking(move || {
             let _p = permit;
-            let mut sink = Collect {
-                cancel: AtomicBool::new(false),
-                ..Default::default()
-            };
-            let mut r = BufReader::new(file.take(len));
-            let m = adapter_for(harness).parse_snapshot(&mut r, &opts, &mut sink)?;
+            let mut sink = Collect::default();
+            let m = source.stream(adapter_for(harness), opened, &opts, &mut sink)?;
             Ok::<_, crate::adapters::AdapterError>((m, sink))
         })
         .await
@@ -678,6 +782,14 @@ impl IngestEngine {
         if manifest.coverage == Coverage::Unsupported {
             return Err(IngestError::permanent("unsupported source format"));
         }
+        Ok(sink)
+    }
+
+    async fn estimate_collected(
+        &self,
+        sink: Collect,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<Estimate, IngestError> {
         let live: Vec<&MessageEntry> = sink
             .messages
             .iter()
@@ -703,9 +815,7 @@ impl IngestEngine {
             })
             .collect();
         let n_msgs = msgs.len();
-        let plan = self
-            .plan_blocking(graph, msgs, Arc::new(AtomicBool::new(false)))
-            .await?;
+        let plan = self.plan_blocking(graph, msgs, cancel).await?;
 
         let profile = self.embeddings.profile().id();
         let mut cached: HashSet<Digest> = HashSet::new();
@@ -841,5 +951,206 @@ impl RecordSink for Collect {
     }
     fn cancelled(&self) -> &AtomicBool {
         &self.cancel
+    }
+}
+
+#[cfg(test)]
+mod opencode_tests {
+    use super::*;
+    use crate::clock::ManualClock;
+    use crate::config::SourceConfig;
+    use crate::embeddings::FakeProvider;
+    use sqlx::{Connection, Executor, sqlite::SqliteConnectOptions};
+    use std::os::unix::fs::MetadataExt;
+
+    async fn authorize(index: &Index, sid: &str, seq: i64) {
+        sqlx::query(
+            "INSERT INTO native_session_observations(session_id,event_sequence,last_checked_at) \
+             VALUES (?,?,?) ON CONFLICT(session_id) DO UPDATE SET \
+             event_sequence=excluded.event_sequence,last_checked_at=excluded.last_checked_at",
+        )
+        .bind(sid)
+        .bind(seq)
+        .bind(seq)
+        .execute(&index.writer)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn opencode_ingest_publishes_searchable_revision_and_rejects_unscanned_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source.db");
+        let mut writer = sqlx::SqliteConnection::connect_with(
+            &SqliteConnectOptions::new()
+                .filename(&path)
+                .create_if_missing(true),
+        )
+        .await
+        .unwrap();
+        writer.execute("CREATE TABLE session_v2(id TEXT PRIMARY KEY,parent_id TEXT,directory TEXT,title TEXT,time_updated INTEGER); \
+            CREATE TABLE session_message(id TEXT,session_id TEXT,type TEXT,seq INTEGER,data TEXT); \
+            CREATE TABLE session_part(message_id TEXT,session_id TEXT,ordinal INTEGER,type TEXT,data TEXT); \
+            CREATE TABLE event_sequence(aggregate_id TEXT PRIMARY KEY,seq INTEGER); \
+            INSERT INTO session_v2 VALUES ('native',NULL,'/synthetic','Example',1),('unrelated',NULL,'/synthetic',NULL,1); \
+            INSERT INTO event_sequence VALUES ('native',4),('unrelated',1); \
+            INSERT INTO session_message VALUES ('m1','native','user',1,'{\"text\":\"matchable narwhal text\"}');")
+            .await.unwrap();
+        let index = Index::open_for_test(dir.path()).await.unwrap();
+        let mut cfg = Config::default();
+        cfg.embedding.enabled = false;
+        cfg.sources = vec![SourceConfig {
+            id: "oc".into(),
+            kind: HarnessKind::OpenCode,
+            enabled: true,
+            roots: vec![path.to_string_lossy().into_owned()],
+            include_subagents: false,
+        }];
+        sqlx::query("INSERT INTO sources(id,kind,roots_json,enabled) VALUES ('oc','opencode',?,1)")
+            .bind(serde_json::to_string(&cfg.sources[0].roots).unwrap())
+            .execute(&index.writer)
+            .await
+            .unwrap();
+        let parent = std::fs::metadata(dir.path()).unwrap();
+        let main_file = std::fs::metadata(&path).unwrap();
+        sqlx::query(
+            "INSERT INTO native_source_identities(source_id,parent_dev,parent_ino,main_dev,main_ino) \
+             VALUES ('oc',?,?,?,?)",
+        )
+        .bind(i64::try_from(parent.dev()).unwrap())
+        .bind(i64::try_from(parent.ino()).unwrap())
+        .bind(i64::try_from(main_file.dev()).unwrap())
+        .bind(i64::try_from(main_file.ino()).unwrap())
+        .execute(&index.writer)
+        .await
+        .unwrap();
+        let sid = crate::ids::session_id("oc", "native", "");
+        sqlx::query(
+            "INSERT INTO sessions(id,source_id,native_id,session_kind,eligibility,index_state,discovered_at) \
+             VALUES (?,'oc','native','interactive','active','pending',1)",
+        )
+            .bind(&sid)
+            .execute(&index.writer)
+            .await
+            .unwrap();
+        authorize(&index, &sid, 4).await;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let sources = Arc::new(SourceRegistry::new(&cfg).unwrap());
+        let clock: SharedClock = Arc::new(ManualClock::new(1));
+        let embeddings = Arc::new(EmbeddingService::new(
+            index.clone(),
+            cfg.embedding.clone(),
+            cfg.search.clone(),
+            clock.clone(),
+            Arc::new(FakeProvider::new(32)),
+        ));
+        let engine = IngestEngine::new(
+            index.clone(),
+            Arc::new(cfg),
+            sources.clone(),
+            embeddings,
+            clock,
+        );
+        let run = || async {
+            if sources.is_enabled("oc") {
+                engine
+                    .index_session(
+                        IndexRequest {
+                            session_id: sid.clone(),
+                            observed_source_revision: None,
+                            fingerprint: None,
+                        },
+                        cancel.clone(),
+                    )
+                    .await
+                    .unwrap()
+            } else {
+                let row = load_session(&index, &sid).await.unwrap().unwrap();
+                let configured = sources.opencode_database_path("oc").unwrap();
+                engine
+                    .index_enabled(&sid, row, Some(&configured), cancel.clone())
+                    .await
+                    .unwrap()
+            }
+        };
+        let IndexOutcome::Published { snapshot_id, .. } = run().await else {
+            panic!("native session was not published");
+        };
+        let hit: (String, String, String) = sqlx::query_as(
+            "SELECT x.id,x.source_revision,r.locator_payload FROM chunks_fts \
+             JOIN chunks c ON c.rowid=chunks_fts.rowid JOIN sessions s ON s.active_snapshot_id=c.snapshot_id \
+             JOIN snapshots x ON x.id=c.snapshot_id JOIN records r ON r.snapshot_id=x.id \
+             WHERE chunks_fts MATCH 'narwhal' AND x.state='published'",
+        )
+        .fetch_one(&index.reader)
+        .await
+        .unwrap();
+        assert_eq!(hit.0, snapshot_id);
+        assert_eq!(hit.1, "opencode_sqlite_v1:4");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&hit.2).unwrap(),
+            serde_json::json!({
+                "kind":"opencode_sqlite_v1","session_id":"native","message_id":"m1"
+            })
+        );
+
+        writer
+            .execute("UPDATE event_sequence SET seq=2 WHERE aggregate_id='unrelated'")
+            .await
+            .unwrap();
+        assert_eq!(run().await, IndexOutcome::NoOp);
+
+        writer.execute("UPDATE event_sequence SET seq=5 WHERE aggregate_id='native'; \
+            INSERT INTO session_message VALUES ('m2','native','user',2,'{\"text\":\"unpublished orca text\"}');")
+            .await.unwrap();
+        assert_eq!(
+            run().await,
+            IndexOutcome::Deferred(DeferReason::SourceChanged)
+        );
+        authorize(&index, &sid, 5).await;
+        let IndexOutcome::Published {
+            snapshot_id: newer_snapshot,
+            ..
+        } = run().await
+        else {
+            panic!("authorized native change was not published");
+        };
+        assert_ne!(newer_snapshot, snapshot_id);
+        let active: (String, String) = sqlx::query_as(
+            "SELECT x.id,x.source_revision FROM chunks_fts JOIN chunks c ON c.rowid=chunks_fts.rowid \
+             JOIN sessions s ON s.active_snapshot_id=c.snapshot_id JOIN snapshots x ON x.id=c.snapshot_id \
+             WHERE chunks_fts MATCH 'orca'",
+        )
+        .fetch_one(&index.reader)
+        .await
+        .unwrap();
+        assert_eq!(
+            active,
+            (newer_snapshot.clone(), "opencode_sqlite_v1:5".into())
+        );
+
+        writer.execute("UPDATE event_sequence SET seq=6 WHERE aggregate_id='native'; \
+            INSERT INTO session_message VALUES ('m3','native','user',3,'{\"text\":\"replacement beluga text\"}');")
+            .await.unwrap();
+        authorize(&index, &sid, 6).await;
+        let old_path = path.with_extension("old");
+        let move_path = path.clone();
+        *engine.fail.after_parse.lock() = Some(Arc::new(move || {
+            std::fs::rename(&move_path, &old_path).unwrap();
+            std::fs::copy(&old_path, &move_path).unwrap();
+        }));
+        assert_eq!(
+            run().await,
+            IndexOutcome::Deferred(DeferReason::SourceChanged)
+        );
+        let (active, staging, unpublished): (String, i64, i64) = sqlx::query_as(
+            "SELECT active_snapshot_id, (SELECT count(*) FROM snapshots WHERE state='staging'), \
+             (SELECT count(*) FROM chunks_fts WHERE chunks_fts MATCH 'beluga') FROM sessions WHERE id=?",
+        )
+        .bind(&sid)
+        .fetch_one(&index.reader)
+        .await
+        .unwrap();
+        assert_eq!((active, staging, unpublished), (newer_snapshot, 0, 0));
     }
 }

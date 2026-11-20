@@ -4,7 +4,7 @@
 //! into `true` implicitly.
 
 use super::args::{InitArgs, YesNo};
-use crate::config::{Config, Paths};
+use crate::config::{Config, Paths, SourceConfig};
 use crate::transcript::handle::HandleKey;
 use anyhow::{Context, Result, bail};
 use std::io::{BufRead, Write};
@@ -65,7 +65,24 @@ pub fn run_init(
     args: &InitArgs,
     mut prompter: Option<&mut dyn Prompter>,
 ) -> Result<InitReport> {
-    let defaults = Config::default();
+    let mut defaults = Config::default();
+    if let Some(path) = &args.opencode_db {
+        anyhow::ensure!(
+            crate::config::is_absolute_database_path(path),
+            "--opencode-db requires an absolute database path"
+        );
+        defaults.sources.push(SourceConfig {
+            id: "opencode".into(),
+            kind: crate::domain::HarnessKind::OpenCode,
+            enabled: false,
+            roots: vec![
+                path.to_str()
+                    .context("--opencode-db must be valid UTF-8")?
+                    .into(),
+            ],
+            include_subagents: false,
+        });
+    }
     let known: Vec<&str> = defaults.sources.iter().map(|s| s.id.as_str()).collect();
     for id in args.enable_source.iter().chain(&args.disable_source) {
         if !known.contains(&id.as_str()) {
@@ -84,7 +101,8 @@ pub fn run_init(
     }
     let has_flags = !args.enable_source.is_empty()
         || !args.disable_source.is_empty()
-        || args.hosted_processing.is_some();
+        || args.hosted_processing.is_some()
+        || args.opencode_db.is_some();
     let exists = paths.config_file.exists();
     if exists && has_flags && !args.force {
         bail!(

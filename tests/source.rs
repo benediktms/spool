@@ -1,4 +1,4 @@
-use spool::source::SourceRoots;
+use spool::source::{SourceFileInfo, SourceRoots, revision4};
 use std::{
     fs,
     os::unix::{
@@ -12,6 +12,20 @@ use std::{
 fn roots(path: &std::path::Path) -> SourceRoots {
     SourceRoots::new(&[path.to_owned()]).unwrap()
 }
+
+#[test]
+fn jsonl_revision_keeps_legacy_encoding() {
+    let info = SourceFileInfo {
+        path: PathBuf::from("/irrelevant.jsonl"),
+        len: 123,
+        mtime_ms: -456,
+        dev: 7,
+        ino: 89,
+    };
+    assert_eq!(revision4(&info), "123:-456:7:89");
+    assert_eq!(spool::ingest::stage::revision4(&info), revision4(&info));
+}
+
 fn collect_pages(roots: &SourceRoots, limit: usize) -> Vec<PathBuf> {
     let cancel = AtomicBool::new(false);
     let mut after = None;

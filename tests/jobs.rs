@@ -1024,6 +1024,30 @@ async fn reconciliation_enqueues_desired_work_that_has_no_task() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reconciliation_enqueues_native_session_without_source_file() {
+    let env = Env::new().await;
+    sqlx::query("INSERT INTO sources(id,kind,roots_json,enabled) VALUES ('oc','opencode','[]',1)")
+        .execute(&env.index.writer)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO sessions(id,source_id,native_id,session_kind,eligibility,index_state,discovered_at) VALUES ('native','oc','ses_fixture','interactive','active','pending',1)")
+        .execute(&env.index.writer)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO native_session_observations(session_id,event_sequence,last_checked_at) VALUES ('native',42,1)")
+        .execute(&env.index.writer)
+        .await
+        .unwrap();
+
+    assert_eq!(reconciler(&env).pass().await.unwrap().submitted, 1);
+    assert_eq!(
+        env.jobs_count("SELECT count(*) FROM Jobs WHERE job_type = 'spool-ingest' AND json_extract(CAST(job AS TEXT), '$.observed_source_revision') = 'opencode_sqlite_v1:42'")
+            .await,
+        1
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn reconciliation_repairs_a_session_whose_recorded_task_is_gone() {
     let env = Env::new().await;
     env.omp("r.jsonl", "lost", &["task row lost"], T0 - DAY);

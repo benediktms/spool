@@ -330,6 +330,8 @@ Byte offsets are hints validated against the source identity and record digest. 
 
 Configure an explicit allowlist of transcript roots. Accept source/session identifiers in APIs, not unrestricted filesystem paths. Resolve symlinks and canonical containment at open time. Refuse escapes, special device files, and sources owned by a different user by default.
 
+For the opt-in OpenCode SQLite source, trust the configured database path to remain stable within its user-owned directory. Use SQLite's own read-only database and WAL access, and check the directory, database, and applicable sidecar identities during reads. Abort the operation on detected movement or replacement. Do not infer deletions from a failed scan. These checks do not protect against a same-user process substituting files between checks. JSONL sources retain descriptor-based access.
+
 Keep an already-open file descriptor while validating and reading a range; avoid validating one path and then opening an attacker-swapped target. Every external blob also passes root containment checks.
 
 A raw transcript may contain commands, URLs, malicious instructions, or secrets. Retrieval returns data only. The daemon never executes commands, opens arbitrary referenced URLs, or follows transcript instructions.

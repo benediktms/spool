@@ -1,7 +1,7 @@
 # Spool
 
 A local search engine for agent-session conversation history. Spool indexes transcripts written by
-OhMyPi, Codex and Claude Code, and serves three read-only MCP tools — `search_sessions`,
+OhMyPi, Codex, Claude Code, and OpenCode V2, and serves three read-only MCP tools — `search_sessions`,
 `read_session`, `index_status` — over a stdio bridge to a per-user daemon. Administration is
 CLI-only. Transcript sources are read-only.
 
@@ -42,6 +42,12 @@ you choose, e.g. `--enable-source omp` or `spool sources enable omp`) and hosted
 
 No service manager? Run `spool daemon run` in a terminal instead.
 
+For OpenCode V2, use `spool init --opencode-db /absolute/path/to/opencode.db --enable-source opencode`
+on a new installation. On an existing installation, add a `[[sources]]` entry with
+`id = "opencode"`, `kind = "opencode"`, `enabled = true`, and `roots = ["/absolute/path/to/opencode.db"]`.
+Spool reads the configured database without requiring OpenCode to be running. Keep the path stable
+and in a directory you own. If Spool detects replacement, `spool doctor` reports `SOURCE_MOVED`.
+
 ## Enable semantic search
 
 Semantic and hybrid search need hosted embeddings. Follow the
@@ -61,7 +67,7 @@ spool index --since 7d | --all | --session ID [--source ID] [--dry-run] [--wait]
 spool index rebuild | remove --session ID --exclude | purge --unreferenced
 spool jobs status|retry|cancel OPERATION_ID
 spool sources list|enable|disable ID     spool handles rotate-key
-spool mcp                                   (stdio bridge)     spool mcp config --client claude|codex|omp
+ spool mcp                                   (stdio bridge)     spool mcp config --client claude|codex|omp|opencode
 spool config show                           (redacted; defaults vs overrides)
 ```
 

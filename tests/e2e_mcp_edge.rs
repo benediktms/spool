@@ -30,8 +30,11 @@ impl Home {
         }
     }
     fn start_daemon(&mut self) {
+        self.start_daemon_with(Path::new(BIN));
+    }
+    fn start_daemon_with(&mut self, binary: &Path) {
         let _ = std::fs::remove_file(self.home.join("state/spool.sock"));
-        let d = Command::new(BIN)
+        let d = Command::new(binary)
             .args(["daemon", "run"])
             .env("SPOOL_HOME", &self.home)
             .stdout(Stdio::null())
@@ -46,7 +49,7 @@ impl Home {
                     .is_ok()
             {
                 // control calls answer DAEMON_NOT_READY until the job system is up: wait for it too
-                if cli(&self.home, &["status", "--json"]).0 {
+                if cli_with(binary, &self.home, &["status", "--json"]).0 {
                     return;
                 }
             }
@@ -60,7 +63,11 @@ impl Home {
 }
 
 fn cli(home: &Path, args: &[&str]) -> (bool, String) {
-    let o = Command::new(BIN)
+    cli_with(Path::new(BIN), home, args)
+}
+
+fn cli_with(binary: &Path, home: &Path, args: &[&str]) -> (bool, String) {
+    let o = Command::new(binary)
         .args(args)
         .env("SPOOL_HOME", home)
         .output()
@@ -135,7 +142,10 @@ struct Bridge {
 
 impl Bridge {
     fn spawn(home: &Path) -> Self {
-        let mut child = Command::new(BIN)
+        Self::spawn_with(Path::new(BIN), home)
+    }
+    fn spawn_with(binary: &Path, home: &Path) -> Self {
+        let mut child = Command::new(binary)
             .arg("mcp")
             .env("SPOOL_HOME", home)
             .stdin(Stdio::piped())
@@ -212,6 +222,170 @@ fn tool_json(r: &Value) -> Value {
 }
 
 const T: Duration = Duration::from_secs(30);
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires SPOOL_UPGRADE_BASELINE_BIN"]
+async fn jsonl_upgrade_keeps_match_and_cursor() {
+    use sqlx::Connection;
+
+    let baseline = PathBuf::from(
+        std::env::var_os("SPOOL_UPGRADE_BASELINE_BIN")
+            .expect("SPOOL_UPGRADE_BASELINE_BIN is required"),
+    );
+    assert!(baseline.is_file(), "baseline binary is unavailable");
+    let tmp = tempfile::Builder::new()
+        .prefix("spu")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let home = tmp.path().join("h");
+    let src = tmp.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        src.join("fixture.jsonl"),
+        big_session("synthetic second message"),
+    )
+    .unwrap();
+    let (ok, out) = cli_with(
+        &baseline,
+        &home,
+        &[
+            "init",
+            "--enable-source",
+            "omp",
+            "--disable-source",
+            "codex",
+            "--disable-source",
+            "claude",
+            "--hosted-processing",
+            "no",
+        ],
+    );
+    assert!(ok, "{out}");
+    let cfg_path = home.join("config.toml");
+    let cfg = std::fs::read_to_string(&cfg_path)
+        .unwrap()
+        .replace("~/.omp/agent/sessions", src.to_str().unwrap());
+    let parsed: toml::Table = cfg.parse().unwrap();
+    for source in parsed["sources"].as_array().unwrap() {
+        if source["enabled"].as_bool() == Some(true) {
+            for root in source["roots"].as_array().unwrap() {
+                assert!(Path::new(root.as_str().unwrap()).starts_with(tmp.path()));
+            }
+        }
+    }
+    std::fs::write(cfg_path, cfg).unwrap();
+    let mut h = Home {
+        _tmp: tmp,
+        home,
+        daemon: None,
+    };
+    h.start_daemon_with(&baseline);
+    let (ok, out) = cli_with(
+        &baseline,
+        &h.home,
+        &["index", "--since", "2026-10-12", "--wait"],
+    );
+    assert!(ok, "{out}");
+    let mut old = Bridge::spawn_with(&baseline, &h.home);
+    old.send(json!({"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"upgrade-test","version":"1"}}}));
+    old.response(0, T);
+    old.send(json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+    let (reply, _) = old.call("search_sessions", json!({"query":"please produce","mode":"lexical","sources":["omp"],"session_kinds":["interactive","unknown"]}));
+    let found = tool_json(&reply);
+    let hit = &found["results"][0];
+    let session = hit["session_id"]
+        .as_str()
+        .expect("indexed session")
+        .to_owned();
+    let matched = hit["matches"][0]["match_ref"]
+        .as_str()
+        .expect("match")
+        .to_owned();
+    let (reply, _) = old.call(
+        "read_session",
+        json!({"session_id":session,"selection":{"kind":"session"},"max_items":1}),
+    );
+    let first = tool_json(&reply);
+    let cursor = first["page"]["next_cursor"]
+        .as_str()
+        .expect("nonempty continuation")
+        .to_owned();
+    let (reply, _) = old.call("read_session", json!({"cursor":cursor}));
+    let expected_continuation = tool_json(&reply);
+    assert!(
+        !expected_continuation["items"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "{expected_continuation}"
+    );
+    drop(old);
+    h.kill_daemon();
+
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(h.home.join("state/index.sqlite"))
+        .read_only(true);
+    let mut db = sqlx::SqliteConnection::connect_with(&options)
+        .await
+        .unwrap();
+    let before: String = sqlx::query_scalar("SELECT active_snapshot_id FROM sessions WHERE id=?")
+        .bind(&session)
+        .fetch_one(&mut db)
+        .await
+        .unwrap();
+    db.close().await.unwrap();
+
+    h.start_daemon();
+    let mut current = Bridge::spawn(&h.home);
+    current.send(json!({"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"upgrade-test","version":"1"}}}));
+    current.response(0, T);
+    current.send(json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+    let (reply, _) = current.call(
+        "read_session",
+        json!({"session_id":session,"selection":{"kind":"match","match_ref":matched}}),
+    );
+    let reopened = tool_json(&reply);
+    assert!(
+        !reopened["items"].as_array().unwrap().is_empty(),
+        "{reopened}"
+    );
+    assert!(
+        reopened["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["provenance"]["origin"] == "verified_source")
+    );
+    let (reply, _) = current.call("read_session", json!({"cursor":cursor}));
+    let continued = tool_json(&reply);
+    assert!(
+        !continued["items"].as_array().unwrap().is_empty(),
+        "{continued}"
+    );
+    assert_eq!(
+        continued["items"], expected_continuation["items"],
+        "the original cursor must continue at the same position"
+    );
+    assert!(
+        continued["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["provenance"]["origin"] == "verified_source")
+    );
+    let mut db = sqlx::SqliteConnection::connect_with(&options)
+        .await
+        .unwrap();
+    let after: String = sqlx::query_scalar("SELECT active_snapshot_id FROM sessions WHERE id=?")
+        .bind(&session)
+        .fetch_one(&mut db)
+        .await
+        .unwrap();
+    assert_eq!(
+        before, after,
+        "upgrade must not rebuild the indexed snapshot"
+    );
+}
 
 #[test]
 fn both_recorded_negotiation_paths_work_with_clean_stdout() {

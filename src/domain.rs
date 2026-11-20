@@ -21,6 +21,8 @@ pub enum HarnessKind {
     Omp,
     Codex,
     Claude,
+    #[serde(rename = "opencode")]
+    OpenCode,
 }
 
 impl HarnessKind {
@@ -29,6 +31,7 @@ impl HarnessKind {
             Self::Omp => "omp",
             Self::Codex => "codex",
             Self::Claude => "claude",
+            Self::OpenCode => "opencode",
         }
     }
 }

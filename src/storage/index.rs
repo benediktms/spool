@@ -5,6 +5,7 @@ use sqlx::{Sqlite, SqlitePool, Transaction};
 use std::path::Path;
 use std::time::Duration;
 
+/// Index migrations applied before database reads and writes.
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations/index");
 
 #[derive(Clone)]

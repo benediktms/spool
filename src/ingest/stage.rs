@@ -4,21 +4,22 @@
 
 use crate::adapters::{AdapterError, ParseOptions, RecordSink, SinkError, adapter_for};
 use crate::clock::SharedClock;
-use crate::config::Config;
+use crate::config::{Config, IngestionConfig};
 use crate::domain::*;
 use crate::graph::SessionGraph;
 use crate::ids::new_id;
-use crate::source::{SourceError, SourceFileInfo};
+use crate::source::opencode::{self, GuardedDb, OpenCodeError, ProjectedMessage, ScanControl};
+pub use crate::source::revision4;
+use crate::source::{ObservationChange, SourceError};
 use crate::sources::SourceRegistry;
 use crate::storage::index::Index;
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use std::collections::{HashMap, HashSet};
-use std::io::{BufReader, Read};
-use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
+use std::time::{Duration, Instant};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 
 /// Ingest CPU permit (spec 4.1): parse and chunk planning run one at a time, process-wide.
@@ -31,6 +32,7 @@ const CHANNEL_BYTES: usize = 8 << 20;
 const BATCH_EVENTS: usize = 256;
 const BATCH_BYTES: usize = 1 << 20;
 const FINALIZE_BATCH: usize = 500;
+const MAX_NATIVE_PROJECTION_BYTES: u64 = 64 << 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SnapshotKind {
@@ -49,7 +51,7 @@ pub struct Staged {
     pub graph: SessionGraph,
     /// The source changed (grew) while parsing, or ends in an incomplete record: queue a follow-up.
     pub follow_up: bool,
-    /// `size:mtime_ms:dev:ino:prefix_end`.
+    /// Source-specific persisted observation.
     pub revision: String,
 }
 
@@ -129,17 +131,13 @@ fn record_kind_str(k: RecordKind) -> &'static str {
     }
 }
 
-/// `size:mtime_ms:dev:ino`
-pub fn revision4(i: &SourceFileInfo) -> String {
-    format!("{}:{}:{}:{}", i.len, i.mtime_ms, i.dev, i.ino)
-}
-
 // ---------------------------------------------------------------------------------------------
 // Catalog access shared with the engine
 // ---------------------------------------------------------------------------------------------
 
 pub(crate) struct SessionRow {
     pub source_id: String,
+    pub native_id: String,
     pub generation: i64,
     pub active_snapshot_id: Option<String>,
     pub index_state: String,
@@ -154,7 +152,7 @@ pub(crate) async fn load_session(
     session_id: &str,
 ) -> Result<Option<SessionRow>, sqlx::Error> {
     let row = sqlx::query(
-        "SELECT s.source_id, s.generation, s.active_snapshot_id, s.index_state, s.index_error, \
+        "SELECT s.source_id, s.native_id, s.generation, s.active_snapshot_id, s.index_state, s.index_error, \
                 s.tombstoned_at IS NOT NULL AS tomb, f.path, \
                 (s.excluded = 1 OR EXISTS (SELECT 1 FROM exclusions e WHERE (e.kind='session' AND e.target_id = s.id) \
                                            OR (e.kind='source' AND e.target_id = s.source_id))) AS excl \
@@ -165,6 +163,7 @@ pub(crate) async fn load_session(
     .await?;
     Ok(row.map(|r| SessionRow {
         source_id: r.get("source_id"),
+        native_id: r.get("native_id"),
         generation: r.get("generation"),
         active_snapshot_id: r.get("active_snapshot_id"),
         index_state: r.get("index_state"),
@@ -241,17 +240,31 @@ pub async fn sweep_staging(
 // ---------------------------------------------------------------------------------------------
 
 enum Ev {
-    Record(RecordMeta),
+    Record(RecordMeta, Option<String>),
     Message(MessageEntry),
     Call(ToolCallMeta),
     Result(ToolResultMeta),
     Warn(ParseWarning),
 }
 
+#[derive(Serialize)]
+#[serde(tag = "kind")]
+enum NativeLocator<'a> {
+    #[serde(rename = "opencode_sqlite_v1")]
+    OpenCodeSqlite {
+        session_id: &'a str,
+        message_id: &'a str,
+    },
+}
+
 impl Ev {
     fn size(&self) -> usize {
         match self {
-            Ev::Record(r) => 192 + r.key.len() + r.parent_key.as_ref().map_or(0, |k| k.len()),
+            Ev::Record(r, locator) => {
+                192 + r.key.len()
+                    + r.parent_key.as_ref().map_or(0, |k| k.len())
+                    + locator.as_ref().map_or(0, |s| s.len())
+            }
             Ev::Message(m) => {
                 128 + m.blocks.iter().map(|b| b.text.len() + 48).sum::<usize>()
                     + m.supersedes.iter().map(|s| s.len()).sum::<usize>()
@@ -286,7 +299,23 @@ impl ChanSink {
 
 impl RecordSink for ChanSink {
     fn record(&mut self, rec: RecordMeta) -> Result<(), SinkError> {
-        self.send(Ev::Record(rec))
+        self.send(Ev::Record(rec, None))
+    }
+    fn opencode_record(
+        &mut self,
+        rec: RecordMeta,
+        session_id: &str,
+        message_id: &str,
+    ) -> Result<(), SinkError> {
+        if session_id.is_empty() || message_id.is_empty() {
+            return Err(SinkError);
+        }
+        let locator = serde_json::to_string(&NativeLocator::OpenCodeSqlite {
+            session_id,
+            message_id,
+        })
+        .map_err(|_| SinkError)?;
+        self.send(Ev::Record(rec, Some(locator)))
     }
     fn message(&mut self, msg: MessageEntry) -> Result<(), SinkError> {
         self.send(Ev::Message(msg))
@@ -333,14 +362,30 @@ struct Inserter<'a> {
 }
 
 impl Inserter<'_> {
+    fn new<'a>(index: &'a Index, snapshot_id: &'a str) -> Inserter<'a> {
+        Inserter {
+            index,
+            snapshot_id,
+            superseded: HashSet::new(),
+            alias: HashMap::new(),
+            records: Vec::new(),
+            msg_keys: Vec::new(),
+            msg_roles: HashMap::new(),
+            group_of: HashMap::new(),
+            groups: Vec::new(),
+            ord: 0,
+            warn_seq: 0,
+        }
+    }
+
     async fn flush(&mut self, batch: Vec<Ev>) -> Result<(), StageError> {
         let sid = self.snapshot_id;
         let mut tx = self.index.writer.begin().await?;
         for ev in batch {
             match ev {
-                Ev::Record(r) => {
+                Ev::Record(r, locator) => {
                     let res = sqlx::query(
-                        "INSERT INTO records(snapshot_id,key,ord,native_id,parent_key,kind,ts,offset,len,digest,turn_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                        "INSERT INTO records(snapshot_id,key,ord,native_id,parent_key,kind,ts,offset,len,digest,turn_id,locator_payload) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                     )
                     .bind(sid)
                     .bind(&r.key)
@@ -353,6 +398,7 @@ impl Inserter<'_> {
                     .bind(r.locator.len as i64)
                     .bind(&r.digest[..])
                     .bind(&r.turn_id)
+                    .bind(locator)
                     .execute(&mut *tx)
                     .await;
                     match res {
@@ -558,21 +604,77 @@ async fn consume(
     }
 }
 
-/// Verify a sample of the observed records (first, middle, last) still hash to their digests.
-fn samples_verify(file: &std::fs::File, records: &[RecordMeta]) -> bool {
-    if records.is_empty() {
-        return true;
-    }
-    let picks = [0, records.len() / 2, records.len() - 1];
-    picks.iter().all(|&i| {
-        let r = &records[i];
-        let mut buf = vec![0u8; r.locator.len as usize];
-        file.read_exact_at(&mut buf, r.locator.offset).is_ok() && digest(&buf) == r.digest
-    })
-}
-
 /// Test seam: called right after the parse finished, before the source is re-checked.
 pub type AfterParse = Arc<dyn Fn() + Send + Sync>;
+
+#[cfg(test)]
+mod opencode_tests {
+    use super::*;
+    use crate::source::opencode::{self, ScanControl};
+    use sqlx::{Connection, Executor, sqlite::SqliteConnectOptions};
+
+    #[tokio::test]
+    async fn opencode_projection_writes_native_locators_through_staging_sink() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.db");
+        let mut writer = sqlx::SqliteConnection::connect_with(
+            &SqliteConnectOptions::new()
+                .filename(&source)
+                .create_if_missing(true),
+        )
+        .await
+        .unwrap();
+        writer.execute("CREATE TABLE session_v2(id TEXT PRIMARY KEY,parent_id TEXT,directory TEXT,title TEXT,time_updated INTEGER); \
+            CREATE TABLE session_message(id TEXT,session_id TEXT,type TEXT,seq INTEGER,data TEXT); \
+            CREATE TABLE session_part(message_id TEXT,session_id TEXT,ordinal INTEGER,type TEXT,data TEXT); \
+            CREATE TABLE event_sequence(aggregate_id TEXT,seq INTEGER); \
+            INSERT INTO session_message VALUES ('m1','native','user',1,'{\"text\":\"matchable text\"}');").await.unwrap();
+        let index = Index::open_for_test(dir.path()).await.unwrap();
+        sqlx::query(
+            "INSERT INTO sources(id,kind,roots_json,enabled) VALUES ('oc','opencode','[]',1)",
+        )
+        .execute(&index.writer)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO sessions(id,source_id,native_id,discriminator,session_kind,eligibility,index_state,discovered_at) VALUES ('s','oc','native','','interactive','active','pending',1)")
+            .execute(&index.writer).await.unwrap();
+        sqlx::query("INSERT INTO snapshots(id,session_id,kind,state,source_revision,fingerprint,generation,prefix_end,file_dev,file_ino,created_at) VALUES ('snap','s','indexed','staging','r','f',0,0,0,0,1)")
+            .execute(&index.writer).await.unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let control = ScanControl {
+            cancel: &cancel,
+            deadline: None,
+        };
+        let mut db = opencode::open(&source).await.unwrap();
+        let projection = opencode::project_session(&mut db, "native", 4096, &control)
+            .await
+            .unwrap();
+        let (tx, rx) = mpsc::channel(CHANNEL_EVENTS);
+        let handle = tokio::runtime::Handle::current();
+        let join = tokio::task::spawn_blocking(move || {
+            let mut sink = ChanSink {
+                tx,
+                bytes: Arc::new(Semaphore::new(CHANNEL_BYTES)),
+                handle,
+                cancel,
+            };
+            opencode::emit_projection("native", projection, &mut sink)
+        });
+        let mut ins = Inserter::new(&index, "snap");
+        consume(&mut ins, rx).await.unwrap();
+        join.await.unwrap().unwrap();
+        let (locator, text): (String, String) = sqlx::query_as(
+            "SELECT r.locator_payload,b.text FROM records r JOIN blocks b ON b.snapshot_id=r.snapshot_id AND b.record_key=r.key WHERE r.snapshot_id='snap'",
+        ).fetch_one(&index.reader).await.unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&locator).unwrap(),
+            serde_json::json!({
+                "kind":"opencode_sqlite_v1","session_id":"native","message_id":"m1"
+            })
+        );
+        assert_eq!(text, "matchable text");
+    }
+}
 
 /// Shared inputs of one staging pass: where the session lives and how the snapshot is stamped.
 #[derive(Clone, Copy)]
@@ -582,6 +684,38 @@ pub struct StageContext<'a> {
     pub cfg: &'a Config,
     pub clock: &'a SharedClock,
     pub fingerprint: &'a str,
+}
+
+struct SnapshotStamp<'a> {
+    revision: &'a str,
+    dev: Option<i64>,
+    ino: Option<i64>,
+}
+
+async fn create_snapshot(
+    ctx: &StageContext<'_>,
+    session_id: &str,
+    row: &SessionRow,
+    kind: SnapshotKind,
+    stamp: SnapshotStamp<'_>,
+) -> Result<String, StageError> {
+    let snapshot_id = new_id("snap");
+    sqlx::query(
+        "INSERT INTO snapshots(id,session_id,kind,state,source_revision,fingerprint,generation,prefix_end,file_dev,file_ino,created_at) \
+         VALUES (?,?,?,'staging',?,?,?,0,?,?,?)",
+    )
+    .bind(&snapshot_id)
+    .bind(session_id)
+    .bind(if kind == SnapshotKind::Indexed { "indexed" } else { "source_read" })
+    .bind(stamp.revision)
+    .bind(ctx.fingerprint)
+    .bind(row.generation)
+    .bind(stamp.dev)
+    .bind(stamp.ino)
+    .bind(ctx.clock.now_ms())
+    .execute(&ctx.index.writer)
+    .await?;
+    Ok(snapshot_id)
 }
 
 pub async fn stage_snapshot(
@@ -605,7 +739,7 @@ pub(crate) async fn stage_with_hook(
         sources,
         cfg,
         clock,
-        fingerprint,
+        ..
     } = *ctx;
 
     let row = load_session(index, session_id)
@@ -614,6 +748,21 @@ pub(crate) async fn stage_with_hook(
     let harness = sources
         .kind(&row.source_id)
         .ok_or_else(|| StageError::Source("source is not configured".into()))?;
+    if harness == HarnessKind::OpenCode {
+        let path = sources
+            .opencode_database_path(&row.source_id)
+            .filter(|_| sources.is_enabled(&row.source_id))
+            .ok_or_else(|| StageError::Source("source is not enabled".into()))?;
+        let mut native = NativeObservation::open(index, &row, &path, &cancel).await?;
+        let staged = native
+            .stage(ctx, session_id, &row, kind, cancel.clone(), after_parse)
+            .await?;
+        if let Err(error) = native.verify(index, &row, &cancel).await {
+            let _ = delete_snapshot(index, &staged.snapshot_id).await;
+            return Err(error);
+        }
+        return Ok(staged);
+    }
     let opened = open_recorded(
         index,
         sources,
@@ -627,21 +776,17 @@ pub(crate) async fn stage_with_hook(
     if info.len > cfg.ingestion.max_source_file_bytes {
         return Err(StageError::Limit("max_source_file_bytes"));
     }
-    let snapshot_id = new_id("snap");
-    sqlx::query(
-        "INSERT INTO snapshots(id,session_id,kind,state,source_revision,fingerprint,generation,prefix_end,file_dev,file_ino,created_at) \
-         VALUES (?,?,?,'staging',?,?,?,0,?,?,?)",
+    let snapshot_id = create_snapshot(
+        ctx,
+        session_id,
+        &row,
+        kind,
+        SnapshotStamp {
+            revision: &revision4(&info),
+            dev: Some(info.dev as i64),
+            ino: Some(info.ino as i64),
+        },
     )
-    .bind(&snapshot_id)
-    .bind(session_id)
-    .bind(if kind == SnapshotKind::Indexed { "indexed" } else { "source_read" })
-    .bind(revision4(&info))
-    .bind(fingerprint)
-    .bind(row.generation)
-    .bind(info.dev as i64)
-    .bind(info.ino as i64)
-    .bind(clock.now_ms())
-    .execute(&index.writer)
     .await?;
 
     let res = run(
@@ -661,6 +806,246 @@ pub(crate) async fn stage_with_hook(
         let _ = delete_snapshot(index, &snapshot_id).await;
     }
     res
+}
+
+pub(crate) fn map_native_error(error: OpenCodeError) -> StageError {
+    match error {
+        OpenCodeError::Unsupported => StageError::Unsupported("OpenCode storage schema".into()),
+        OpenCodeError::Moved | OpenCodeError::Changed => StageError::SourceChanged,
+        OpenCodeError::UnsafeSource | OpenCodeError::Unavailable(_) => {
+            StageError::Source("OpenCode storage is unavailable".into())
+        }
+        OpenCodeError::Limit => StageError::Limit("max_source_file_bytes"),
+        OpenCodeError::Cancelled => StageError::Cancelled,
+    }
+}
+
+pub(crate) struct NativeObservation {
+    pub db: GuardedDb,
+    session: opencode::Session,
+    pub seq: i64,
+    deadline: Instant,
+}
+
+impl NativeObservation {
+    pub(crate) async fn open(
+        index: &Index,
+        row: &SessionRow,
+        path: &Path,
+        cancel: &AtomicBool,
+    ) -> Result<Self, StageError> {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let control = ScanControl {
+            cancel,
+            deadline: Some(deadline),
+        };
+        let mut db = opencode::open_session(index, &row.source_id, path, &row.native_id, &control)
+            .await
+            .map_err(map_native_error)?;
+        let (session, seq) =
+            opencode::observe_session(index, &row.source_id, &mut db, &row.native_id, &control)
+                .await
+                .map_err(map_native_error)?
+                .ok_or(StageError::SourceMissing)?;
+        Ok(Self {
+            db,
+            session,
+            seq,
+            deadline,
+        })
+    }
+
+    pub(crate) fn revision(&self) -> String {
+        format!("opencode_sqlite_v1:{}", self.seq)
+    }
+
+    pub(crate) async fn verify(
+        &mut self,
+        index: &Index,
+        row: &SessionRow,
+        cancel: &AtomicBool,
+    ) -> Result<(), StageError> {
+        let control = ScanControl {
+            cancel,
+            deadline: Some(self.deadline),
+        };
+        let observed = opencode::observe_session(
+            index,
+            &row.source_id,
+            &mut self.db,
+            &row.native_id,
+            &control,
+        )
+        .await
+        .map_err(map_native_error)?;
+        if observed
+            .as_ref()
+            .is_some_and(|(session, seq)| *seq == self.seq && *session == self.session)
+        {
+            Ok(())
+        } else {
+            Err(StageError::SourceChanged)
+        }
+    }
+
+    pub(crate) async fn project(
+        &mut self,
+        index: &Index,
+        limits: &IngestionConfig,
+        row: &SessionRow,
+        cancel: &AtomicBool,
+    ) -> Result<Vec<ProjectedMessage>, StageError> {
+        let limit_name = if limits.max_source_file_bytes <= MAX_NATIVE_PROJECTION_BYTES {
+            "max_source_file_bytes"
+        } else {
+            "max_native_projection_bytes"
+        };
+        let max = usize::try_from(
+            limits
+                .max_source_file_bytes
+                .min(MAX_NATIVE_PROJECTION_BYTES),
+        )
+        .map_err(|_| StageError::Limit(limit_name))?;
+        let control = ScanControl {
+            cancel,
+            deadline: Some(self.deadline),
+        };
+        let projection =
+            match opencode::project_session(&mut self.db, &row.native_id, max, &control).await {
+                Ok(projection) => projection,
+                Err(error) => {
+                    let error = match self.db.checkpoint() {
+                        Err(OpenCodeError::Moved) => OpenCodeError::Moved,
+                        _ => opencode::classify_lookup_error(error),
+                    };
+                    opencode::persist_movement(index, &row.source_id, &error)
+                        .await
+                        .map_err(map_native_error)?;
+                    if matches!(error, OpenCodeError::Limit) {
+                        return Err(StageError::Limit(limit_name));
+                    }
+                    return Err(map_native_error(error));
+                }
+            };
+        let max_record = limits.max_record_bytes;
+        if projection.iter().any(|message| {
+            !u64::try_from(message.source_bytes).is_ok_and(|bytes| bytes <= max_record)
+        }) {
+            return Err(StageError::Limit("max_record_bytes"));
+        }
+        Ok(projection)
+    }
+
+    pub(crate) async fn stage(
+        &mut self,
+        ctx: &StageContext<'_>,
+        session_id: &str,
+        row: &SessionRow,
+        kind: SnapshotKind,
+        cancel: Arc<AtomicBool>,
+        after_parse: Option<AfterParse>,
+    ) -> Result<Staged, StageError> {
+        let revision = self.revision();
+        let snapshot_id = create_snapshot(
+            ctx,
+            session_id,
+            row,
+            kind,
+            SnapshotStamp {
+                revision: &revision,
+                dev: None,
+                ino: None,
+            },
+        )
+        .await?;
+        let staged = async {
+            let projection = self
+                .project(ctx.index, &ctx.cfg.ingestion, row, &cancel)
+                .await?;
+            let manifest = native_manifest(&self.session, &projection)?;
+            let mut ins = Inserter::new(ctx.index, &snapshot_id);
+            let native_id = row.native_id.clone();
+            stream_into(&mut ins, cancel.clone(), move |sink| {
+                emit_native(&native_id, projection, sink)
+            })
+            .await?;
+            if let Some(hook) = after_parse {
+                hook();
+            }
+            self.verify(ctx.index, row, &cancel).await?;
+            finalize(
+                ins,
+                FinalObservation {
+                    generation: row.generation,
+                    kind,
+                    manifest,
+                    revision,
+                    pending_tail: None,
+                    follow_up: false,
+                    chunker_version: ctx.cfg.chunking.version,
+                },
+            )
+            .await
+        }
+        .await;
+        if staged.is_err() {
+            let _ = delete_snapshot(ctx.index, &snapshot_id).await;
+        }
+        staged
+    }
+}
+
+pub(crate) fn emit_native(
+    native_id: &str,
+    projection: Vec<ProjectedMessage>,
+    sink: &mut dyn RecordSink,
+) -> Result<(), StageError> {
+    opencode::emit_projection(native_id, projection, sink).map_err(|_| {
+        if sink.cancelled().load(Ordering::Relaxed) {
+            StageError::Cancelled
+        } else {
+            StageError::Source("cannot stage OpenCode records".into())
+        }
+    })
+}
+
+fn native_manifest(
+    session: &opencode::Session,
+    projection: &[ProjectedMessage],
+) -> Result<ParsedSessionManifest, StageError> {
+    let mut counts = ParseCounts::default();
+    for message in projection {
+        counts.records += 1;
+        counts.messages += u64::from(!message.blocks.is_empty());
+        counts.blocks_retained += u64::try_from(message.blocks.len())
+            .map_err(|_| StageError::Limit("max_source_file_bytes"))?;
+        counts.bytes_read = u64::try_from(message.source_bytes)
+            .ok()
+            .and_then(|bytes| counts.bytes_read.checked_add(bytes))
+            .ok_or(StageError::Limit("max_source_file_bytes"))?;
+    }
+    Ok(ParsedSessionManifest {
+        native_session_id: session.id.clone(),
+        native_title: session.title.clone(),
+        cwd: Some(session.directory.clone()),
+        remote: None,
+        session_kind: if session.parent_id.is_some() {
+            SessionKind::Subagent
+        } else {
+            SessionKind::Interactive
+        },
+        parent_native_session: session.parent_id.clone(),
+        lineage_verified: session.parent_id.is_some(),
+        started_at: None,
+        last_activity_at: Some(session.updated_at),
+        prefix_end: 0,
+        active_leaf_key: projection
+            .iter()
+            .rfind(|message| !message.blocks.is_empty())
+            .map(|message| message.id.clone()),
+        coverage: Coverage::Complete,
+        counts,
+    })
 }
 
 /// One staged snapshot being filled: the session row, its harness and the knobs of this pass.
@@ -698,54 +1083,16 @@ async fn run(pass: Pass<'_>, opened: crate::source::OpenedSource) -> Result<Stag
         include_subagents: sources.include_subagents(&row.source_id),
         blob_roots: sources.blob_roots(&row.source_id),
     };
-    let (tx, rx) = mpsc::channel(CHANNEL_EVENTS);
-    let bytes = Arc::new(Semaphore::new(CHANNEL_BYTES));
-    let handle = tokio::runtime::Handle::current();
-    let permit = CPU
-        .clone()
-        .acquire_owned()
-        .await
-        .map_err(|_| StageError::Cancelled)?;
-    if cancel.load(Ordering::Relaxed) {
-        return Err(StageError::Cancelled);
-    }
-    let parse_cancel = cancel.clone();
-    let observe_len = info.len;
-    let file = opened.file;
-    let join = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        let mut sink = ChanSink {
-            tx,
-            bytes,
-            handle,
-            cancel: parse_cancel,
-        };
-        let adapter = adapter_for(harness);
-        let mut reader = BufReader::with_capacity(256 << 10, file.take(observe_len));
-        adapter.parse_snapshot(&mut reader, &opts, &mut sink)
-    });
-    let mut ins = Inserter {
-        index,
-        snapshot_id,
-        superseded: HashSet::new(),
-        alias: HashMap::new(),
-        records: Vec::new(),
-        msg_keys: Vec::new(),
-        msg_roles: HashMap::new(),
-        group_of: HashMap::new(),
-        groups: Vec::new(),
-        ord: 0,
-        warn_seq: 0,
-    };
-    let consumed = consume(&mut ins, rx).await; // returns (dropping rx) on error, which aborts the producer
-    let parsed = join
-        .await
-        .map_err(|_| StageError::Source("parse task failed".into()))?;
-    consumed?;
-    let manifest = parsed.map_err(map_adapter)?;
-    if cancel.load(Ordering::Relaxed) {
-        return Err(StageError::Cancelled);
-    }
+    let source = sources
+        .session_source(&row.source_id)
+        .ok_or_else(|| StageError::Source("source is outside enabled roots".into()))?;
+    let mut ins = Inserter::new(index, snapshot_id);
+    let manifest = stream_into(&mut ins, cancel, move |sink| {
+        source
+            .stream(adapter_for(harness), opened, &opts, sink)
+            .map_err(map_adapter)
+    })
+    .await?;
     if manifest.coverage == Coverage::Unsupported {
         return Err(StageError::Unsupported(
             "source schema version is not supported".into(),
@@ -765,22 +1112,96 @@ async fn run(pass: Pass<'_>, opened: crate::source::OpenedSource) -> Result<Stag
             StageError::SourceMissing => StageError::SourceChanged,
             other => other,
         })?;
-    let a = &again.info;
-    if a.dev != info.dev || a.ino != info.ino || a.len < info.len {
-        return Err(StageError::SourceChanged);
-    }
-    let grew = a.len > info.len;
-    if !grew && a.mtime_ms != info.mtime_ms {
-        return Err(StageError::SourceChanged); // same size, new mtime: rewritten in place
-    }
-    if (grew || a.mtime_ms != info.mtime_ms) && !samples_verify(&again.file, &ins.records) {
-        return Err(StageError::SourceChanged);
-    }
+    let grew = match sources
+        .verify_observation(&row.source_id, &info, &again, &ins.records)
+        .ok_or_else(|| StageError::Source("source is outside enabled roots".into()))?
+    {
+        ObservationChange::Changed => return Err(StageError::SourceChanged),
+        ObservationChange::Grew => true,
+        ObservationChange::Unchanged => false,
+    };
     // Bytes after `prefix_end` are pending data (an incomplete record): retried only after the NEXT source
     // change, so they never request a follow-up by themselves. Growth observed while parsing does.
-    let pending_tail = manifest.prefix_end < info.len;
-    let follow_up = grew;
+    let pending_tail = (manifest.prefix_end < info.len).then(|| SourceLocator {
+        offset: manifest.prefix_end,
+        len: info.len - manifest.prefix_end,
+    });
+    let revision = format!("{}:{}", revision4(&info), manifest.prefix_end);
+    finalize(
+        ins,
+        FinalObservation {
+            generation: row.generation,
+            kind,
+            manifest,
+            revision,
+            pending_tail,
+            follow_up: grew,
+            chunker_version: cfg.chunking.version,
+        },
+    )
+    .await
+}
 
+async fn stream_into<T: Send + 'static>(
+    ins: &mut Inserter<'_>,
+    cancel: Arc<AtomicBool>,
+    stream: impl FnOnce(&mut dyn RecordSink) -> Result<T, StageError> + Send + 'static,
+) -> Result<T, StageError> {
+    let (tx, rx) = mpsc::channel(CHANNEL_EVENTS);
+    let permit = CPU
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| StageError::Cancelled)?;
+    if cancel.load(Ordering::Relaxed) {
+        return Err(StageError::Cancelled);
+    }
+    let mut sink = ChanSink {
+        tx,
+        bytes: Arc::new(Semaphore::new(CHANNEL_BYTES)),
+        handle: tokio::runtime::Handle::current(),
+        cancel: cancel.clone(),
+    };
+    let join = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        stream(&mut sink)
+    });
+    let consumed = consume(ins, rx).await;
+    let parsed = join
+        .await
+        .map_err(|_| StageError::Source("parse task failed".into()))?;
+    consumed?;
+    if cancel.load(Ordering::Relaxed) {
+        return Err(StageError::Cancelled);
+    }
+    parsed
+}
+
+struct FinalObservation {
+    generation: i64,
+    kind: SnapshotKind,
+    manifest: ParsedSessionManifest,
+    revision: String,
+    pending_tail: Option<SourceLocator>,
+    follow_up: bool,
+    chunker_version: u32,
+}
+
+async fn finalize(
+    mut ins: Inserter<'_>,
+    observation: FinalObservation,
+) -> Result<Staged, StageError> {
+    let FinalObservation {
+        generation,
+        kind,
+        manifest,
+        revision,
+        pending_tail,
+        follow_up,
+        chunker_version,
+    } = observation;
+    let index = ins.index;
+    let snapshot_id = ins.snapshot_id;
     let live: Vec<String> = ins
         .msg_keys
         .iter()
@@ -810,14 +1231,11 @@ async fn run(pass: Pass<'_>, opened: crate::source::OpenedSource) -> Result<Stag
         for w in &gwarns {
             ins.insert_warning(&mut tx, w).await?;
         }
-        if pending_tail {
+        if let Some(locator) = pending_tail {
             let w = ParseWarning {
                 code: "pending_trailing_bytes".into(),
                 record_key: None,
-                locator: Some(SourceLocator {
-                    offset: manifest.prefix_end,
-                    len: info.len - manifest.prefix_end,
-                }),
+                locator: Some(locator),
                 detail: "incomplete trailing record is pending until the source changes".into(),
             };
             ins.insert_warning(&mut tx, &w).await?;
@@ -837,7 +1255,6 @@ async fn run(pass: Pass<'_>, opened: crate::source::OpenedSource) -> Result<Stag
         || manifest.counts.malformed_records > 0
         || warning_count > 0;
     let coverage = if partial { "partial" } else { "complete" };
-    let revision = format!("{}:{}", revision4(&info), manifest.prefix_end);
     let meta = StageMeta {
         title: manifest.native_title.clone(),
         cwd: manifest.cwd.clone(),
@@ -849,7 +1266,7 @@ async fn run(pass: Pass<'_>, opened: crate::source::OpenedSource) -> Result<Stag
         last_activity_at: manifest.last_activity_at,
         counts: manifest.counts.clone(),
         warnings: warning_count,
-        chunker_version: cfg.chunking.version,
+        chunker_version,
         follow_up,
     };
     sqlx::query(
@@ -868,7 +1285,7 @@ async fn run(pass: Pass<'_>, opened: crate::source::OpenedSource) -> Result<Stag
     .await?;
     Ok(Staged {
         snapshot_id: snapshot_id.to_string(),
-        generation: row.generation,
+        generation,
         manifest,
         retained_bytes,
         warning_count,
