@@ -2459,7 +2459,7 @@ async fn paired_source_lookup(
     let contents = |pages: &[Value]| {
         pages
             .iter()
-            .flat_map(|p| items(p))
+            .flat_map(items)
             .flat_map(|item| item["blocks"].as_array().unwrap())
             .filter_map(|block| block["data"].as_str())
             .collect::<String>()
