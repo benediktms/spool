@@ -103,7 +103,7 @@ async fn punctuation_distinct_literal_matches() {
     let m = &matches_of(&r, "l1")[0];
     assert_eq!(m["matched_by"], json!(["literal"]));
     let (_, mr) = env.decode_match(m["match_ref"].as_str().unwrap()).await;
-    assert_eq!(mr.version, 2);
+    assert_eq!(mr.version, 3);
     assert_eq!(mr.records[0].key, "m0");
     assert_eq!(mr.records[0].digest, "00".repeat(16));
     assert!(m["preview"]["text"].as_str().unwrap().contains("foo.bar()"));
@@ -1284,7 +1284,7 @@ async fn match_refs_round_trip_with_one_lease() {
             );
             lease_ids.insert(h.lease.clone());
             manifests.insert(mr.manifest.clone());
-            assert_eq!(mr.version, 2);
+            assert_eq!(mr.version, 3);
             assert_eq!(mr.records[0].key, "m0");
             assert_eq!(mr.records[0].digest, "00".repeat(16));
             assert!(env.leases.covers(&h.lease, &mr.manifest).await.unwrap());
@@ -2235,7 +2235,7 @@ async fn merged_evidence_and_semantic_excerpt_are_bounded() {
         .await;
     let m = &matches_of(&r, sid)[0];
     let (_, reference) = env.decode_match(m["match_ref"].as_str().unwrap()).await;
-    assert_eq!(reference.version, 2);
+    assert_eq!(reference.version, 3);
     assert!(!reference.records.is_empty());
     assert!(tool_result_bytes(&r, false) <= 65_536);
     let text = format!(
@@ -3316,4 +3316,33 @@ async fn realistic_lease_status_and_cause_survive_competing_fix() {
     let (_, reference) = env.decode_match(m["match_ref"].as_str().unwrap()).await;
     assert!(reference.records.iter().any(|r| r.key == "status"));
     assert!(reference.records.iter().any(|r| r.key == "cause"));
+}
+
+#[tokio::test]
+async fn excerpt_anchors_do_not_depend_on_preview_target() {
+    let env = Env::new().await;
+    let text = format!(
+        "alpha {}\n\nalpha decisive qualification",
+        "background ".repeat(160)
+    );
+    env.simple("anchor_case", "omp", "/w", &[(&text, Some(T0))])
+        .await;
+    let mut found = Vec::new();
+    for target in [256, 512, 1200, 8192] {
+        let result = env
+            .ok(json!({"query":"alpha", "mode":"lexical", "preview_target_bytes":target}))
+            .await;
+        let token = matches_of(&result, "anchor_case")[0]["match_ref"]
+            .as_str()
+            .unwrap();
+        let (_, reference) = env.decode_match(token).await;
+        found.push((reference.records, reference.excerpt));
+    }
+    assert!(found.iter().all(|item| *item == found[0]));
+    assert!(
+        found[0]
+            .1
+            .as_ref()
+            .is_some_and(|anchors| !anchors.is_empty())
+    );
 }

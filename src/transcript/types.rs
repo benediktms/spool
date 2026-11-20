@@ -78,6 +78,9 @@ pub enum SelectionInput {
     Match {
         match_ref: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[schemars(range(min = 256, max = 8192))]
+        excerpt_target_bytes: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         #[schemars(range(min = 0, max = 20))]
         before: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -194,13 +197,15 @@ pub struct ContextCount {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SelectionOut {
     pub kind: SelKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excerpt: Option<ExcerptOut>,
     /// Resolved persisted path. Null when the selection has no messages.
     #[schemars(required, schema_with = "nullable_string")]
     pub branch_ref: Option<String>,
-    /// First inclusive conversational message of the selected window.
+    /// First inclusive message. In a non-verbose excerpt, null can refer to the first anchor.
     #[schemars(required, schema_with = "nullable_string")]
     pub from_message_ref: Option<String>,
-    /// Last inclusive conversational message of the selected window.
+    /// Last inclusive message. In a non-verbose excerpt, null can refer to the last anchor.
     #[schemars(required, schema_with = "nullable_string")]
     pub through_message_ref: Option<String>,
     /// Messages the search match / message reference anchors to (range: both endpoints).
@@ -213,6 +218,12 @@ pub struct SelectionOut {
     pub before: Option<ContextCount>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after: Option<ContextCount>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ExcerptOut {
+    pub target_bytes: u32,
+    pub clipped: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

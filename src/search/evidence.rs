@@ -2,12 +2,14 @@ use super::{
     GMatch, outside_interval, query,
     retrieve::{Filters, SpanRow},
 };
+use crate::transcript::refs::{ExcerptAnchor, ExcerptKind, SpanRef};
 use std::collections::HashMap;
 
 pub(super) struct Selection {
     pub(super) excerpt: String,
     pub(super) truncated: bool,
     pub(super) context_outside_time_filter: bool,
+    pub(super) anchors: Vec<ExcerptAnchor>,
 }
 
 pub(super) fn select(
@@ -50,20 +52,33 @@ pub(super) fn select(
                         while !body.is_char_boundary(sample_end) {
                             sample_end += 1;
                         }
-                        let focus = query::support(&body[sample..sample_end], terms)
-                            .iter()
-                            .map(|(_, at)| sample + at)
-                            .min()
-                            .unwrap_or(sample);
-                        let (excerpt, clipped) = passage(body, start, stop, focus, target);
+                        let focus_range = query::support_ranges(&body[sample..sample_end], terms)
+                            .into_iter()
+                            .map(|(_, a, b)| (sample + a, sample + b))
+                            .min_by_key(|(a, _)| *a);
+                        let focus = focus_range.map_or(sample, |(start, _)| start);
+                        let (excerpt, clipped, offset, excerpt_end) =
+                            passage(body, start, stop, focus, target);
                         let score = query::support(&excerpt, terms).len();
-                        if let Some(offset) = body[start..stop]
-                            .match_indices(&excerpt)
-                            .map(|(at, _)| start + at)
-                            .find(|at| *at <= focus && focus < *at + excerpt.len())
-                        {
-                            candidates.push((score, *id, offset, excerpt, clipped, span));
-                        }
+                        let focus_range = focus_range.filter(|(a, b)| {
+                            offset <= *a
+                                && *b <= excerpt_end
+                                && body[..*a]
+                                    .chars()
+                                    .next_back()
+                                    .is_none_or(|c| !query::is_tok(c))
+                                && body[*b..].chars().next().is_none_or(|c| !query::is_tok(c))
+                        });
+                        candidates.push((
+                            score,
+                            *id,
+                            offset,
+                            excerpt,
+                            clipped,
+                            span,
+                            pos,
+                            focus_range,
+                        ));
                         sample = sample_end;
                     }
                 }
@@ -78,6 +93,7 @@ pub(super) fn select(
             excerpt: String::new(),
             truncated: false,
             context_outside_time_filter: false,
+            anchors: Vec::new(),
         });
     };
     let mut chosen = vec![first];
@@ -108,6 +124,39 @@ pub(super) fn select(
             candidate.2,
         )
     });
+    let lexical_anchors: Vec<_> = chosen
+        .iter()
+        .filter_map(|candidate| {
+            let span = candidate.5;
+            let base = usize::try_from(span.start).ok()?;
+            let to_source = |offset: usize| {
+                u32::try_from(base.checked_add(offset.checked_sub(candidate.6)?)?).ok()
+            };
+            let start = to_source(candidate.2)?;
+            let end = to_source(candidate.2.checked_add(candidate.3.len())?)?;
+            let focus = candidate
+                .7
+                .and_then(|(a, b)| Some((to_source(a)?, to_source(b)?)));
+            Some(ExcerptAnchor {
+                span: SpanRef {
+                    r: span.record_key.clone(),
+                    b: u32::try_from(span.block_index).ok()?,
+                    s: start,
+                    e: end,
+                },
+                focus,
+                kind: ExcerptKind::Lexical,
+                clipped: candidate.4,
+            })
+        })
+        .collect();
+    let anchors = if lexical_anchors.len() != chosen.len() {
+        Vec::new()
+    } else if semantic || lexical_anchors.iter().any(|a| a.focus.is_none()) {
+        semantic_regions(m, all_spans, bodies)
+    } else {
+        lexical_anchors
+    };
     Some(Selection {
         excerpt: chosen
             .iter()
@@ -118,20 +167,112 @@ pub(super) fn select(
         context_outside_time_filter: chosen
             .iter()
             .any(|candidate| outside_interval(filters, candidate.5.msg_ts)),
+        anchors,
     })
 }
 
-pub(super) fn literal(body: &str, focus: usize, target: usize) -> (String, bool) {
+fn semantic_regions(
+    m: &GMatch,
+    spans: &HashMap<i64, Vec<SpanRow>>,
+    bodies: &HashMap<i64, String>,
+) -> Vec<ExcerptAnchor> {
+    let Some(body) = bodies.get(&m.primary) else {
+        return Vec::new();
+    };
+    let Some(spans) = spans.get(&m.primary) else {
+        return Vec::new();
+    };
+    let visible = query::visible_ranges(body);
+    let mut pos = 0usize;
+    let mut out = Vec::new();
+    let mut total = 0usize;
+    for span in spans {
+        let rest = body.get(pos..).unwrap_or("");
+        pos += ["USER: ", "ASSISTANT: "]
+            .iter()
+            .find(|label| rest.starts_with(**label))
+            .map_or(0, |label| label.len());
+        let Some(width) = span
+            .end
+            .checked_sub(span.start)
+            .and_then(|n| usize::try_from(n).ok())
+        else {
+            return Vec::new();
+        };
+        let Some(end) = pos.checked_add(width).filter(|n| *n <= body.len()) else {
+            return Vec::new();
+        };
+        if !span.is_context {
+            for r in &visible {
+                let (start, stop) = (pos.max(r.start), end.min(r.end));
+                if start >= stop {
+                    continue;
+                }
+                let Some((b, base)) = u32::try_from(span.block_index)
+                    .ok()
+                    .zip(usize::try_from(span.start).ok())
+                else {
+                    return Vec::new();
+                };
+                let Some((s, e)) = base
+                    .checked_add(start - pos)
+                    .and_then(|n| u32::try_from(n).ok())
+                    .zip(
+                        base.checked_add(stop - pos)
+                            .and_then(|n| u32::try_from(n).ok()),
+                    )
+                else {
+                    return Vec::new();
+                };
+                total = total.saturating_add(stop - start);
+                out.push(ExcerptAnchor {
+                    span: SpanRef {
+                        r: span.record_key.clone(),
+                        b,
+                        s,
+                        e,
+                    },
+                    focus: None,
+                    kind: ExcerptKind::Semantic,
+                    clipped: false,
+                });
+            }
+        }
+        pos = end.saturating_add(2);
+    }
+    if out.len() > 3 || total > 8192 {
+        Vec::new()
+    } else {
+        out
+    }
+}
+
+pub(super) fn literal_range(
+    body: &str,
+    focus: usize,
+    target: usize,
+) -> (String, bool, usize, usize) {
     let Some(range) = query::visible_ranges(body)
         .into_iter()
         .find(|r| r.start <= focus && focus < r.end)
     else {
-        return (String::new(), false);
+        return (String::new(), false, 0, 0);
     };
     passage(body, range.start, range.end, focus, target)
 }
 
-fn passage(body: &str, lower: usize, upper: usize, focus: usize, target: usize) -> (String, bool) {
+pub(super) fn literal(body: &str, focus: usize, target: usize) -> (String, bool) {
+    let (text, clipped, _, _) = literal_range(body, focus, target);
+    (text, clipped)
+}
+
+fn passage(
+    body: &str,
+    lower: usize,
+    upper: usize,
+    focus: usize,
+    target: usize,
+) -> (String, bool, usize, usize) {
     let before = &body[lower..focus];
     let after = &body[focus..upper];
     let line_start = before.rfind('\n').map_or(lower, |i| lower + i + 1);
@@ -222,7 +363,7 @@ fn passage(body: &str, lower: usize, upper: usize, focus: usize, target: usize) 
             end = focus + offset;
         }
     }
-    (body[start..end].to_string(), clipped)
+    (body[start..end].to_string(), clipped, start, end)
 }
 
 fn list_end(body: &str, mut end: usize, upper: usize) -> usize {
@@ -245,6 +386,116 @@ mod tests {
     use super::*;
 
     #[test]
+    fn semantic_region_must_fit_without_a_prefix_fallback() {
+        use std::collections::BTreeSet;
+        let text = "x".repeat(8193);
+        let span = SpanRow {
+            record_key: "r".into(),
+            block_index: 2,
+            start: 0,
+            end: text.len() as i64,
+            is_context: false,
+            msg_ts: None,
+        };
+        let matched = GMatch {
+            primary: 1,
+            rowids: vec![1],
+            ordinals: vec![0],
+            spans: vec![(0, 0, span.clone())],
+            matched_by: BTreeSet::from(["semantic"]),
+            debug: None,
+        };
+        let spans = HashMap::from([(1, vec![span])]);
+        assert!(semantic_regions(&matched, &spans, &HashMap::from([(1, text)])).is_empty());
+        let text = "short semantic region".to_string();
+        let mut span = spans[&1][0].clone();
+        span.end = text.len() as i64;
+        let regions = semantic_regions(
+            &matched,
+            &HashMap::from([(1, vec![span])]),
+            &HashMap::from([(1, text.clone())]),
+        );
+        assert_eq!(regions.len(), 1);
+        assert_eq!(
+            (regions[0].span.b, regions[0].span.s, regions[0].span.e),
+            (2, 0, text.len() as u32)
+        );
+        assert_eq!(regions[0].kind, ExcerptKind::Semantic);
+    }
+
+    #[test]
+    fn semantic_regions_preserve_offsets_around_injected_wrappers() {
+        use std::collections::BTreeSet;
+        let text = "<environment_context>hidden needle</environment_context>é visible answer";
+        let span = SpanRow {
+            record_key: "r".into(),
+            block_index: 3,
+            start: 0,
+            end: text.len() as i64,
+            is_context: false,
+            msg_ts: None,
+        };
+        let matched = GMatch {
+            primary: 1,
+            rowids: vec![1],
+            ordinals: vec![0],
+            spans: vec![(0, 0, span.clone())],
+            matched_by: BTreeSet::from(["semantic"]),
+            debug: None,
+        };
+        let regions = semantic_regions(
+            &matched,
+            &HashMap::from([(1, vec![span])]),
+            &HashMap::from([(1, text.to_string())]),
+        );
+        assert_eq!(regions.len(), 1);
+        let r = &regions[0].span;
+        assert_eq!(r.b, 3);
+        assert_eq!(&text[r.s as usize..r.e as usize], "é visible answer");
+    }
+
+    #[test]
+    fn repeated_passages_keep_the_selected_original_offsets() {
+        use std::collections::BTreeSet;
+        let text = format!(
+            "needle repeated paragraph\n\n{}\n\nneedle repeated paragraph",
+            "filler ".repeat(150)
+        );
+        let span = SpanRow {
+            record_key: "r".into(),
+            block_index: 4,
+            start: 0,
+            end: text.len() as i64,
+            is_context: false,
+            msg_ts: None,
+        };
+        let matched = GMatch {
+            primary: 1,
+            rowids: vec![1],
+            ordinals: vec![0],
+            spans: vec![(0, 0, span.clone())],
+            matched_by: BTreeSet::from(["lexical"]),
+            debug: None,
+        };
+        let selection = select(
+            &matched,
+            &query::support_units("needle"),
+            &Filters::default(),
+            &HashMap::from([(1, vec![span])]),
+            &HashMap::from([(1, text.clone())]),
+            256,
+        )
+        .unwrap();
+        assert!(selection.anchors.len() >= 2);
+        for anchor in selection.anchors {
+            assert_eq!(anchor.span.b, 4);
+            let (start, end) = anchor.focus.unwrap();
+            assert_eq!(&text[start as usize..end as usize], "needle");
+            assert!(anchor.span.s <= start && end <= anchor.span.e);
+        }
+    }
+
+    #[test]
     fn selection_scores_rendered_passages_and_finds_later_repeated_terms() {
         use std::collections::BTreeSet;
 
@@ -255,6 +506,7 @@ mod tests {
         );
         let span = SpanRow {
             record_key: "record".into(),
+            block_index: 0,
             start: 0,
             end: text.len() as i64,
             is_context: false,
@@ -297,6 +549,7 @@ mod tests {
         );
         let span = SpanRow {
             record_key: "record".into(),
+            block_index: 0,
             start: 0,
             end: text.len() as i64,
             is_context: false,

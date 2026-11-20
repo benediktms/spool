@@ -1,7 +1,7 @@
 //! Pure query-side helpers: safe FTS5 query construction and excerpt windows.
 
 /// Characters the FTS5 `unicode61` tokenizer treats as token characters (letters, digits, combining marks).
-fn is_tok(c: char) -> bool {
+pub(crate) fn is_tok(c: char) -> bool {
     c.is_alphanumeric() || ('\u{300}'..='\u{36F}').contains(&c)
 }
 
@@ -87,7 +87,7 @@ pub(super) fn support_units(text: &str) -> Vec<Vec<String>> {
     units
 }
 
-pub(super) fn support(text: &str, units: &[Vec<String>]) -> Vec<(usize, usize)> {
+pub(super) fn support_ranges(text: &str, units: &[Vec<String>]) -> Vec<(usize, usize, usize)> {
     let mut words = Vec::new();
     let mut start = None;
     for (offset, c) in text
@@ -97,7 +97,7 @@ pub(super) fn support(text: &str, units: &[Vec<String>]) -> Vec<(usize, usize)> 
         if is_tok(c) {
             start.get_or_insert(offset);
         } else if let Some(begin) = start.take() {
-            words.push((begin, text[begin..offset].to_lowercase()));
+            words.push((begin, offset, text[begin..offset].to_lowercase()));
         }
     }
     units
@@ -106,9 +106,16 @@ pub(super) fn support(text: &str, units: &[Vec<String>]) -> Vec<(usize, usize)> 
         .filter_map(|(index, unit)| {
             words
                 .windows(unit.len())
-                .find(|window| window.iter().map(|(_, word)| word).eq(unit.iter()))
-                .map(|window| (index, window[0].0))
+                .find(|window| window.iter().map(|(_, _, word)| word).eq(unit.iter()))
+                .map(|window| (index, window[0].0, window[window.len() - 1].1))
         })
+        .collect()
+}
+
+pub(super) fn support(text: &str, units: &[Vec<String>]) -> Vec<(usize, usize)> {
+    support_ranges(text, units)
+        .into_iter()
+        .map(|(i, start, _)| (i, start))
         .collect()
 }
 

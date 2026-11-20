@@ -124,6 +124,7 @@ enum Dec {
         anchor: Anchor,
         before: u32,
         after: u32,
+        excerpt_target_bytes: Option<u32>,
         branch: Option<BranchRef>,
     },
     Message {
@@ -439,7 +440,46 @@ impl ReadService {
             .selection
             .clone()
             .unwrap_or(SelectionInput::Session { branch_ref: None });
-        let (view, policy) = self.view_policy(&input)?;
+        if matches!(
+            &selection,
+            SelectionInput::Match {
+                excerpt_target_bytes: Some(_),
+                ..
+            }
+        ) && input.view.is_some_and(|v| v != View::Conversation)
+        {
+            return Err(invalid("excerpt reads require the conversation view"));
+        }
+        let (view, mut policy) = self.view_policy(&input)?;
+        if let SelectionInput::Match {
+            excerpt_target_bytes: Some(target),
+            before,
+            after,
+            ..
+        } = &selection
+        {
+            if !(256..=8192).contains(target)
+                || before.unwrap_or(0) != 0
+                || after.unwrap_or(0) != 0
+                || view != View::Conversation
+            {
+                return Err(invalid(
+                    "excerpt requires a target from 256 to 8192, conversation view, and zero context",
+                ));
+            }
+            if matches!(
+                input.source_policy,
+                Some(SourcePolicy::PreferSource | SourcePolicy::IndexedOnly)
+            ) {
+                return Err(app_err(
+                    "SOURCE_POLICY_CONFLICT",
+                    "excerpt reads require source verification",
+                    false,
+                    "change_request",
+                ));
+            }
+            policy = SourcePolicy::RequireSource;
+        }
         let row = self.check_access(&session_id).await?;
         let key = self.keys.current();
         let dec = self.decode_selection(&key, &selection).await?;
@@ -575,11 +615,12 @@ impl ReadService {
                 m,
                 before,
                 after,
+                excerpt_target_bytes,
                 branch,
                 ..
             } => {
                 let recs: Vec<String> = m.records.iter().map(|r| r.key.clone()).collect();
-                resolve_window(
+                let mut resolved = resolve_window(
                     snap,
                     SelKind::Match,
                     WindowInput {
@@ -588,7 +629,112 @@ impl ReadService {
                         after: *after,
                         branch_leaf: branch.as_ref().map(|b| b.leaf.as_str()),
                     },
-                )
+                )?;
+                if let Some(target) = excerpt_target_bytes {
+                    let anchors = m
+                        .excerpt
+                        .as_ref()
+                        .filter(|a| m.version == 3 && !a.is_empty() && a.len() <= 3)
+                        .ok_or_else(|| {
+                            SelFail::App(app_err(
+                                "VIEW_NOT_SUPPORTED",
+                                "this match has no usable excerpt anchors",
+                                false,
+                                "read_full_match",
+                            ))
+                        })?;
+                    let clauses = vec!["(record_key = ? AND idx = ?)"; anchors.len()].join(" OR ");
+                    let sql = format!(
+                        "SELECT record_key, idx, text FROM blocks WHERE snapshot_id = ? AND ({clauses})"
+                    );
+                    let mut query = sqlx::query(sqlx::AssertSqlSafe(sql)).bind(&snap.id);
+                    for a in anchors {
+                        query = query.bind(&a.span.r).bind(i64::from(a.span.b));
+                    }
+                    let rows = query
+                        .fetch_all(&self.index.reader)
+                        .await
+                        .map_err(|e| SelFail::App(storage_err(e)))?;
+                    let mut total = 0usize;
+                    let mut ranges = Vec::new();
+                    let mut digests = Vec::new();
+                    let mut clipped = anchors.iter().any(|a| a.clipped);
+                    let share = (*target as usize).div_ceil(anchors.len());
+                    for a in anchors {
+                        let span = &a.span;
+                        if !recs.contains(&span.r)
+                            || span.s >= span.e
+                            || match a.kind {
+                                super::refs::ExcerptKind::Semantic => a.focus.is_some(),
+                                _ => !a.focus.is_some_and(|(start, end)| {
+                                    span.s <= start && start < end && end <= span.e
+                                }),
+                            }
+                        {
+                            return Err(SelFail::App(app_err(
+                                "VIEW_NOT_SUPPORTED",
+                                "this match has no usable excerpt anchors",
+                                false,
+                                "read_full_match",
+                            )));
+                        }
+                        let row = rows
+                            .iter()
+                            .find(|row| {
+                                row.get::<String, _>("record_key") == span.r
+                                    && row.get::<i64, _>("idx") == i64::from(span.b)
+                            })
+                            .ok_or_else(|| {
+                                SelFail::App(app_err(
+                                    "STALE_REFERENCE",
+                                    "the excerpt block is missing",
+                                    false,
+                                    "re_search",
+                                ))
+                            })?;
+                        let text: String = row.get("text");
+                        let range = trim_excerpt_range(&text, a, share).ok_or_else(|| {
+                            SelFail::App(app_err(
+                                "VIEW_NOT_SUPPORTED",
+                                "this match has no usable excerpt range",
+                                false,
+                                "read_full_match",
+                            ))
+                        })?;
+                        clipped |= range.s != span.s || range.e != span.e;
+                        if ranges.iter().any(|previous: &super::refs::SpanRef| {
+                            previous.r == range.r
+                                && previous.b == range.b
+                                && previous.s < range.e
+                                && range.s < previous.e
+                        }) {
+                            return Err(SelFail::App(app_err(
+                                "VIEW_NOT_SUPPORTED",
+                                "excerpt ranges overlap",
+                                false,
+                                "read_full_match",
+                            )));
+                        }
+                        total = total.saturating_add((range.e - range.s) as usize);
+                        digests.push(super::refs::short_digest(text.as_bytes()));
+                        ranges.push(range);
+                    }
+                    if total > 8192 {
+                        return Err(SelFail::App(app_err(
+                            "VIEW_NOT_SUPPORTED",
+                            "the excerpt exceeds its bound",
+                            false,
+                            "read_full_match",
+                        )));
+                    }
+                    resolved.excerpt = Some(super::selection::ExcerptSelection {
+                        target_bytes: *target,
+                        clipped,
+                        ranges,
+                        digests,
+                    });
+                }
+                Ok(resolved)
             }
             Dec::Message {
                 m,
@@ -702,6 +848,9 @@ impl ReadService {
             })?;
         let sel: CursorSel =
             serde_json::from_slice(&stored).map_err(|_| invalid("cursor is not valid"))?;
+        if (c.format == 4) != sel.s.excerpt.is_some() {
+            return Err(invalid("cursor is not valid"));
+        }
         let anchor = Anchor {
             lease: c.lease.clone(),
             manifest: sel.m.clone(),
@@ -830,15 +979,7 @@ impl ReadService {
         );
         let sel_ref = match sel_ref {
             Some(id) => SelRef::Stored(id),
-            None => SelRef::Pending {
-                leases: &self.leases,
-                stored: CursorSel {
-                    m: anchor.manifest.clone(),
-                    v: view,
-                    p: policy,
-                    s: sel.clone(),
-                },
-            },
+            None => SelRef::Pending(&self.leases),
         };
         let env = PageEnv {
             session: SessionInfo {
@@ -882,6 +1023,110 @@ fn limits(i: &ReadSessionInput) -> Result<(usize, usize), AppError> {
     Ok((mb as usize, mi as usize))
 }
 
+fn trim_excerpt_range(
+    text: &str,
+    anchor: &super::refs::ExcerptAnchor,
+    target: usize,
+) -> Option<super::refs::SpanRef> {
+    let span = &anchor.span;
+    let (lower, upper) = (usize::try_from(span.s).ok()?, usize::try_from(span.e).ok()?);
+    if lower >= upper
+        || upper > text.len()
+        || !text.is_char_boundary(lower)
+        || !text.is_char_boundary(upper)
+    {
+        return None;
+    }
+    let Some((focus_start, focus_end)) = anchor.focus else {
+        return Some(span.clone());
+    };
+    let (focus_start, focus_end) = (
+        usize::try_from(focus_start).ok()?,
+        usize::try_from(focus_end).ok()?,
+    );
+    if focus_start < lower
+        || focus_end > upper
+        || focus_start >= focus_end
+        || !text.is_char_boundary(focus_start)
+        || !text.is_char_boundary(focus_end)
+    {
+        return None;
+    }
+    if matches!(anchor.kind, super::refs::ExcerptKind::Lexical)
+        && (text[..focus_start]
+            .chars()
+            .next_back()
+            .is_some_and(crate::search::lexical_token_char)
+            || text[focus_end..]
+                .chars()
+                .next()
+                .is_some_and(crate::search::lexical_token_char))
+    {
+        return None;
+    }
+    if upper - lower <= target {
+        return Some(span.clone());
+    }
+    let before = &text[lower..focus_start];
+    let after = &text[focus_end..upper];
+    let line_start = before.rfind('\n').map_or(lower, |i| lower + i + 1);
+    let line_end = after.find('\n').map_or(upper, |i| focus_end + i);
+    let line = text[line_start..line_end].trim_start();
+    let list = line.starts_with("- ") || line.starts_with("* ") || line.starts_with("+ ");
+    let mut start = if list {
+        line_start
+    } else {
+        before.rfind("\n\n").map_or(lower, |i| lower + i + 2)
+    };
+    let mut end = if list {
+        line_end
+    } else {
+        after.find("\n\n").map_or(upper, |i| focus_end + i)
+    };
+    if list {
+        while end < upper {
+            let next = &text[end + 1..upper];
+            if !next.starts_with(' ') && !next.starts_with('\t') {
+                break;
+            }
+            let next_end = next.find('\n').map_or(upper, |i| end + 1 + i);
+            if text[end + 1..next_end].trim().is_empty() {
+                break;
+            }
+            end = next_end;
+        }
+    }
+    while end - start < target && end < upper {
+        let remaining = text[end..upper].trim_start_matches('\n');
+        if remaining.is_empty() {
+            break;
+        }
+        let next_start = upper - remaining.len();
+        let next_end = remaining.find("\n\n").map_or(upper, |i| next_start + i);
+        if next_end - start > target {
+            break;
+        }
+        end = next_end;
+    }
+    while end - start < target && start > lower {
+        let preceding = text[lower..start].trim_end_matches('\n');
+        if preceding.is_empty() {
+            break;
+        }
+        let prev_start = preceding.rfind("\n\n").map_or(lower, |i| lower + i + 2);
+        if end - prev_start > target {
+            break;
+        }
+        start = prev_start;
+    }
+    Some(super::refs::SpanRef {
+        r: span.r.clone(),
+        b: span.b,
+        s: u32::try_from(start).ok()?,
+        e: u32::try_from(end).ok()?,
+    })
+}
+
 fn ctx_count(v: Option<u32>) -> Result<u32, AppError> {
     let v = v.unwrap_or(CONTEXT_DEFAULT);
     if v > CONTEXT_MAX {
@@ -909,7 +1154,7 @@ impl ReadService {
                 "re_search",
             )
         })?;
-        if m.version != 2 || m.records.is_empty() {
+        if !matches!(m.version, 2 | 3) || m.records.is_empty() {
             return Err(app_err(
                 "STALE_REFERENCE",
                 "the match reference uses an obsolete payload",
@@ -936,14 +1181,24 @@ impl ReadService {
                 match_ref,
                 before,
                 after,
+                excerpt_target_bytes,
                 branch_ref,
             } => {
                 let (m, anchor) = self.load_match(key, match_ref).await?;
                 Dec::Match {
                     m,
                     anchor,
-                    before: ctx_count(*before)?,
-                    after: ctx_count(*after)?,
+                    before: if excerpt_target_bytes.is_some() {
+                        before.unwrap_or(0)
+                    } else {
+                        ctx_count(*before)?
+                    },
+                    after: if excerpt_target_bytes.is_some() {
+                        after.unwrap_or(0)
+                    } else {
+                        ctx_count(*after)?
+                    },
+                    excerpt_target_bytes: *excerpt_target_bytes,
                     branch: branch(branch_ref)?,
                 }
             }

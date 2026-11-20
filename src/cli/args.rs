@@ -213,6 +213,9 @@ pub struct ReadArgs {
     pub session_id: Option<String>,
     #[arg(long)]
     pub match_ref: Option<String>,
+    /// Return selected match passages with this soft byte target (256-8192).
+    #[arg(long)]
+    pub excerpt_target_bytes: Option<u32>,
     #[arg(long)]
     pub message_ref: Option<String>,
     #[arg(long)]

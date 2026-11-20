@@ -436,6 +436,7 @@ pub async fn load_chunks(
 #[derive(Debug, Clone)]
 pub struct SpanRow {
     pub record_key: String,
+    pub block_index: i64,
     pub start: i64,
     pub end: i64,
     pub is_context: bool,
@@ -465,6 +466,7 @@ pub async fn load_spans(
         {
             out.entry(r.get(0)).or_default().push(SpanRow {
                 record_key: r.get(1),
+                block_index: r.get(2),
                 start: r.get(3),
                 end: r.get(4),
                 is_context: r.get::<i64, _>(5) != 0,

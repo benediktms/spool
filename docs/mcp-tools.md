@@ -81,6 +81,15 @@ CLI equivalent: `spool search "query" [--mode M] [--source ID] [--since 7d] [--u
 
 ## `read_session`
 
+A match read can request selected verified passages with `excerpt_target_bytes`:
+
+```json
+{"session_id":"ss_example","selection":{"kind":"match","match_ref":"opaque-reference","excerpt_target_bytes":512},"max_bytes":8192}
+```
+
+The target is soft and the total returned source text is at most 8,192 bytes. The excerpt uses source verification and zero surrounding context. Read the same match without the field to expand it. The CLI equivalent is `spool read SESSION --match-ref REF --excerpt-target-bytes 512`.
+
+
 Bounded, provenance-preserving transcript reader (no model call, no embedding work, never writes to
 sources). Normative contract: `docs/read-session-contract.md`; machine-readable shapes:
 `schemas/read_session/{input,output,error}.schema.json` (generated from the Rust types in

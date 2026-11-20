@@ -58,11 +58,13 @@ pub fn search_request(a: &SearchArgs, now_ms: i64, tz: Tz) -> Built<Value> {
 pub fn read_request(a: &ReadArgs) -> Built<Value> {
     bounded("max-bytes", a.max_bytes, 4096, 262_144)?;
     bounded("max-items", a.max_items, 1, 200)?;
+    bounded("excerpt-target-bytes", a.excerpt_target_bytes, 256, 8192)?;
     let mut m = Map::new();
     if let Some(cursor) = &a.cursor {
         let others = [
             ("session id", a.session_id.is_some()),
             ("--match-ref", a.match_ref.is_some()),
+            ("--excerpt-target-bytes", a.excerpt_target_bytes.is_some()),
             ("--message-ref", a.message_ref.is_some()),
             ("--item-ref", a.item_ref.is_some()),
             ("--from-ref", a.from_ref.is_some()),
@@ -113,6 +115,25 @@ pub fn read_request(a: &ReadArgs) -> Built<Value> {
             chosen.join(" and ")
         ));
     }
+    if a.excerpt_target_bytes.is_some() {
+        if a.match_ref.is_none()
+            || a.with_tools
+            || a.raw
+            || a.before.unwrap_or(0) != 0
+            || a.after.unwrap_or(0) != 0
+        {
+            return Err(
+                "--excerpt-target-bytes requires --match-ref, conversation view, and zero context"
+                    .into(),
+            );
+        }
+        if matches!(
+            a.source_policy,
+            Some(super::args::SourcePolicy::PreferSource | super::args::SourcePolicy::IndexedOnly)
+        ) {
+            return Err("--excerpt-target-bytes requires source verification".into());
+        }
+    }
     let has_context = a.match_ref.is_some() || a.message_ref.is_some();
     if (a.before.is_some() || a.after.is_some()) && !has_context {
         return Err("--before/--after apply only to --match-ref or --message-ref".into());
@@ -127,6 +148,7 @@ pub fn read_request(a: &ReadArgs) -> Built<Value> {
     if let Some(r) = &a.match_ref {
         sel.insert("kind".into(), "match".into());
         sel.insert("match_ref".into(), r.clone().into());
+        put(&mut sel, "excerpt_target_bytes", a.excerpt_target_bytes);
     } else if let Some(r) = &a.message_ref {
         sel.insert("kind".into(), "message".into());
         sel.insert("message_ref".into(), r.clone().into());

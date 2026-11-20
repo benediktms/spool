@@ -210,3 +210,7 @@ For these six remaining first-relevant gaps, the assessed decisive record was ou
 captured message windows. The captured reads exhausted their selections; the assessment did
 not identify a decisive answer omitted from a returned selected message. This observation does
 not establish the state of the original source files.
+
+## Compact lookup checks
+
+`compact_lookup_paired_gate` checks one synthetic correction that requires a full expansion. It is a narrow regression check, not a complete evidence-quality gate. The isolated MCP sample and its limits are recorded in `docs/search-evidence-comparison.md`.
