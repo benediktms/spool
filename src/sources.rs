@@ -1,13 +1,16 @@
 //! Configured transcript sources (spec 6.3, 16). Built from `Config.sources`; reloadable.
 //!
-//! `enabled` comes from the config file. `set_enabled_in_file` is the only writer: it edits
-//! `config.toml` with `toml_edit` (comments and layout preserved), after which callers reload.
+//! Runtime enablement requires both configuration opt-in and an available route.
+//! `set_enabled_in_file` edits `config.toml` with `toml_edit` (comments and layout preserved),
+//! after which callers reload.
 //! `SourceRoots` is built per call on purpose: it holds directory fds, and a long-lived fd to a
 //! deleted-and-recreated root would make a scan of the *old* (empty) directory look complete.
 
-use crate::config::{Config, SourceConfig};
+use crate::config::{Config, SourceConfig, is_absolute_database_path};
 use crate::domain::HarnessKind;
-use crate::source::{OpenedSource, ScanError, ScanOutcome, SourceError, SourceRoots};
+use crate::domain::RecordMeta;
+use crate::source::session::{JsonlSessionSource, SessionSource};
+use crate::source::{ObservationChange, OpenedSource, ScanOutcome, SourceError, SourceFileInfo};
 use anyhow::Context;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -89,9 +92,25 @@ impl SourceRegistry {
             .unwrap_or_default()
     }
 
-    /// False for unknown and disabled sources.
+    /// False for unknown, disabled and unsupported sources.
     pub fn is_enabled(&self, source_id: &str) -> bool {
-        self.with(source_id, |e| e.enabled).unwrap_or(false)
+        self.with(source_id, |entry| entry.enabled).unwrap_or(false)
+    }
+
+    /// The configured database path for an explicitly opted-in OpenCode source.
+    /// Callers must still verify the source identity before access.
+    pub fn opencode_database_path(&self, source_id: &str) -> Option<PathBuf> {
+        self.with(source_id, |entry| match entry.roots.as_slice() {
+            [path]
+                if entry.kind == HarnessKind::OpenCode
+                    && entry.enabled
+                    && is_absolute_database_path(path) =>
+            {
+                Some(path.clone())
+            }
+            _ => None,
+        })
+        .flatten()
     }
 
     pub fn kind(&self, source_id: &str) -> Option<HarnessKind> {
@@ -106,7 +125,7 @@ impl SourceRegistry {
     /// Approved artifact roots for `ParseOptions::blob_roots`: the configured roots themselves.
     pub fn blob_roots(&self, source_id: &str) -> Vec<PathBuf> {
         self.with(source_id, |e| {
-            if e.enabled {
+            if e.enabled && e.kind != HarnessKind::OpenCode {
                 e.roots.clone()
             } else {
                 Vec::new()
@@ -115,9 +134,14 @@ impl SourceRegistry {
         .unwrap_or_default()
     }
 
-    fn roots(&self, source_id: &str) -> Option<Result<SourceRoots, std::io::Error>> {
-        let e = self.entry(source_id).filter(|e| e.enabled)?;
-        Some(SourceRoots::new(&e.roots))
+    pub(crate) fn session_source(&self, source_id: &str) -> Option<Box<dyn SessionSource>> {
+        let entry = self.entry(source_id).filter(|entry| entry.enabled)?;
+        match entry.kind {
+            HarnessKind::Omp | HarnessKind::Codex | HarnessKind::Claude => {
+                Some(Box::new(JsonlSessionSource::new(entry.roots)))
+            }
+            HarnessKind::OpenCode => None,
+        }
     }
 
     /// One page of a read-only scan. `None` for unknown/disabled sources. An unavailable root is an
@@ -129,33 +153,30 @@ impl SourceRegistry {
         max_entries: usize,
         after: Option<&Path>,
     ) -> Option<ScanOutcome> {
-        Some(match self.roots(source_id)? {
-            Ok(roots) => roots.scan_from(cancel, max_entries, after),
-            Err(e) => {
-                let entry = self.entry(source_id)?;
-                ScanOutcome {
-                    complete: false,
-                    errors: entry
-                        .roots
-                        .into_iter()
-                        .map(|path| ScanError {
-                            path,
-                            kind: e.kind(),
-                        })
-                        .collect(),
-                    ..Default::default()
-                }
-            }
-        })
+        Some(
+            self.session_source(source_id)?
+                .scan_from(cancel, max_entries, after),
+        )
     }
 
     /// Safe open (root containment + identity) of `path` under the source's roots.
     pub fn open(&self, source_id: &str, path: &Path) -> Result<OpenedSource, SourceError> {
-        match self.roots(source_id) {
-            None => Err(SourceError::OutsideRoot),
-            Some(Ok(r)) => r.open(path),
-            Some(Err(e)) => Err(SourceError::Io(e)),
-        }
+        self.session_source(source_id)
+            .ok_or(SourceError::OutsideRoot)?
+            .open(path)
+    }
+
+    pub(crate) fn verify_observation(
+        &self,
+        source_id: &str,
+        observed: &SourceFileInfo,
+        current: &OpenedSource,
+        records: &[RecordMeta],
+    ) -> Option<ObservationChange> {
+        Some(
+            self.session_source(source_id)?
+                .verify_observation(observed, current, records),
+        )
     }
 }
 

@@ -662,6 +662,27 @@ fn mcp_config_claude_and_omp_use_the_verified_json_shape() {
 }
 
 #[test]
+fn mcp_config_opencode_uses_v2_local_server_shape() {
+    let (_t, home) = temp_home();
+    let output = run(
+        &home,
+        &[
+            "mcp",
+            "config",
+            "--client",
+            "opencode",
+            "--bin",
+            "/opt/spool/bin/spool",
+        ],
+    );
+    assert!(output.status.success(), "{}", err(&output));
+    assert_eq!(
+        serde_json::from_str::<Value>(&out(&output)).unwrap(),
+        json!({"mcp": {"servers": {"spool": {"type": "local", "command": ["/opt/spool/bin/spool", "mcp"]}}}})
+    );
+}
+
+#[test]
 fn mcp_config_codex_is_toml_and_carries_no_secrets_or_databases() {
     let (_t, home) = temp_home();
     let o = run(
@@ -821,6 +842,32 @@ fn init_flags_decide_non_interactively_and_never_flip_consent_silently() {
     };
     run_init(&paths, &forced, None).unwrap();
     assert!(!load(&home).embedding.hosted_processing_approved);
+}
+
+#[test]
+fn init_opencode_requires_explicit_path_and_opt_in() {
+    for enabled in [false, true] {
+        let (_temp, home) = temp_home();
+        let db = home.join("not-opened.db");
+        let mut args = vec![
+            "init",
+            "--hosted-processing",
+            "no",
+            "--opencode-db",
+            db.to_str().unwrap(),
+        ];
+        if enabled {
+            args.extend(["--enable-source", "opencode"]);
+        }
+        let output = run(&home, &args);
+        assert!(output.status.success(), "{}", err(&output));
+        assert!(!db.exists());
+        let config = std::fs::read_to_string(home.join("config.toml")).unwrap();
+        let parsed = spool::config::Config::parse(&config, &home).unwrap();
+        let source = parsed.sources.iter().find(|s| s.id == "opencode").unwrap();
+        assert_eq!(source.enabled, enabled);
+        assert_eq!(source.roots, [db.to_str().unwrap()]);
+    }
 }
 
 #[test]
@@ -1218,6 +1265,135 @@ async fn search_read_and_errors_flow_through_the_socket() {
 }
 
 // ---------------------------------------------------------------- doctor
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn doctor_reports_persisted_source_movement_offline() {
+    let (_tmp, home) = temp_home();
+    assert!(run(&home, &["init"]).status.success());
+    let index = spool::storage::index::Index::open_for_test(&home.join("state"))
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO sources(id,kind,roots_json,enabled) VALUES ('private-source','opencode','[]',1)")
+        .execute(&index.writer).await.unwrap();
+    sqlx::query("INSERT INTO native_source_identities(source_id,parent_dev,parent_ino,main_dev,main_ino,diagnostic) VALUES ('private-source',1,2,3,4,'SOURCE_MOVED')")
+        .execute(&index.writer).await.unwrap();
+    index.reader.close().await;
+    index.writer.close().await;
+    std::fs::set_permissions(
+        home.join("state/index.sqlite"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let result = run_async(home.clone(), vec!["doctor".into(), "--json".into()]).await;
+    assert_eq!(result.status.code(), Some(1));
+    let report: Value = serde_json::from_str(&out(&result)).unwrap();
+    let check = report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["code"] == "SOURCE_MOVED")
+        .unwrap();
+    assert_eq!(check["status"], "fail");
+    assert!(!check["detail"].as_str().unwrap().contains("private-source"));
+    let result = run_async(home, vec!["doctor".into()]).await;
+    assert!(out(&result).contains("source_identity (SOURCE_MOVED)"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn daemon_cleans_interrupted_native_scan_after_acquiring_lock() {
+    struct Daemon(std::process::Child);
+    impl Drop for Daemon {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let (_tmp, home) = temp_home();
+    assert!(
+        run(&home, &["init", "--hosted-processing", "no"])
+            .status
+            .success()
+    );
+    let index = spool::storage::index::Index::open_for_test(&home.join("state"))
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO sources(id,kind,roots_json,enabled) VALUES ('oc','opencode','[]',0)")
+        .execute(&index.writer)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO native_scan_runs(id,source_id,parent_dev,parent_ino,main_dev,main_ino) VALUES ('interrupted','oc',1,2,3,4)")
+        .execute(&index.writer).await.unwrap();
+    sqlx::query("INSERT INTO native_scan_entries(scan_id,native_id,directory,updated_at) VALUES ('interrupted','synthetic','/synthetic',1)")
+        .execute(&index.writer).await.unwrap();
+    sqlx::query("INSERT INTO native_source_identities(source_id,parent_dev,parent_ino,main_dev,main_ino) VALUES ('oc',1,2,3,4)")
+        .execute(&index.writer).await.unwrap();
+    index.reader.close().await;
+    index.writer.close().await;
+    std::fs::set_permissions(
+        home.join("state/index.sqlite"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let _daemon = Daemon(
+        spool(&home, &["daemon", "run"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let mut ready = false;
+    for _ in 0..300 {
+        if run_async(home.clone(), vec!["status".into(), "--json".into()])
+            .await
+            .status
+            .success()
+        {
+            ready = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(ready, "synthetic daemon did not become ready");
+    let mut second = Daemon(
+        spool(&home, &["daemon", "run"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let mut second_status = None;
+    for _ in 0..100 {
+        if let Some(status) = second.0.try_wait().unwrap() {
+            second_status = Some(status);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        second_status.is_some_and(|status| !status.success()),
+        "second daemon must fail to acquire the active daemon lock"
+    );
+    use sqlx::Connection;
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(home.join("state/index.sqlite"))
+        .read_only(true);
+    let mut db = sqlx::SqliteConnection::connect_with(&options)
+        .await
+        .unwrap();
+    let scans: i64 = sqlx::query_scalar("SELECT count(*) FROM native_scan_runs")
+        .fetch_one(&mut db)
+        .await
+        .unwrap();
+    let entries: i64 = sqlx::query_scalar("SELECT count(*) FROM native_scan_entries")
+        .fetch_one(&mut db)
+        .await
+        .unwrap();
+    let identities: i64 = sqlx::query_scalar("SELECT count(*) FROM native_source_identities")
+        .fetch_one(&mut db)
+        .await
+        .unwrap();
+    assert_eq!((scans, entries, identities), (0, 0, 1));
+}
 
 #[test]
 fn doctor_reports_missing_init_then_passes_and_catches_loose_modes() {

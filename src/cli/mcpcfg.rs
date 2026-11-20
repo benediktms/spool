@@ -1,6 +1,6 @@
 //! `spool mcp config --client ...`: print-only client configuration. Only shapes verified on this
 //! machine (docs/dependency-baseline.md) are emitted: Claude Code (`--mcp-config`/`.mcp.json`),
-//! Codex (`config.toml` `[mcp_servers.spool]`), OMP (project `.mcp.json`). No provider key, no
+//! Codex (`config.toml` `[mcp_servers.spool]`), OMP (project `.mcp.json`), OpenCode V2. No provider key, no
 //! database path, no environment: the bridge finds its socket from the same SPOOL_HOME/defaults.
 
 use super::args::McpClient;
@@ -18,6 +18,11 @@ pub fn render(client: McpClient, bin: &Path) -> anyhow::Result<String> {
         // Claude Code and OMP both read `{"mcpServers": {name: {type, command, args}}}`.
         McpClient::Claude | McpClient::Omp => {
             let v = json!({"mcpServers": {"spool": {"type": "stdio", "command": bin, "args": ["mcp"]}}});
+            format!("{}\n", serde_json::to_string_pretty(&v)?)
+        }
+        McpClient::OpenCode => {
+            let v =
+                json!({"mcp": {"servers": {"spool": {"type": "local", "command": [bin, "mcp"]}}}});
             format!("{}\n", serde_json::to_string_pretty(&v)?)
         }
         McpClient::Codex => {
@@ -44,5 +49,6 @@ pub fn placement_hint(client: McpClient) -> &'static str {
         }
         McpClient::Codex => "append to ~/.codex/config.toml",
         McpClient::Omp => "save as .mcp.json in a project directory",
+        McpClient::OpenCode => "merge into the OpenCode V2 opencode.json or opencode.jsonc",
     }
 }

@@ -8,7 +8,7 @@
 
 use super::refs::ItemKind;
 use super::types::*;
-use crate::domain::Role;
+use crate::domain::{Role, SourceLocator};
 use crate::ipc::AppError;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
@@ -42,6 +42,46 @@ fn stale(msg: &str) -> AppError {
 // ---------------------------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
+pub(crate) enum RecordLocator {
+    Jsonl(SourceLocator),
+    OpenCodeSqlite {
+        session_id: String,
+        message_id: String,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+enum StoredLocator {
+    #[serde(rename = "opencode_sqlite_v1")]
+    OpenCodeSqlite {
+        session_id: String,
+        message_id: String,
+    },
+}
+
+fn decode_locator(payload: Option<&str>, offset: u64, len: u64) -> Result<RecordLocator, AppError> {
+    let Some(payload) = payload else {
+        return Ok(RecordLocator::Jsonl(SourceLocator { offset, len }));
+    };
+    match serde_json::from_str::<StoredLocator>(payload) {
+        Ok(StoredLocator::OpenCodeSqlite {
+            session_id,
+            message_id,
+        }) if !session_id.is_empty() && !message_id.is_empty() => {
+            Ok(RecordLocator::OpenCodeSqlite {
+                session_id,
+                message_id,
+            })
+        }
+        _ => Err(AppError::new(
+            "STORAGE_ERROR",
+            "record locator is malformed or unsupported",
+        )),
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct Rec {
     pub key: String,
     pub native_id: Option<String>,
@@ -50,6 +90,7 @@ pub struct Rec {
     pub ts: Option<i64>,
     pub offset: u64,
     pub len: u64,
+    pub(crate) locator: RecordLocator,
     pub digest: [u8; 32],
     pub turn: Option<String>,
 }
@@ -124,7 +165,7 @@ impl Snap {
             msg_children: HashMap::new(),
         };
         let rows = sqlx::query(
-            "SELECT key, native_id, parent_key, kind, ts, \"offset\" AS off, len, digest, turn_id FROM records WHERE snapshot_id = ? ORDER BY ord",
+            "SELECT key, native_id, parent_key, kind, ts, \"offset\" AS off, len, locator_payload, digest, turn_id FROM records WHERE snapshot_id = ? ORDER BY ord",
         )
         .bind(snapshot_id)
         .fetch_all(pool)
@@ -135,14 +176,19 @@ impl Snap {
             let digest: [u8; 32] = d
                 .try_into()
                 .map_err(|_| AppError::new("STORAGE_ERROR", "record digest is malformed"))?;
+            let offset = r.get::<i64, _>("off").max(0) as u64;
+            let len = r.get::<i64, _>("len").max(0) as u64;
+            let payload: Option<String> = r.get("locator_payload");
+            let locator = decode_locator(payload.as_deref(), offset, len)?;
             snap.recs.push(Rec {
                 key: r.get("key"),
                 native_id: r.get("native_id"),
                 parent: r.get("parent_key"),
                 kind: r.get("kind"),
                 ts: r.get("ts"),
-                offset: r.get::<i64, _>("off").max(0) as u64,
-                len: r.get::<i64, _>("len").max(0) as u64,
+                offset,
+                len,
+                locator,
                 digest,
                 turn: r.get("turn_id"),
             });
@@ -1240,6 +1286,7 @@ mod tests {
             ts: None,
             offset: 0,
             len: 1,
+            locator: RecordLocator::Jsonl(SourceLocator { offset: 0, len: 1 }),
             digest: [0; 32],
             turn: turn.map(Into::into),
         }

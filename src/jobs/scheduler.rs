@@ -463,13 +463,18 @@ impl Reconciler {
             " OR (?3 = 1 AND s.index_state = 'indexed' AND s.active_snapshot_id IS NOT NULL AND EXISTS (SELECT 1 FROM chunks c WHERE c.snapshot_id = s.active_snapshot_id \
               AND NOT EXISTS (SELECT 1 FROM embeddings e WHERE e.profile_id = ?4 AND e.input_hash = c.input_hash))) \
               OR (s.index_state = 'indexed' AND NOT EXISTS (SELECT 1 FROM snapshots sn WHERE sn.id = s.active_snapshot_id \
-              AND sn.source_revision LIKE (f.size || ':' || f.mtime_ms || ':' || f.dev || ':' || f.ino || ':%')))"
+               AND ((src.kind = 'opencode' AND sn.source_revision = ('opencode_sqlite_v1:' || n.event_sequence)) \
+                 OR (src.kind != 'opencode' AND sn.source_revision LIKE (f.size || ':' || f.mtime_ms || ':' || f.dev || ':' || f.ino || ':%')))))"
         } else {
             ""
         };
         let sql = format!(
-            "SELECT s.id, s.operation_id, f.size, f.mtime_ms, f.dev, f.ino FROM sessions s JOIN source_files f ON f.session_id = s.id JOIN sources src ON src.id = s.source_id \
-             WHERE s.excluded = 0 AND s.source_status = 'present' AND f.exists_status = 'present' AND src.enabled = 1 \
+            "SELECT s.id, s.operation_id, f.size, f.mtime_ms, f.dev, f.ino, src.kind, n.event_sequence \
+             FROM sessions s JOIN sources src ON src.id = s.source_id \
+             LEFT JOIN source_files f ON f.session_id = s.id \
+             LEFT JOIN native_session_observations n ON n.session_id = s.id \
+             WHERE s.excluded = 0 AND s.source_status = 'present' AND src.enabled = 1 \
+             AND ((src.kind = 'opencode' AND n.event_sequence IS NOT NULL) OR (src.kind != 'opencode' AND f.exists_status = 'present')) \
              AND {indexable_kind} AND s.task_id IS NULL AND {class} AND ?4 = ?4 \
              AND ((s.index_state = 'pending' AND (s.defer_until IS NULL OR s.defer_until <= ?1)) \
                   OR (s.index_state = 'deferred' AND s.defer_until <= ?1 AND (s.active_snapshot_id IS NULL OR ?3 = 1)){slow_clause}) \
@@ -489,12 +494,16 @@ impl Reconciler {
             .map(|r| Candidate {
                 id: r.get("id"),
                 operation_id: r.get("operation_id"),
-                revision: catalog::revision(
-                    r.get::<i64, _>("size") as u64,
-                    r.get("mtime_ms"),
-                    r.get::<i64, _>("dev") as u64,
-                    r.get::<i64, _>("ino") as u64,
-                ),
+                revision: if r.get::<String, _>("kind") == "opencode" {
+                    format!("opencode_sqlite_v1:{}", r.get::<i64, _>("event_sequence"))
+                } else {
+                    catalog::revision(
+                        r.get::<i64, _>("size") as u64,
+                        r.get("mtime_ms"),
+                        r.get::<i64, _>("dev") as u64,
+                        r.get::<i64, _>("ino") as u64,
+                    )
+                },
             })
             .collect())
     }

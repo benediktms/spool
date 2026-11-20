@@ -13,7 +13,6 @@ use crate::source::SourceFileInfo;
 use crate::sources::SourceRegistry;
 use crate::storage::catalog::{self, KnownFile, NewSession};
 use std::collections::{HashMap, HashSet};
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -42,10 +41,13 @@ fn probe_manifest(
         include_subagents: true,
         blob_roots: Vec::new(),
     };
-    let mut r = (&opened.file).take(PROBE_BYTES);
+    let source_len = opened.info.len;
     let mut sink = Discard(cancel);
-    let m = adapter.parse_snapshot(&mut r, &opts, &mut sink).ok()?;
-    (!m.native_session_id.is_empty()).then_some((m, opened.info.len))
+    let m = reg
+        .session_source(source_id)?
+        .stream(adapter, opened, &opts, &mut sink)
+        .ok()?;
+    (!m.native_session_id.is_empty()).then_some((m, source_len))
 }
 
 struct Discard<'a>(&'a AtomicBool);

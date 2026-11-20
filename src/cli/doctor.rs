@@ -1,5 +1,5 @@
 //! `spool doctor` (spec 18): verifies configuration, permissions, sources/adapters, SQLite+FTS5
-//! capability (offline in-memory probe; the live databases are never opened here), embedding
+//! capability (offline in-memory probe), persisted source diagnostics, embedding
 //! profile and consent state, daemon/queue health via `index_status`, and service registration.
 //! Provider connectivity is tested only with `--probe-provider`, using a fixed harmless string.
 
@@ -25,6 +25,8 @@ pub struct Check {
     pub name: String,
     pub status: Status,
     pub detail: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -46,7 +48,12 @@ impl Report {
                 Status::Warn => "WARN",
                 Status::Fail => "FAIL",
             };
-            s.push_str(&format!("[{tag}] {}: {}\n", c.name, c.detail));
+            let code = c
+                .code
+                .as_deref()
+                .map(|v| format!(" ({v})"))
+                .unwrap_or_default();
+            s.push_str(&format!("[{tag}] {}{code}: {}\n", c.name, c.detail));
         }
         s.push_str(if self.ok {
             "doctor: no failures\n"
@@ -65,6 +72,7 @@ impl Acc {
             name: name.into(),
             status,
             detail: detail.into(),
+            code: None,
         });
     }
     fn ok(&mut self, name: &str, d: impl Into<String>) {
@@ -76,6 +84,31 @@ impl Acc {
     fn fail(&mut self, name: &str, d: impl Into<String>) {
         self.add(name, Status::Fail, d)
     }
+}
+
+async fn persisted_source_movement(path: &std::path::Path) -> Result<bool, sqlx::Error> {
+    use sqlx::Connection;
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(path)
+        .read_only(true)
+        .create_if_missing(false)
+        .busy_timeout(Duration::from_secs(1))
+        .pragma("query_only", "ON");
+    let mut conn = sqlx::SqliteConnection::connect_with(&options).await?;
+    let exists: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='native_source_identities'",
+    )
+    .fetch_one(&mut conn)
+    .await?;
+    if exists == 0 {
+        return Ok(false);
+    }
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM native_source_identities WHERE diagnostic='SOURCE_MOVED'",
+    )
+    .fetch_one(&mut conn)
+    .await?;
+    Ok(count > 0)
 }
 
 async fn sqlite_probe() -> Result<String, String> {
@@ -134,6 +167,22 @@ pub async fn run(
     }
     for i in &issues {
         a.fail("permissions", format!("{}: {}", i.path.display(), i.detail));
+    }
+    if paths.index_db.exists()
+        && !issues
+            .iter()
+            .any(|issue| issue.path == paths.index_db || issue.path == paths.state_dir)
+    {
+        match persisted_source_movement(&paths.index_db).await {
+            Ok(true) => a.0.push(Check {
+                name: "source_identity".into(),
+                status: Status::Fail,
+                code: Some("SOURCE_MOVED".into()),
+                detail: "OpenCode database identity changed; inspect the configured source and restore the accepted database. Explicit administrative recovery is required; identity is not reset automatically".into(),
+            }),
+            Ok(false) => {}
+            Err(_) => a.warn("source_identity", "could not read persisted source identity diagnostics"),
+        }
     }
     for (name, p) in [
         ("root", &paths.root),
@@ -203,6 +252,21 @@ pub async fn run(
 
     if let Some(cfg) = &cfg {
         for s in &cfg.sources {
+            if s.kind == crate::domain::HarnessKind::OpenCode {
+                let status = if s.enabled { "enabled" } else { "disabled" };
+                let detail = format!("{} (opencode) {status}; read-only SQLite", s.id);
+                if s.enabled
+                    && !s
+                        .roots
+                        .iter()
+                        .any(|root| std::path::Path::new(root).is_file())
+                {
+                    a.warn("source", format!("{detail}: database file not available"));
+                } else {
+                    a.ok("source", detail);
+                }
+                continue;
+            }
             let adapter = crate::adapters::adapter_for(s.kind);
             let present = s
                 .roots

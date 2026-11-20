@@ -11,6 +11,9 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
+pub(crate) mod opencode;
+pub(crate) mod session;
+
 #[derive(Debug, Clone)]
 pub struct SourceFileInfo {
     pub path: PathBuf,
@@ -19,6 +22,34 @@ pub struct SourceFileInfo {
     pub dev: u64,
     pub ino: u64,
 }
+
+/// Encode the existing JSONL file observation used by catalog and snapshot comparisons.
+pub fn revision4(info: &SourceFileInfo) -> String {
+    format!("{}:{}:{}:{}", info.len, info.mtime_ms, info.dev, info.ino)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ObservationChange {
+    Unchanged,
+    Grew,
+    Changed,
+}
+
+pub(crate) fn compare_observation(
+    observed: &SourceFileInfo,
+    current: &SourceFileInfo,
+) -> ObservationChange {
+    if current.dev != observed.dev || current.ino != observed.ino || current.len < observed.len {
+        ObservationChange::Changed
+    } else if current.len > observed.len {
+        ObservationChange::Grew
+    } else if current.mtime_ms != observed.mtime_ms {
+        ObservationChange::Changed
+    } else {
+        ObservationChange::Unchanged
+    }
+}
+
 #[derive(Debug)]
 pub struct OpenedSource {
     pub file: File,

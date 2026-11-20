@@ -5,9 +5,13 @@ use super::chunk::ChunkPlan;
 use super::stage::{StageError, StageMeta, kind_str};
 use crate::clock::SharedClock;
 use crate::ids::hex;
+use crate::source::opencode::{self, GuardedDb};
+use crate::sources::SourceRegistry;
 use crate::storage::index::{Index, bump_epoch, retire_snapshot};
 use sqlx::{QueryBuilder, Row, Sqlite};
 use std::collections::HashMap;
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Binds per INSERT, matching the ~500 used by the other batched queries (SQLite's limit is far higher).
 const MAX_BINDS: usize = 500;
@@ -55,6 +59,49 @@ pub async fn publish(
     fingerprint: &str,
     plan: &[ChunkPlan],
 ) -> Result<PublishOutcome, StageError> {
+    publish_guarded(
+        index,
+        clock,
+        session_id,
+        snapshot_id,
+        PublishExpectation {
+            generation: expected_generation,
+            fingerprint,
+            native: None,
+        },
+        plan,
+    )
+    .await
+}
+
+pub(crate) struct NativePublishGuard<'a> {
+    pub source_id: &'a str,
+    pub sources: &'a SourceRegistry,
+    pub path: &'a Path,
+    pub seq: i64,
+    pub db: &'a mut GuardedDb,
+    pub cancel: &'a AtomicBool,
+}
+
+pub(crate) struct PublishExpectation<'a> {
+    pub generation: i64,
+    pub fingerprint: &'a str,
+    pub native: Option<NativePublishGuard<'a>>,
+}
+
+pub(crate) async fn publish_guarded(
+    index: &Index,
+    clock: &SharedClock,
+    session_id: &str,
+    snapshot_id: &str,
+    expected: PublishExpectation<'_>,
+    plan: &[ChunkPlan],
+) -> Result<PublishOutcome, StageError> {
+    let PublishExpectation {
+        generation: expected_generation,
+        fingerprint,
+        native,
+    } = expected;
     let now = clock.now_ms();
     let mut tx = index.writer.begin().await?;
 
@@ -106,6 +153,26 @@ pub async fn publish(
         return Ok(outcome);
     }
     let snap = snap.expect("checked above");
+    if let Some(guard) = &native {
+        let authorized: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM native_session_observations o \
+             JOIN sessions s ON s.id=o.session_id JOIN sources src ON src.id=s.source_id \
+             JOIN native_source_identities i ON i.source_id=src.id \
+             WHERE s.id=? AND s.source_id=? AND o.event_sequence=? \
+             AND src.enabled=1 AND src.kind='opencode' AND i.diagnostic IS NULL \
+             AND EXISTS (SELECT 1 FROM json_each(src.roots_json) WHERE value=?))",
+        )
+        .bind(session_id)
+        .bind(guard.source_id)
+        .bind(guard.seq)
+        .bind(guard.path.to_string_lossy().as_ref())
+        .fetch_one(&mut *tx)
+        .await?;
+        if !authorized {
+            tx.rollback().await?;
+            return Err(StageError::SourceChanged);
+        }
+    }
     let meta: StageMeta = serde_json::from_str(snap.get::<&str, _>("counts_json"))
         .map_err(|_| StageError::Storage("snapshot meta".into()))?;
     let coverage: &str = snap.get("coverage");
@@ -211,6 +278,28 @@ pub async fn publish(
     .execute(&mut *tx)
     .await?;
     bump_epoch(&mut tx).await?;
+    if let Some(guard) = native {
+        if guard.cancel.load(Ordering::Relaxed) {
+            tx.rollback().await?;
+            return Err(StageError::Cancelled);
+        }
+        if guard
+            .sources
+            .opencode_database_path(guard.source_id)
+            .as_deref()
+            != Some(guard.path)
+        {
+            tx.rollback().await?;
+            return Err(StageError::SourceChanged);
+        }
+        if let Err(error) = guard.db.checkpoint() {
+            tx.rollback().await?;
+            opencode::persist_movement(index, guard.source_id, &error)
+                .await
+                .map_err(super::stage::map_native_error)?;
+            return Err(super::stage::map_native_error(error));
+        }
+    }
     tx.commit().await?;
     Ok(PublishOutcome::Published {
         generation: new_generation,

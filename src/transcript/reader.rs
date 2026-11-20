@@ -141,22 +141,6 @@ impl Loader<'_, '_> {
         }
     }
 
-    async fn resolve(
-        &mut self,
-        rec: &super::selection::Rec,
-    ) -> Result<std::sync::Arc<crate::domain::ResolvedRecord>, ResolveFail> {
-        self.src
-            .resolve(
-                &rec.key,
-                crate::domain::SourceLocator {
-                    offset: rec.offset,
-                    len: rec.len,
-                },
-                rec.digest,
-            )
-            .await
-    }
-
     async fn message_blocks(
         &mut self,
         rec: &super::selection::Rec,
@@ -166,7 +150,7 @@ impl Loader<'_, '_> {
         let mut origin = Origin::VerifiedSource;
         let mut from_source = false;
         if self.policy != SourcePolicy::IndexedOnly {
-            match self.resolve(rec).await {
+            match self.src.resolve(rec).await {
                 Ok(rr) => {
                     from_source = true;
                     for b in &rr.blocks {
@@ -256,7 +240,7 @@ impl Loader<'_, '_> {
         &mut self,
         rec: &super::selection::Rec,
     ) -> Result<std::sync::Arc<crate::domain::ResolvedRecord>, AppError> {
-        match self.resolve(rec).await {
+        match self.src.resolve(rec).await {
             Ok(r) => Ok(r),
             Err(ResolveFail::Fatal(e)) => Err(e),
             Err(ResolveFail::Unavailable) => Err(source_unavailable()),
@@ -807,10 +791,13 @@ fn envelope(
                 record_ref: format!("rec_{}", short_hash(&format!("{}\0{}", snap.id, rec.key))),
                 record_digest: record_digest_hex(&rec.digest),
                 native_record_id: rec.native_id.clone(),
-                locator: Some(Locator {
-                    offset: rec.offset,
-                    len: rec.len,
-                }),
+                locator: match &rec.locator {
+                    super::selection::RecordLocator::Jsonl(locator) => Some(Locator {
+                        offset: locator.offset,
+                        len: locator.len,
+                    }),
+                    super::selection::RecordLocator::OpenCodeSqlite { .. } => None,
+                },
             }),
         },
     };

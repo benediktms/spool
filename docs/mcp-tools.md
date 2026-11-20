@@ -16,7 +16,7 @@ machine-readable `read_session` schemas live in `schemas/read_session/`.
 
 ## Client setup
 
-`spool mcp config --client claude|codex|omp` prints (never writes) the configuration for the stdio
+`spool mcp config --client claude|codex|omp|opencode` prints (never writes) the configuration for the stdio
 process. Only shapes verified against real clients are emitted (see
 `docs/dependency-baseline.md`):
 
@@ -25,6 +25,7 @@ process. Only shapes verified against real clients are emitted (see
 | Claude Code | `.mcp.json` / `--mcp-config` JSON: `{"mcpServers":{"spool":{"type":"stdio","command":"/abs/spool","args":["mcp"]}}}` | project `.mcp.json`, or `claude --mcp-config FILE` |
 | Codex | TOML `[mcp_servers.spool]` with `command` and `args = ["mcp"]` | `~/.codex/config.toml` |
 | OMP | same JSON shape as Claude, project-local `.mcp.json` | project directory |
+| OpenCode V2 | JSON `mcp.servers.spool` with `type: "local"` and `command: ["/abs/spool", "mcp"]` | merge into `opencode.json` or `opencode.jsonc` |
 
 The command path is absolute. The output contains no provider key, no database path and no
 environment. If you run Spool with a non-default `SPOOL_HOME`, the client must be started with the

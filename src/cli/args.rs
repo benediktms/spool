@@ -95,6 +95,9 @@ pub enum Cmd {
 
 #[derive(Args, Debug, Default)]
 pub struct InitArgs {
+    /// Configure an OpenCode V2 SQLite source at an absolute database path.
+    #[arg(long, value_name = "PATH")]
+    pub opencode_db: Option<std::path::PathBuf>,
     /// Enable this source (repeatable). Other sources keep their defaults.
     #[arg(long = "enable-source", value_name = "ID")]
     pub enable_source: Vec<String>,
@@ -321,6 +324,8 @@ pub enum McpClient {
     Claude,
     Codex,
     Omp,
+    #[value(name = "opencode")]
+    OpenCode,
 }
 
 #[derive(Subcommand, Debug)]

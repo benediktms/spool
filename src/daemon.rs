@@ -151,6 +151,10 @@ impl Daemon {
         let index = Index::open(&paths.index_db, busy)
             .await
             .context("opening index.sqlite")?;
+        sqlx::query("DELETE FROM native_scan_runs")
+            .execute(&index.writer)
+            .await
+            .context("clearing interrupted native scans")?;
         let jobs_pool = storage::connect(&paths.jobs_db, 4, busy)
             .await
             .context("opening jobs.sqlite")?;

@@ -1,5 +1,6 @@
 //! Locations and (later) the validated TOML configuration.
 
+use crate::domain::HarnessKind;
 use std::path::{Path, PathBuf};
 
 /// Max bytes of a `sockaddr_un` path on the platforms we target (macOS is the smallest: 104 incl. NUL).
@@ -180,7 +181,7 @@ cfg_struct!(LoggingConfig {
 #[serde(deny_unknown_fields)]
 pub struct SourceConfig {
     pub id: String,
-    pub kind: crate::domain::HarnessKind,
+    pub kind: HarnessKind,
     #[serde(default)]
     pub enabled: bool,
     pub roots: Vec<String>,
@@ -244,6 +245,7 @@ pub const PROVIDER_MAX_INPUT_TOKENS: usize = 8191;
 impl Config {
     /// Parse a TOML document (unknown fields rejected) and validate it. Relative paths are
     /// resolved against `base` (the config directory); `~/` is expanded without a shell.
+    /// OpenCode requires an explicitly configured absolute database path.
     pub fn parse(text: &str, base: &Path) -> anyhow::Result<Self> {
         let mut c: Config =
             toml::from_str(text).map_err(|e| anyhow::anyhow!("config.toml: {}", e.message()))?;
@@ -267,6 +269,9 @@ impl Config {
 
     pub fn resolve_paths(&mut self, base: &Path) -> anyhow::Result<()> {
         for s in &mut self.sources {
+            if s.kind == HarnessKind::OpenCode {
+                continue;
+            }
             for r in &mut s.roots {
                 *r = expand_path(r, base)?.to_string_lossy().into_owned();
             }
@@ -399,6 +404,14 @@ impl Config {
                 src.id
             );
             ensure!(seen.insert(&src.id), "duplicate source id {:?}", src.id);
+            if src.kind == HarnessKind::OpenCode {
+                ensure!(
+                    matches!(src.roots.as_slice(), [path] if is_absolute_database_path(Path::new(path))),
+                    "OpenCode source {:?} requires exactly one absolute database path in roots",
+                    src.id
+                );
+                continue;
+            }
             ensure!(!src.roots.is_empty(), "source {:?} has no roots", src.id);
             for root in &src.roots {
                 ensure!(
@@ -443,6 +456,10 @@ impl Config {
         h.update(b"extraction-policy:1");
         h.finalize().to_hex()[..32].to_string()
     }
+}
+
+pub(crate) fn is_absolute_database_path(path: &Path) -> bool {
+    path.is_absolute() && path.file_name().is_some()
 }
 
 /// Expand `~/` and resolve relative paths against `base`. Never invokes a shell or expands `$`/`` ` ``.

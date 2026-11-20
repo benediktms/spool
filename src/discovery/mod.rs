@@ -25,6 +25,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::Semaphore;
 
+mod native;
 mod page;
 
 /// Header probe window: enough for the session header and subagent classification (adapters'
@@ -184,6 +185,13 @@ impl DiscoveryService {
         let scan_started = self.clock.now_ms();
         let src = self.scan_source(source_id, auto, scan_started).await?;
         let mut ctx = self.page_ctx(&src, &entry, &sel, &mode, scan_started, &cancel);
+        if entry.kind == HarnessKind::OpenCode {
+            let path = match entry.roots.as_slice() {
+                [path] if crate::config::is_absolute_database_path(path) => Some(path.as_path()),
+                _ => None,
+            };
+            return self.run_native(&ctx, path, after.as_deref(), budget).await;
+        }
         let mut state = PageState {
             debounce_floor: None,
             queued: 0,
