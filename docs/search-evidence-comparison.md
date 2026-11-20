@@ -247,3 +247,42 @@ With the compact references above, a frozen default replay preserved all 55 sess
 Two lexical retries kept their original queries, scoped to the selected session, with `limit: 1`, `matches_per_session: 32` and `max_bytes: 65536`. The credential retry returned 18 references in 65,060 MCP bytes including envelope margin, with four previews omitted; the migration retry returned 24 references in 64,618 bytes, with twelve previews omitted. Both reported truncation. Each retained the complete correction window from the frozen trace and an indexed read verified its anchors and full target-record digest. The respective correction reads took two pages / 35,714 bytes and one page / 30,177 bytes. The two searches created two ordinary leases. The controlled expanded run took 191 ms on this machine; this single observation is not a benchmark.
 
 The retries can change rankings because they are fresh searches with narrower filters. They do not make the original top-three evidence sufficient, verify the original source, or guarantee that all requested references fit every response. The page and byte reductions in the preceding section come from compact references, independently of this limit change.
+
+## Compact lookup sample, 2026-11-20
+
+An isolated real-daemon MCP trial used eight synthetic, assistant-authored sessions. Both variants used the same frozen source bytes and queries. One case put a lexical hit late in a long message. Seven cases included later qualifications. The source SHA-256 maps matched. No hosted provider or live transcript was used.
+
+| Measure per preview target | Baseline | Candidate |
+| --- | ---: | ---: |
+| Search plus read calls | 18 | 16 |
+| Preview and returned source text bytes | 34,529 | 20,284 |
+| Raw JSON text bytes | 72,208 | 53,950 |
+| Reserialized JSON-RPC frame bytes | 76,836 | 58,202 |
+| Search plus read budget bytes | 81,250 | 62,126 |
+| Search budget bytes | 21,836 | 21,836 |
+
+The raw JSON text comes from the captured MCP content. The JSON-RPC figures reserialize captured frames without newline delimiters. The budget figures use `tool_result_bytes` on each captured response. The candidate requested an excerpt and expanded when its required synthetic answer was absent. The sample used explicit 512 and 1,200 preview targets. It does not measure an omitted candidate default. The 512 target saved no search bytes in this sample. Complete lookup savings were about 23.5%, below the proposed 25% gate. The omitted preview default remains 1,200.
+
+A separate synthetic correction test required a full expansion. The baseline used one read and 7,502 budget bytes. The excerpt plus expansion used two reads and 10,633 bytes. This shows why an excerpt alone does not establish answer sufficiency. These small samples do not establish a general cost or quality result.
+
+To repeat the eight-case trial, build the baseline and candidate in separate private target directories. Use the same source checkout for the capture runner. Give the runner absolute binary paths and a new directory under `/tmp`:
+
+```sh
+python3 tests/fixtures/compact_lookup/capture.py baseline /absolute/path/to/baseline/spool /tmp/spool-lookup-eval
+python3 tests/fixtures/compact_lookup/capture.py candidate /absolute/path/to/candidate/spool /tmp/spool-lookup-eval
+SPOOL_COMPACT_CAPTURE_DIR=/tmp/spool-lookup-eval cargo test --locked --test compact_lookup_budget -- --exact analyze_compact_lookup_captures --nocapture
+```
+
+The runner creates synthetic source files once and checks their content on later runs. It starts separate daemons with hosted processing disabled. It records every read continuation and any full expansion required by the frozen answer. It also records each match's ordered record keys and digests from the isolated lease database. The analysis compares those records and session order, checks the frozen answers, and uses `tool_result_bytes` for each call.
+
+The paired MCP corpus covers lexical queries. Additional in-process paired tests use the current search implementation and verified source reads. They compare target 1,200 plus full reads against target 512 plus excerpts and any required expansion. The semantic case uses the deterministic FakeProvider. It does not call a hosted model.
+
+| Paired in-process case | Baseline calls / budget bytes | Candidate calls / budget bytes |
+| --- | ---: | ---: |
+| Literal punctuation | 2 / 4,210 | 2 / 4,167 |
+| Semantic paraphrase | 2 / 4,244 | 2 / 4,201 |
+| Repeated passage | 2 / 5,645 | 2 / 4,386 |
+| Forked branch | 2 / 7,768 | 2 / 4,745 |
+| Excluded Codex instruction | 2 / 4,100 | 2 / 4,057 |
+
+Each case checks the required source text, full-match records, and canonical anchors. The excluded instruction case also checks that neither path exposes its sentinel. A separate paired negative query returns no result at either target. A separate test verifies a source hit after byte 2,000,000. It does not compare the cost of both paths. The single-case `compact_lookup_paired_gate` test demonstrates an expansion cost. These synthetic checks do not establish a general cost or quality result.

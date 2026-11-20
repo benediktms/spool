@@ -1,0 +1,20 @@
+{
+  "description": "A version-2 match reference cannot select an excerpt.",
+  "request": {
+    "session_id": "ss_cf861e31d72225b3add0124e",
+    "selection": {
+      "kind": "match",
+      "match_ref": "v1.m.1.WyJsc19jYjk2OWVlMTVjZGI0YWJhYWE4MTBiN2UiLDFd.y9-EuRjlT-JlMhM7jyoKpA",
+      "excerpt_target_bytes": 512
+    },
+    "max_bytes": 8192
+  },
+  "error": {
+    "error": {
+      "code": "VIEW_NOT_SUPPORTED",
+      "retryable": false,
+      "recovery": "read_full_match",
+      "message": "this match has no usable excerpt anchors"
+    }
+  }
+}

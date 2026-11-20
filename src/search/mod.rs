@@ -4,6 +4,7 @@
 mod evidence;
 mod project_filter;
 mod query;
+pub(crate) use query::is_tok as lexical_token_char;
 mod retrieve;
 mod types;
 
@@ -18,7 +19,9 @@ use crate::storage::index::Index;
 use crate::transcript::handle::HandleKind;
 use crate::transcript::handle::KeyStore;
 use crate::transcript::lease::{LeaseManager, NewRef, PinTarget};
-use crate::transcript::refs::{Anchor, BranchRef, MatchRecord, MatchRef, RefHandle};
+use crate::transcript::refs::{
+    Anchor, BranchRef, ExcerptAnchor, ExcerptKind, MatchRecord, MatchRef, RefHandle, SpanRef,
+};
 use retrieve::{ChunkMeta, Filters, LiteralHit, Scored, SessionRow, SpanRow};
 use rmcp::handler::server::tool::schema_for_type;
 use rmcp::model::{Tool, ToolAnnotations};
@@ -395,6 +398,7 @@ struct MatchData<'a> {
 
 struct MatchDraft {
     records: Vec<MatchRecord>,
+    anchors: Vec<ExcerptAnchor>,
     branch_leaf: Option<String>,
     matched_at: Option<i64>,
     excerpt: String,
@@ -1077,10 +1081,19 @@ impl SearchService {
             elapsed_us = stage_start.elapsed().as_micros() as u64,
             text_bytes = selection.excerpt.len()
         );
+        let anchors = if plan.preview_target_bytes == 1200 {
+            selection.anchors.clone()
+        } else {
+            self.renderer
+                .render(m, data.terms, &plan.filters, data.spans, data.bodies, 1200)
+                .ok_or_else(|| AppError::new("STORAGE_ERROR", "the local index could not be read"))?
+                .anchors
+        };
         let evidence::Selection {
             excerpt,
             truncated,
             context_outside_time_filter: excerpt_outside,
+            ..
         } = selection;
         let mut window_spans = m.spans.clone();
         window_spans.sort_by_key(|(ord, seq, _)| (*ord, *seq));
@@ -1101,6 +1114,7 @@ impl SearchService {
             });
         Ok(MatchDraft {
             records,
+            anchors,
             branch_leaf,
             matched_at: data.primary.time_anchor,
             excerpt,
@@ -1180,6 +1194,7 @@ impl SearchService {
                 );
                 let span = SpanRow {
                     record_key: h.record_key.clone(),
+                    block_index: h.block_index,
                     start: h.byte_start,
                     end,
                     is_context: false,
@@ -1218,8 +1233,30 @@ impl SearchService {
                         .unwrap_or_else(|| vec![span.clone()]);
                     match_records(conn, &snap, &selected).await?
                 };
+                let (_, clipped, start, stop) =
+                    evidence::literal_range(&body, h.byte_start as usize, 1200);
+                let anchors = u32::try_from(h.block_index)
+                    .ok()
+                    .zip(u32::try_from(start).ok())
+                    .zip(u32::try_from(stop).ok())
+                    .zip(u32::try_from(h.byte_start).ok())
+                    .zip(u32::try_from(end).ok())
+                    .map(|((((b, s), e), fs), fe)| ExcerptAnchor {
+                        span: SpanRef {
+                            r: h.record_key.clone(),
+                            b,
+                            s,
+                            e,
+                        },
+                        focus: Some((fs, fe)),
+                        kind: ExcerptKind::Literal,
+                        clipped,
+                    })
+                    .into_iter()
+                    .collect();
                 matches.push(MatchDraft {
                     records,
+                    anchors,
                     branch_leaf: branch_leaf(conn, &snap, Some(&h.record_key), &mut leaf_counts)
                         .await?,
                     matched_at: h.anchor,
@@ -1286,8 +1323,9 @@ impl SearchService {
                         .encode(&key, HandleKind::Match);
                         let payload = serde_json::to_vec(&MatchRef {
                             manifest: anchor.manifest.clone(),
-                            version: 2,
+                            version: 3,
                             records: m.records,
+                            excerpt: Some(m.anchors),
                         })
                         .expect("match ref serializes");
                         pending.insert(
@@ -1709,6 +1747,7 @@ mod strategy_tests {
                     keys.iter()
                         .map(|key| SpanRow {
                             record_key: (*key).into(),
+                            block_index: 0,
                             start: 0,
                             end: 1,
                             is_context: false,

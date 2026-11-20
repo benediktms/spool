@@ -358,6 +358,7 @@ impl Env {
             });
         }
         let payload = serde_json::to_vec(&MatchRef {
+            excerpt: None,
             manifest: anchor.manifest.clone(),
             version: 2,
             records,
@@ -371,6 +372,32 @@ impl Env {
         RefHandle {
             lease: anchor.lease.clone(),
             ref_id,
+        }
+        .encode(&self.keys.current(), HandleKind::Match)
+    }
+
+    pub async fn excerpt_ref(
+        &self,
+        token: &str,
+        anchors: Vec<spool::transcript::refs::ExcerptAnchor>,
+    ) -> String {
+        let h = RefHandle::decode(&self.keys.current(), HandleKind::Match, token).unwrap();
+        let payload = self
+            .leases
+            .get_ref(&h.lease, h.ref_id, "match")
+            .await
+            .unwrap();
+        let mut m: MatchRef = serde_json::from_slice(&payload).unwrap();
+        m.version = 3;
+        m.excerpt = Some(anchors);
+        let id = self
+            .leases
+            .add_ref(&h.lease, "match", &serde_json::to_vec(&m).unwrap())
+            .await
+            .unwrap();
+        RefHandle {
+            lease: h.lease,
+            ref_id: id,
         }
         .encode(&self.keys.current(), HandleKind::Match)
     }

@@ -62,6 +62,23 @@
       ],
       "type": "string"
     },
+    "ExcerptOut": {
+      "properties": {
+        "clipped": {
+          "type": "boolean"
+        },
+        "target_bytes": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "target_bytes",
+        "clipped"
+      ],
+      "type": "object"
+    },
     "FidelityOut": {
       "enum": [
         "verbatim",
@@ -475,6 +492,16 @@
           "type": [
             "string",
             "null"
+          ]
+        },
+        "excerpt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExcerptOut"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "from_message_ref": {

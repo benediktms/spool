@@ -2017,3 +2017,702 @@ async fn legacy_reference_payloads_open_the_same_selection() {
         .await;
     assert_eq!(text_of(&items(&continued)[0]), msg_text(2));
 }
+
+#[tokio::test]
+async fn excerpt_pages_preserve_verified_source_ranges() {
+    use spool::transcript::refs::{ExcerptAnchor, ExcerptKind, SpanRef};
+    let mut env = Env::new().await;
+    let text = format!(
+        "{} target qualification {}",
+        "before ".repeat(700),
+        "after ".repeat(1600)
+    );
+    let lines = vec![omp_header(), omp_msg("m0", None, "user", &text)];
+    let (sid, path) = env.indexed("compact.jsonl", &lines).await;
+    let full = env.ok(json!({"session_id":sid})).await;
+    let anchor = env.anchor_of(&full);
+    let legacy = env.match_ref(&anchor, &[("m0", 0, &text)]).await;
+    let e = env.err(json!({"session_id":sid,"selection":{"kind":"match","match_ref":legacy,"excerpt_target_bytes":512}})).await;
+    assert_eq!(e.code, "VIEW_NOT_SUPPORTED");
+    let start = text.find("target").unwrap();
+    let end = text.len().min(start + 7000);
+    let reference = env
+        .excerpt_ref(
+            &legacy,
+            vec![ExcerptAnchor {
+                span: SpanRef {
+                    r: "m0".into(),
+                    b: 0,
+                    s: start as u32,
+                    e: end as u32,
+                },
+                focus: Some((start as u32, (start + 6) as u32)),
+                kind: ExcerptKind::Lexical,
+                clipped: true,
+            }],
+        )
+        .await;
+    let req = json!({"session_id":sid,"max_bytes":4096,"selection":{"kind":"match","match_ref":reference,"excerpt_target_bytes":512}});
+    let pages = env.pages(req, 4096).await;
+    assert!(pages.len() > 1);
+    let cursor = pages[0]["page"]["next_cursor"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        spool::transcript::cursor::CursorPayload::decode(&env.keys.current(), &cursor)
+            .unwrap()
+            .format,
+        4
+    );
+    env.restart().await;
+    let replay = env.ok(json!({"cursor":cursor,"max_bytes":4096})).await;
+    assert_eq!(replay["items"], pages[1]["items"]);
+    let mut combined = String::new();
+    for page in &pages {
+        assert_eq!(page["source_policy"], "require_source");
+        assert_eq!(page["selection"]["excerpt"]["clipped"], true);
+        for item in items(page) {
+            for block in item["blocks"].as_array().unwrap() {
+                assert!(block["block_ref"].is_string());
+                combined.push_str(block["data"].as_str().unwrap());
+            }
+        }
+    }
+    assert_eq!(combined, text[start..end]);
+    let expanded = env
+        .ok(json!({"session_id":sid,"selection":{"kind":"match","match_ref":reference}}))
+        .await;
+    assert!(text_of(&items(&expanded)[0]).contains("before"));
+    let invalid = env.err(json!({"session_id":sid,"selection":{"kind":"match","match_ref":reference,"excerpt_target_bytes":512},"source_policy":"indexed_only"})).await;
+    assert_eq!(invalid.code, "SOURCE_POLICY_CONFLICT");
+    sqlx::query("UPDATE sessions SET excluded=1 WHERE id = ?")
+        .bind(&sid)
+        .execute(&env.index.writer)
+        .await
+        .unwrap();
+    assert_eq!(env.err(json!({"cursor":cursor})).await.code, "FORBIDDEN");
+    sqlx::query("UPDATE sessions SET excluded=0 WHERE id = ?")
+        .bind(&sid)
+        .execute(&env.index.writer)
+        .await
+        .unwrap();
+    std::fs::remove_file(path).unwrap();
+    assert_eq!(
+        env.err(json!({"cursor":cursor})).await.code,
+        "SOURCE_UNAVAILABLE"
+    );
+    env.clock.advance_ms(1_800_001);
+    assert_eq!(
+        env.err(json!({"cursor":cursor})).await.code,
+        "CURSOR_EXPIRED"
+    );
+}
+
+#[tokio::test]
+async fn compact_lookup_paired_gate() {
+    use spool::transcript::refs::{ExcerptAnchor, ExcerptKind, SpanRef};
+    let env = Env::new().await;
+    let first = format!("old decision {}", "background ".repeat(300));
+    let correction = "The later correction is the final decision.";
+    let lines = vec![
+        omp_header(),
+        omp_msg("m0", None, "user", &first),
+        omp_msg("m1", Some("m0"), "assistant", correction),
+    ];
+    let (sid, _) = env.indexed("paired.jsonl", &lines).await;
+    let session = env.ok(json!({"session_id":sid})).await;
+    let anchor = env.anchor_of(&session);
+    let baseline_ref = env
+        .match_ref(&anchor, &[("m0", 0, &first), ("m1", 0, correction)])
+        .await;
+    let baseline = env.pages(json!({"session_id":sid,"selection":{"kind":"match","match_ref":baseline_ref},"max_bytes":8192}),8192).await;
+    let excerpt_ref = env
+        .excerpt_ref(
+            &baseline_ref,
+            vec![ExcerptAnchor {
+                span: SpanRef {
+                    r: "m0".into(),
+                    b: 0,
+                    s: 0,
+                    e: 12,
+                },
+                focus: Some((0, 3)),
+                kind: ExcerptKind::Lexical,
+                clipped: true,
+            }],
+        )
+        .await;
+    let excerpt = env.pages(json!({"session_id":sid,"selection":{"kind":"match","match_ref":excerpt_ref,"excerpt_target_bytes":512},"max_bytes":8192}),8192).await;
+    let contains = |pages: &[Value]| {
+        pages
+            .iter()
+            .any(|page| page.to_string().contains(correction))
+    };
+    assert!(contains(&baseline));
+    assert!(!contains(&excerpt));
+    let expansion = env.pages(json!({"session_id":sid,"selection":{"kind":"match","match_ref":excerpt_ref},"max_bytes":8192}),8192).await;
+    assert!(contains(&expansion));
+    let bytes = |pages: &[Value]| {
+        pages
+            .iter()
+            .map(|p| tool_result_bytes(p, false))
+            .sum::<usize>()
+    };
+    println!(
+        "synthetic correction: baseline calls={} bytes={}, excerpt plus expansion calls={} bytes={}",
+        baseline.len(),
+        bytes(&baseline),
+        excerpt.len() + expansion.len(),
+        bytes(&excerpt) + bytes(&expansion)
+    );
+    assert!(excerpt.len() + expansion.len() > baseline.len());
+}
+
+#[tokio::test]
+async fn excerpt_target_chooses_focused_paragraph_and_verifies_source() {
+    use spool::transcript::refs::{ExcerptAnchor, ExcerptKind, SpanRef};
+    let env = Env::new().await;
+    let text = format!(
+        "{}\n\nimportant decisive qualification\n\n{}",
+        "before ".repeat(160),
+        "after ".repeat(160)
+    );
+    let (sid, path) = env
+        .indexed(
+            "focused.jsonl",
+            &[omp_header(), omp_msg("m0", None, "user", &text)],
+        )
+        .await;
+    let session = env.ok(json!({"session_id":sid})).await;
+    let anchor = env.anchor_of(&session);
+    let legacy = env.match_ref(&anchor, &[("m0", 0, &text)]).await;
+    let start = text.find("decisive").unwrap() as u32;
+    let reference = env
+        .excerpt_ref(
+            &legacy,
+            vec![ExcerptAnchor {
+                span: SpanRef {
+                    r: "m0".into(),
+                    b: 0,
+                    s: 0,
+                    e: text.len() as u32,
+                },
+                focus: Some((start, start + 8)),
+                kind: ExcerptKind::Lexical,
+                clipped: false,
+            }],
+        )
+        .await;
+    let req = json!({"session_id":sid,"selection":{"kind":"match","match_ref":reference,"excerpt_target_bytes":512}});
+    let result = env.ok(req.clone()).await;
+    assert_eq!(
+        text_of(&items(&result)[0]),
+        "important decisive qualification"
+    );
+    assert_eq!(result["selection"]["excerpt"]["clipped"], true);
+    sqlx::query("UPDATE blocks SET text = ? WHERE record_key = 'm0'")
+        .bind(text.replacen("before", "bef0re", 1))
+        .execute(&env.index.writer)
+        .await
+        .unwrap();
+    assert_eq!(env.err(req.clone()).await.code, "STALE_REFERENCE");
+    sqlx::query("UPDATE blocks SET text = ? WHERE record_key = 'm0'")
+        .bind(&text)
+        .execute(&env.index.writer)
+        .await
+        .unwrap();
+    std::fs::write(
+        path,
+        join(&[omp_header(), omp_msg("m0", None, "user", "changed source")]),
+    )
+    .unwrap();
+    let err = env.err(req).await;
+    assert!(matches!(
+        err.code.as_str(),
+        "SOURCE_CHANGED" | "STALE_REFERENCE"
+    ));
+}
+
+#[tokio::test]
+async fn excerpt_respects_the_frozen_branch() {
+    use spool::transcript::refs::{ExcerptAnchor, ExcerptKind, SpanRef};
+    let env = Env::new().await;
+    let (sid, _) = env.indexed("excerpt-fork.jsonl", &forked()).await;
+    let options = env.err(json!({"session_id":sid})).await.details.unwrap()["branch_options"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let a = env.ok(json!({"session_id":sid,"selection":{"kind":"session","branch_ref":options[0]["branch_ref"]}})).await;
+    let message = &items(&a)[2];
+    let text = text_of(message);
+    let key = env
+        .decode_message_ref(message["message_ref"].as_str().unwrap())
+        .record;
+    let anchor = env.anchor_of(&a);
+    let legacy = env
+        .match_ref(&anchor, &[(key.as_str(), 0, text.as_str())])
+        .await;
+    let reference = env
+        .excerpt_ref(
+            &legacy,
+            vec![ExcerptAnchor {
+                span: SpanRef {
+                    r: key,
+                    b: 0,
+                    s: 0,
+                    e: text.len() as u32,
+                },
+                focus: Some((0, 6)),
+                kind: ExcerptKind::Lexical,
+                clipped: false,
+            }],
+        )
+        .await;
+    let selected = env.ok(json!({"session_id":sid,"selection":{"kind":"match","match_ref":reference,"excerpt_target_bytes":512,"branch_ref":options[0]["branch_ref"]}})).await;
+    assert_eq!(items(&selected).len(), 1);
+    assert_eq!(text_of(&items(&selected)[0]), text);
+    let wrong = env.err(json!({"session_id":sid,"selection":{"kind":"match","match_ref":reference,"excerpt_target_bytes":512,"branch_ref":options[1]["branch_ref"]}})).await;
+    assert_eq!(wrong.code, "INVALID_RANGE");
+}
+
+#[tokio::test]
+async fn oversized_semantic_excerpt_requires_full_match() {
+    use spool::transcript::refs::{ExcerptAnchor, ExcerptKind, SpanRef};
+    let env = Env::new().await;
+    let text = "semantic region ".repeat(700);
+    let (sid, _) = env
+        .indexed(
+            "semantic-large.jsonl",
+            &[omp_header(), omp_msg("m0", None, "user", &text)],
+        )
+        .await;
+    let first = env.ok(json!({"session_id":sid})).await;
+    let legacy = env
+        .match_ref(&env.anchor_of(&first), &[("m0", 0, &text)])
+        .await;
+    let m = env
+        .excerpt_ref(
+            &legacy,
+            vec![ExcerptAnchor {
+                span: SpanRef {
+                    r: "m0".into(),
+                    b: 0,
+                    s: 0,
+                    e: text.len() as u32,
+                },
+                focus: None,
+                kind: ExcerptKind::Semantic,
+                clipped: false,
+            }],
+        )
+        .await;
+    let err = env.err(json!({"session_id":sid,"selection":{"kind":"match","match_ref":m,"excerpt_target_bytes":512}})).await;
+    assert_eq!(err.code, "VIEW_NOT_SUPPORTED");
+    assert_eq!(err.recovery.as_deref(), Some("read_full_match"));
+    let full = env
+        .ok(json!({"session_id":sid,"selection":{"kind":"match","match_ref":m}}))
+        .await;
+    assert_eq!(text_of(&items(&full)[0]), text);
+}
+
+#[tokio::test]
+async fn lexical_excerpt_rejects_a_partial_token_focus() {
+    use spool::transcript::refs::{ExcerptAnchor, ExcerptKind, SpanRef};
+    let env = Env::new().await;
+    let text = "targeting the real token";
+    let (sid, _) = env
+        .indexed(
+            "partial-token.jsonl",
+            &[omp_header(), omp_msg("m0", None, "user", text)],
+        )
+        .await;
+    let first = env.ok(json!({"session_id":sid})).await;
+    let legacy = env
+        .match_ref(&env.anchor_of(&first), &[("m0", 0, text)])
+        .await;
+    let reference = env
+        .excerpt_ref(
+            &legacy,
+            vec![ExcerptAnchor {
+                span: SpanRef {
+                    r: "m0".into(),
+                    b: 0,
+                    s: 0,
+                    e: text.len() as u32,
+                },
+                focus: Some((0, 6)),
+                kind: ExcerptKind::Lexical,
+                clipped: false,
+            }],
+        )
+        .await;
+    let err = env.err(json!({"session_id":sid,"selection":{"kind":"match","match_ref":reference,"excerpt_target_bytes":512}})).await;
+    assert_eq!(err.code, "VIEW_NOT_SUPPORTED");
+    assert_eq!(err.recovery.as_deref(), Some("read_full_match"));
+}
+
+#[tokio::test]
+async fn excerpt_keeps_a_late_hit_in_a_multi_megabyte_block() {
+    let env = Env::new().await;
+    let text = format!(
+        "{} lateuniqueneedle qualification",
+        "filler ".repeat(300_000)
+    );
+    let (sid, _) = env
+        .indexed(
+            "late-hit.jsonl",
+            &[omp_header(), omp_msg("m0", None, "user", &text)],
+        )
+        .await;
+    let search = spool::search::SearchService::new(
+        env.index.clone(),
+        env.cfg.clone(),
+        env.emb.clone(),
+        env.leases.clone(),
+        env.keys.clone(),
+    );
+    let result = search
+        .call(json!({"query":"lateuniqueneedle", "mode":"lexical"}))
+        .await
+        .unwrap();
+    let token = result["results"][0]["matches"][0]["match_ref"]
+        .as_str()
+        .unwrap();
+    let excerpt = env.ok(json!({"session_id":sid,"selection":{"kind":"match","match_ref":token,"excerpt_target_bytes":512}})).await;
+    let data = text_of(&items(&excerpt)[0]);
+    assert!(data.contains("lateuniqueneedle"));
+    assert!(
+        excerpt["items"][0]["blocks"][0]["start_byte"]
+            .as_u64()
+            .unwrap()
+            > 2_000_000
+    );
+}
+
+async fn paired_source_lookup(
+    env: &Env,
+    search: &spool::search::SearchService,
+    session_id: &str,
+    query: &str,
+    mode: &str,
+    required: &str,
+    forbidden: Option<&str>,
+) {
+    let mut searches = Vec::new();
+    for target in [1200, 512] {
+        searches.push(search.call(json!({"query":query,"mode":mode,"session_ids":[session_id],"session_kinds":["interactive","unknown","subagent"],"preview_target_bytes":target,"max_bytes":8192})).await.unwrap());
+    }
+    assert_eq!(
+        searches[0]["results"][0]["session_id"],
+        searches[1]["results"][0]["session_id"]
+    );
+    let mut refs = Vec::new();
+    for search in &searches {
+        let token = search["results"][0]["matches"][0]["match_ref"]
+            .as_str()
+            .unwrap();
+        let handle = spool::transcript::refs::RefHandle::decode(
+            &env.keys.current(),
+            spool::transcript::handle::HandleKind::Match,
+            token,
+        )
+        .unwrap();
+        let payload = env
+            .leases
+            .get_ref(&handle.lease, handle.ref_id, "match")
+            .await
+            .unwrap();
+        let reference: spool::transcript::refs::MatchRef =
+            serde_json::from_slice(&payload).unwrap();
+        refs.push(reference);
+    }
+    assert_eq!(refs[0].records, refs[1].records);
+    assert_eq!(refs[0].excerpt, refs[1].excerpt);
+    let token = |i: usize| {
+        searches[i]["results"][0]["matches"][0]["match_ref"]
+            .as_str()
+            .unwrap()
+    };
+    let selection = |i: usize, excerpt: bool| {
+        let mut selection = json!({"kind":"match","match_ref":token(i)});
+        if let Some(branch) = searches[i]["results"][0]["matches"][0]["branch_ref"].as_str() {
+            selection["branch_ref"] = json!(branch);
+        }
+        if excerpt {
+            selection["excerpt_target_bytes"] = json!(512);
+        }
+        selection
+    };
+    let baseline = env
+        .pages(
+            json!({"session_id":session_id,"selection":selection(0, false),"max_bytes":8192}),
+            8192,
+        )
+        .await;
+    let excerpt = env
+        .pages(
+            json!({"session_id":session_id,"selection":selection(1, true),"max_bytes":8192}),
+            8192,
+        )
+        .await;
+    let contents = |pages: &[Value]| {
+        pages
+            .iter()
+            .flat_map(|p| items(p))
+            .flat_map(|item| item["blocks"].as_array().unwrap())
+            .filter_map(|block| block["data"].as_str())
+            .collect::<String>()
+    };
+    assert!(contents(&baseline).contains(required));
+    for page in &excerpt {
+        assert_eq!(page["source_policy"], "require_source");
+        assert!(tool_result_bytes(page, false) <= 8192);
+    }
+    let expansion = if contents(&excerpt).contains(required) {
+        Vec::new()
+    } else {
+        env.pages(
+            json!({"session_id":session_id,"selection":selection(1, false),"max_bytes":8192}),
+            8192,
+        )
+        .await
+    };
+    assert!(contents(&excerpt).contains(required) || contents(&expansion).contains(required));
+    if let Some(forbidden) = forbidden {
+        for value in searches
+            .iter()
+            .chain(baseline.iter())
+            .chain(excerpt.iter())
+            .chain(expansion.iter())
+        {
+            assert!(
+                !value.to_string().contains(forbidden),
+                "excluded content appeared in {mode}"
+            );
+        }
+    }
+    let bytes = |pages: &[Value]| {
+        pages
+            .iter()
+            .map(|p| tool_result_bytes(p, false))
+            .sum::<usize>()
+    };
+    let baseline_bytes = tool_result_bytes(&searches[0], false) + bytes(&baseline);
+    let candidate_bytes =
+        tool_result_bytes(&searches[1], false) + bytes(&excerpt) + bytes(&expansion);
+    println!(
+        "paired {mode} {query}: baseline calls={} bytes={baseline_bytes}, candidate calls={} bytes={candidate_bytes}",
+        1 + baseline.len(),
+        1 + excerpt.len() + expansion.len()
+    );
+    assert!(
+        1 + excerpt.len() + expansion.len() <= 1 + baseline.len(),
+        "candidate needed more calls for {mode}"
+    );
+}
+
+#[tokio::test]
+async fn compact_lookup_paired_literal_and_semantic() {
+    let env = Env::new().await;
+    let literal = "Call foo::bar(42), then verify the exact result.";
+    let (literal_sid, _) = env
+        .indexed(
+            "paired-literal.jsonl",
+            &[omp_header(), omp_msg("m0", None, "user", literal)],
+        )
+        .await;
+    let semantic = "The car runs on electricity and requires an annual inspection.";
+    let (semantic_sid, _) = env
+        .indexed(
+            "paired-semantic.jsonl",
+            &[omp_header(), omp_msg("m0", None, "user", semantic)],
+        )
+        .await;
+    let search = spool::search::SearchService::new(
+        env.index.clone(),
+        env.cfg.clone(),
+        env.emb.clone(),
+        env.leases.clone(),
+        env.keys.clone(),
+    );
+    paired_source_lookup(
+        &env,
+        &search,
+        &literal_sid,
+        "foo::bar(42)",
+        "literal",
+        literal,
+        None,
+    )
+    .await;
+    paired_source_lookup(
+        &env,
+        &search,
+        &semantic_sid,
+        "automobile",
+        "semantic",
+        semantic,
+        None,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn excerpt_uses_source_block_index_after_excluded_tool_block() {
+    let env = Env::new().await;
+    let leading = "First visible text.";
+    let decisive = "Second visible text contains foo::gap(42).";
+    let lines = vec![
+        omp_header(),
+        omp_msg("u0", None, "user", "Question"),
+        omp_assistant(
+            "m0",
+            "u0",
+            vec![
+                text_block(leading),
+                call_block("t1", "shell", json!({"command":"PRIVATE_TOOL_SENTINEL"})),
+                text_block(decisive),
+            ],
+        ),
+    ];
+    let (sid, _) = env.indexed("block-gap.jsonl", &lines).await;
+    let blocks: Vec<(i64, String)> =
+        sqlx::query_as("SELECT idx,text FROM blocks WHERE record_key = 'm0' ORDER BY idx")
+            .fetch_all(&env.index.reader)
+            .await
+            .unwrap();
+    assert_eq!(blocks, vec![(0, leading.into()), (2, decisive.into())]);
+    let search = spool::search::SearchService::new(
+        env.index.clone(),
+        env.cfg.clone(),
+        env.emb.clone(),
+        env.leases.clone(),
+        env.keys.clone(),
+    );
+    let result = search
+        .call(json!({"query":"foo::gap(42)","mode":"literal","session_ids":[sid]}))
+        .await
+        .unwrap();
+    let token = result["results"][0]["matches"][0]["match_ref"]
+        .as_str()
+        .unwrap();
+    let handle = spool::transcript::refs::RefHandle::decode(
+        &env.keys.current(),
+        spool::transcript::handle::HandleKind::Match,
+        token,
+    )
+    .unwrap();
+    let payload = env
+        .leases
+        .get_ref(&handle.lease, handle.ref_id, "match")
+        .await
+        .unwrap();
+    let reference: spool::transcript::refs::MatchRef = serde_json::from_slice(&payload).unwrap();
+    assert_eq!(reference.excerpt.as_ref().unwrap()[0].span.b, 2);
+    let excerpt = env.ok(json!({"session_id":sid,"selection":{"kind":"match","match_ref":token,"excerpt_target_bytes":512}})).await;
+    assert_eq!(text_of(&items(&excerpt)[0]), decisive);
+    assert!(!excerpt.to_string().contains("PRIVATE_TOOL_SENTINEL"));
+    assert!(items(&excerpt)[0]["blocks"][0]["block_ref"].is_string());
+}
+
+#[tokio::test]
+async fn compact_lookup_paired_repeated_and_forked() {
+    let env = Env::new().await;
+    let text = format!(
+        "needle repeat qualification\n\n{}\n\nneedle repeat qualification",
+        "filler ".repeat(200)
+    );
+    let (repeated, _) = env
+        .indexed(
+            "paired-repeat.jsonl",
+            &[omp_header(), omp_msg("m0", None, "user", &text)],
+        )
+        .await;
+    let (fork, _) = env.indexed("paired-fork.jsonl", &forked()).await;
+    let search = spool::search::SearchService::new(
+        env.index.clone(),
+        env.cfg.clone(),
+        env.emb.clone(),
+        env.leases.clone(),
+        env.keys.clone(),
+    );
+    paired_source_lookup(
+        &env,
+        &search,
+        &repeated,
+        "needle",
+        "lexical",
+        "needle repeat qualification",
+        None,
+    )
+    .await;
+    paired_source_lookup(
+        &env,
+        &search,
+        &fork,
+        "branch A answer",
+        "literal",
+        "branch A answer",
+        None,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn compact_lookup_paired_excludes_codex_injected_block() {
+    let env = Env::new().await;
+    let source = concat!(
+        "{\"type\":\"session_meta\",\"payload\":{\"id\":\"paired-exclusion\"}}\n",
+        "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"m1\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"PRIVATE_INJECTED_SENTINEL\"},{\"type\":\"input_text\",\"text\":\"retained answer qualification\"}],\"internal_chat_message_metadata_passthrough\":{\"content_item_kinds\":[\"agents_md.instructions\",\"user.goal\"]}}}\n"
+    );
+    let (sid, _) = env
+        .add("codex", "paired-exclusion.jsonl", source.as_bytes())
+        .await;
+    env.index(&sid).await.unwrap();
+    let search = spool::search::SearchService::new(
+        env.index.clone(),
+        env.cfg.clone(),
+        env.emb.clone(),
+        env.leases.clone(),
+        env.keys.clone(),
+    );
+    paired_source_lookup(
+        &env,
+        &search,
+        &sid,
+        "retained answer",
+        "literal",
+        "retained answer qualification",
+        Some("PRIVATE_INJECTED_SENTINEL"),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn compact_lookup_paired_negative_query() {
+    let env = Env::new().await;
+    let (sid, _) = env
+        .indexed(
+            "paired-negative.jsonl",
+            &[
+                omp_header(),
+                omp_msg("m0", None, "user", "Known fixture content."),
+            ],
+        )
+        .await;
+    let search = spool::search::SearchService::new(
+        env.index.clone(),
+        env.cfg.clone(),
+        env.emb.clone(),
+        env.leases.clone(),
+        env.keys.clone(),
+    );
+    for mode in ["lexical", "literal"] {
+        for target in [1200, 512] {
+            let result = search.call(json!({"query":"unfindable-negative-token", "mode":mode, "session_ids":[sid], "preview_target_bytes":target, "max_bytes":8192})).await.unwrap();
+            assert!(result["results"].as_array().unwrap().is_empty());
+            assert!(tool_result_bytes(&result, false) <= 8192);
+        }
+    }
+}

@@ -243,7 +243,16 @@ impl Loader<'_, '_> {
             ));
         }
         blocks.sort_by_key(|(i, _)| *i);
-        Ok((blocks.into_iter().map(|(_, b)| b).collect(), origin))
+        Ok((
+            blocks
+                .into_iter()
+                .map(|(idx, mut b)| {
+                    b.index = Some(idx);
+                    b
+                })
+                .collect(),
+            origin,
+        ))
     }
 
     async fn source_only(
@@ -429,11 +438,19 @@ pub async fn assemble(
         },
         warnings: {
             let mut w = env.pre_warnings.clone();
+            if env.sel.excerpt.is_some() {
+                w.insert(0, Warning { code: "EXCERPT_ONLY".into(), message: "This response contains selected passages, not the complete match or session.".into() });
+            }
             w.extend(env.plan.warnings.iter().cloned());
             w
         },
     };
     let template = CursorPayload {
+        format: if env.sel.excerpt.is_some() {
+            4
+        } else {
+            super::cursor::CURSOR_FORMAT
+        },
         lease: env.anchor.lease.clone(),
         ref_id: 0,
         d: env.verbose,
@@ -477,7 +494,71 @@ pub async fn assemble(
         };
         loader.src.check_time()?;
         let warn_mark = loader.warnings.len();
-        let (blocks, origin) = loader.blocks_for(item).await?;
+        let (mut blocks, origin) = loader.blocks_for(item).await?;
+        let mut original_item_end = true;
+        if let Some(excerpt) = &env.sel.excerpt {
+            let key = &env.snap.recs[item.rec].key;
+            let mut selected = Vec::new();
+            for (range, digest) in excerpt
+                .ranges
+                .iter()
+                .zip(&excerpt.digests)
+                .filter(|(r, _)| &r.r == key)
+            {
+                let block = blocks
+                    .iter()
+                    .find(|b| b.index == Some(range.b) && b.kind == BlockClass::Text)
+                    .ok_or_else(|| {
+                        app_err(
+                            "STALE_REFERENCE",
+                            "excerpt block is missing",
+                            false,
+                            "new_read",
+                        )
+                    })?;
+                let (start, end) = (range.s as usize, range.e as usize);
+                let text = std::str::from_utf8(&block.bytes).map_err(|_| {
+                    app_err(
+                        "STALE_REFERENCE",
+                        "excerpt block is not UTF-8",
+                        false,
+                        "new_read",
+                    )
+                })?;
+                if start >= end
+                    || end > text.len()
+                    || !text.is_char_boundary(start)
+                    || !text.is_char_boundary(end)
+                {
+                    return Err(app_err(
+                        "STALE_REFERENCE",
+                        "excerpt range is invalid",
+                        false,
+                        "new_read",
+                    ));
+                }
+                if super::refs::short_digest(&block.bytes) != *digest {
+                    return Err(app_err(
+                        "STALE_REFERENCE",
+                        "excerpt block differs from the retained snapshot",
+                        false,
+                        "re_search",
+                    ));
+                }
+                let mut part = block.clone();
+                part.bytes = block.bytes[start..end].to_vec();
+                part.base = start;
+                part.excerpt = true;
+                selected.push(part);
+            }
+            original_item_end = selected.last().is_some_and(|part| {
+                blocks
+                    .last()
+                    .is_some_and(|last| part.block_ref == last.block_ref)
+                    && part.base + part.bytes.len() == part.original_total
+            });
+            blocks = selected;
+        }
         if start_b as usize > blocks.len()
             || (start_b as usize == blocks.len() && !blocks.is_empty())
         {
@@ -587,7 +668,7 @@ pub async fn assemble(
         }
         if item_done {
             if let Some(last) = items.last_mut() {
-                last.common_mut().item_end = true;
+                last.common_mut().item_end = original_item_end;
             }
             idx += 1;
         } else {
@@ -658,6 +739,10 @@ fn selection_out(env: &PageEnv<'_>, rm: &RefMaker<'_>) -> Result<SelectionOut, A
     };
     Ok(SelectionOut {
         kind: sel.kind,
+        excerpt: sel.excerpt.as_ref().map(|e| ExcerptOut {
+            target_bytes: e.target_bytes,
+            clipped: e.clipped,
+        }),
         branch_ref: sel.leaf.as_deref().map(|l| rm.branch(l)),
         from_message_ref: msg(&sel.first),
         through_message_ref: msg(&sel.last),

@@ -18,6 +18,23 @@ pub struct SpanRef {
     pub e: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExcerptAnchor {
+    pub span: SpanRef,
+    pub focus: Option<(u32, u32)>,
+    pub kind: ExcerptKind,
+    #[serde(default)]
+    pub clipped: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExcerptKind {
+    Lexical,
+    Literal,
+    Semantic,
+}
+
 /// Common anchor fields: the lease and manifest a ref belongs to; session and snapshot derive from the manifest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Anchor {
@@ -34,6 +51,8 @@ pub struct MatchRef {
     pub manifest: String,
     pub version: u32,
     pub records: Vec<MatchRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excerpt: Option<Vec<ExcerptAnchor>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

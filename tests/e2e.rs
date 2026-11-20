@@ -227,6 +227,21 @@ async fn real_daemon_index_search_read_with_three_concurrent_clients() {
         .as_str()
         .unwrap()
         .to_string();
+    let (err, excerpt) = call(&c2, "read_session", json!({"session_id": session, "selection": {"kind":"match","match_ref": match_ref, "excerpt_target_bytes":512}})).await;
+    assert!(!err, "{excerpt}");
+    validate("read_session", &excerpt);
+    assert_eq!(excerpt["source_policy"], "require_source");
+    assert_eq!(excerpt["selection"]["excerpt"]["target_bytes"], 512);
+    assert!(excerpt.to_string().contains("foo::bar_baz"));
+    assert!(
+        excerpt["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w["code"] == "EXCERPT_ONLY")
+    );
+    assert!(excerpt["items"][0]["blocks"][0]["block_ref"].is_string());
+
     let (err, r) = call(&c2, "read_session", json!({"session_id": session, "selection": {"kind":"match","match_ref": match_ref, "before":0, "after":3}})).await;
     assert!(!err, "{r}");
     validate("read_session", &r);

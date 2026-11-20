@@ -206,6 +206,21 @@ async fn codex_and_claude_fixtures_flow_through_search_and_with_tools_reads() {
         .as_str()
         .expect("codex session indexed")
         .to_string();
+    let matched = &r["results"][0]["matches"][0];
+    let mut selection =
+        json!({"kind":"match","match_ref":matched["match_ref"],"excerpt_target_bytes":512});
+    if let Some(branch) = matched.get("branch_ref") {
+        selection["branch_ref"] = branch.clone();
+    }
+    let (excerpt_error, excerpt) = call(
+        &c,
+        "read_session",
+        json!({"session_id":codex_session,"selection":selection}),
+    )
+    .await;
+    assert!(!excerpt_error, "{excerpt}");
+    assert_eq!(excerpt["source_policy"], "require_source");
+    assert!(!excerpt.to_string().contains("MUST_NOT_INDEX"));
     let (err, r) = call(
         &c,
         "read_session",
@@ -262,6 +277,21 @@ async fn codex_and_claude_fixtures_flow_through_search_and_with_tools_reads() {
         .as_str()
         .expect("claude session indexed")
         .to_string();
+    let matched = &r["results"][0]["matches"][0];
+    let mut selection =
+        json!({"kind":"match","match_ref":matched["match_ref"],"excerpt_target_bytes":512});
+    if let Some(branch) = matched.get("branch_ref") {
+        selection["branch_ref"] = branch.clone();
+    }
+    let (excerpt_error, excerpt) = call(
+        &c,
+        "read_session",
+        json!({"session_id":claude_session,"selection":selection}),
+    )
+    .await;
+    assert!(!excerpt_error, "{excerpt}");
+    assert_eq!(excerpt["source_policy"], "require_source");
+    assert!(!excerpt.to_string().contains("MUST_NOT_INDEX"));
     let (err, r) = call(
         &c,
         "read_session",

@@ -50,6 +50,15 @@
                 "null"
               ]
             },
+            "excerpt_target_bytes": {
+              "format": "uint32",
+              "maximum": 8192,
+              "minimum": 256,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "kind": {
               "const": "match",
               "type": "string"

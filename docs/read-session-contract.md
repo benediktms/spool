@@ -62,6 +62,16 @@ Resolve the original message spans represented by the match, then include the co
 
 An optional `branch_ref` may disambiguate continuation after a fork. It must preserve the anchored history and match snapshot.
 
+**Verified match excerpt**
+
+Add `excerpt_target_bytes` to a match selection to request selected source passages. The value must be from 256 through 8,192. This is a soft aggregate target. Complete paragraphs or list items can exceed the target. Returned source text has a hard aggregate limit of 8,192 bytes.
+
+The excerpt requires the `conversation` view and source verification. Omitted `before` and `after` are zero. Positive context counts are invalid. Omitted `source_policy` becomes `require_source`. Explicit `prefer_source` and `indexed_only` return `SOURCE_POLICY_CONFLICT`. The result includes `selection.excerpt` and the `EXCERPT_ONLY` notice. Each fragment includes its original block reference and byte range, even when `verbose` is false.
+
+A continuation reads the same frozen excerpt selection. It does not widen that selection. Open a new match read without `excerpt_target_bytes` for complete messages. A message reference can open one complete message. Older version-2 match payloads support full reads but return `VIEW_NOT_SUPPORTED` for excerpts. A semantic region that cannot fit also returns `VIEW_NOT_SUPPORTED` with recovery `read_full_match`. Missing or changed sources return their normal errors. Excerpts never fall back to indexed text.
+
+Ordinary full-read cursors use format 3. Excerpt cursors use format 4, which older binaries reject. New searches issue version-3 match payloads. After rollback to an older binary, run a new search if it rejects a version-3 match reference.
+
 **Message**
 
 ```json
@@ -94,7 +104,7 @@ In `raw_records`, an item reference selects its originating raw record; privileg
 
 ### 3.3 Context units
 
-`before` and `after` default to two and accept integers from zero through twenty. They exist only for match/message selections.
+`before` and `after` default to two for full reads and accept integers from zero through twenty. Excerpt reads default both to zero. They exist only for match/message selections.
 
 One conversational message is a canonical user or assistant message envelope containing at least one retained conversational block. Several text blocks in one envelope are not several context messages. Deduplicated representations of the same native message count once. Tool-only envelopes, reasoning, control records, and injected context do not count.
 
@@ -116,7 +126,7 @@ To change views or context, issue a new initial read using the original match/me
 
 `session_id` identifies a catalogued session. Message, item, branch, block, record, and match references additionally identify a particular observed snapshot or verified source identity. Native IDs are metadata; native tool-call IDs alone are not safe unique selectors.
 
-A **match reference is view-independent**. It binds source identity, ordered canonical messages, and their expected content digests, independently of the preview. The signed handle holds only the lease and a lease-scoped reference id (under 150 bytes). The message anchors and digests live in lease-retained storage and expire with the lease. An old match payload returns `STALE_REFERENCE` with recovery `re_search`.
+A **match reference is view-independent**. It binds source identity, ordered canonical messages, and their expected content digests, independently of the preview. The signed handle holds only the lease and a lease-scoped reference id (under 150 bytes). The message anchors and digests live in lease-retained storage and expire with the lease. Version-2 payloads remain valid for full reads. Unsupported payload versions return `STALE_REFERENCE` with recovery `re_search`.
 
 A **cursor is read-dependent**. It binds the resolved selection, frozen snapshot, branch, view, source policy, next item/block/byte offset, token format version, and expiry. The signed handle holds the lease, a reference id naming the lease-retained resolved selection, the verbose flag, the next position, and the token format version (under 150 bytes). Message, item and branch references carry only the lease and manifest as anchor; session and snapshot derive from the manifest. A reference whose lease expired or was swept fails with `CURSOR_EXPIRED`; one whose stored payload is gone from a live lease fails with `STALE_REFERENCE`.
 

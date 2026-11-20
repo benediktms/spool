@@ -12,6 +12,10 @@ pub struct BlockData {
     pub fidelity: FidelityOut,
     pub bytes: Vec<u8>,
     pub encoding: Encoding,
+    pub index: Option<u32>,
+    pub base: usize,
+    pub original_total: usize,
+    pub excerpt: bool,
 }
 
 impl BlockData {
@@ -23,12 +27,17 @@ impl BlockData {
         } else {
             Encoding::Base64
         };
+        let original_total = bytes.len();
         Self {
             block_ref,
             kind,
             fidelity,
             bytes,
             encoding,
+            index: None,
+            base: 0,
+            original_total,
+            excerpt: false,
         }
     }
 
@@ -74,17 +83,17 @@ impl BlockData {
             Encoding::Base64 => base64::engine::general_purpose::STANDARD.encode(slice),
         };
         let whole = start == 0 && end == self.bytes.len();
-        let ranged = verbose || !whole;
+        let ranged = verbose || !whole || self.excerpt;
         Fragment {
-            block_ref: verbose.then(|| self.block_ref.clone()),
+            block_ref: (verbose || self.excerpt).then(|| self.block_ref.clone()),
             kind: self.kind,
             encoding: (verbose || self.encoding != Encoding::Utf8).then_some(self.encoding),
             fidelity: self.fidelity,
             data,
-            start_byte: ranged.then_some(start as u64),
-            end_byte: ranged.then_some(end as u64),
-            total_bytes: ranged.then_some(self.bytes.len() as u64),
-            is_last: ranged.then_some(end == self.bytes.len()),
+            start_byte: ranged.then_some((self.base + start) as u64),
+            end_byte: ranged.then_some((self.base + end) as u64),
+            total_bytes: ranged.then_some(self.original_total as u64),
+            is_last: ranged.then_some(self.base + end == self.original_total),
         }
     }
 }

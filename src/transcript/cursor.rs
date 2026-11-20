@@ -22,6 +22,7 @@ pub struct CursorSel {
 /// Signed cursor body, serialized as the array `[format, lease, ref_id, verbose, i, b, o, n]`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CursorPayload {
+    pub format: u8,
     pub lease: String,
     pub ref_id: i64,
     /// `verbose` output of the initial read.
@@ -39,7 +40,7 @@ type Wire = (u8, String, i64, bool, u32, u32, u64, String);
 impl CursorPayload {
     pub fn encode(&self, key: &HandleKey) -> String {
         let wire = (
-            CURSOR_FORMAT,
+            self.format,
             &self.lease,
             self.ref_id,
             self.d,
@@ -64,10 +65,11 @@ impl CursorPayload {
                 },
             );
         };
-        if f != CURSOR_FORMAT {
+        if !matches!(f, CURSOR_FORMAT | 4) {
             return Err(HandleError::UnsupportedVersion);
         }
         Ok(Self {
+            format: f,
             lease,
             ref_id,
             d,
@@ -104,6 +106,7 @@ mod tests {
     fn roundtrip_and_tamper() {
         let key = HandleKey::for_test(1);
         let c = CursorPayload {
+            format: CURSOR_FORMAT,
             lease: "l".into(),
             ref_id: 1,
             d: false,

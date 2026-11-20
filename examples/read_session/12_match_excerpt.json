@@ -1,0 +1,121 @@
+{
+  "description": "Read a source-verified match excerpt.",
+  "request": {
+    "session_id": "ss_cf861e31d72225b3add0124e",
+    "selection": {
+      "kind": "match",
+      "match_ref": "v1.m.1.WyJsc19jYjk2OWVlMTVjZGI0YWJhYWE4MTBiN2UiLDFd.y9-EuRjlT-JlMhM7jyoKpA",
+      "excerpt_target_bytes": 512
+    },
+    "max_bytes": 8192
+  },
+  "response": {
+    "coverage": {
+      "reasons": [],
+      "status": "complete"
+    },
+    "items": [
+      {
+        "blocks": [
+          {
+            "block_ref": "blk_e541f47f15b8c593",
+            "data": "remote secret debug Background context sentence. Background context sentence. Background context sentence. Background context sentence. Background context sentence. Background context sentence. Background context sentence. Background context sentence. Background context sentence. Background context sentence. Background context sentence. Background context sentence. Background context sentence. Background context sentence. Background context sentence. Background context sentence. Background context sentence. Background context sentence. Background context sentence. Background context sentence. Background context sentence. Background context sentence. Background context sentence. Background context sentence. Background context sentence. Background context sentence. Background context sentence. Background context sentence. Background context sentence. Background context sentence. Background context sentence. Background context sentence. Background context sentence. Background context sentence. Background context sentence. Background context sentence. Background context sentence. Background context sentence. Background context sentence. Background context sentence. Background context sentence. Background context sentence. Background context sentence. Background context sentence. Background context sentence. Background context sentence. Background context sentence.",
+            "end_byte": 1382,
+            "fidelity": "verbatim",
+            "is_last": false,
+            "kind": "text",
+            "start_byte": 0,
+            "total_bytes": 1760
+          }
+        ],
+        "item_end": false,
+        "item_ref": "v2.i.1.WyJsc19jYjk2OWVlMTVjZGI0YWJhYWE4MTBiN2UiLCJtZl9kYTEwZDg4NzQ4Mzk2ZTY0MzkyMWM1YWUiLCJtZXNzYWdlIiwiYTAwMDAwMDEiLG51bGwsIjhiMzBmM2QyNGQ3YmQ5N2IzZjU0NzNlZWJhOTc5NmY0Il0.d360n59EJOvGMXQcPGvjpA",
+        "kind": "message",
+        "message_ref": "v2.g.1.WyJsc19jYjk2OWVlMTVjZGI0YWJhYWE4MTBiN2UiLCJtZl9kYTEwZDg4NzQ4Mzk2ZTY0MzkyMWM1YWUiLCJhMDAwMDAwMSIsIjhiMzBmM2QyNGQ3YmQ5N2IzZjU0NzNlZWJhOTc5NmY0Il0.uQwERES1_i2YhsReXlScNQ",
+        "phase": null,
+        "provenance": {
+          "origin": "verified_source"
+        },
+        "role": "user",
+        "timestamp": "2026-10-12T09:00:01Z",
+        "turn_ref": "a0000001"
+      },
+      {
+        "blocks": [
+          {
+            "block_ref": "blk_59bb158bfc33d08e",
+            "data": "Normalize fake credentials before Debug, including remote URLs.",
+            "end_byte": 63,
+            "fidelity": "verbatim",
+            "is_last": true,
+            "kind": "text",
+            "start_byte": 0,
+            "total_bytes": 63
+          }
+        ],
+        "item_end": true,
+        "item_ref": "v2.i.1.WyJsc19jYjk2OWVlMTVjZGI0YWJhYWE4MTBiN2UiLCJtZl9kYTEwZDg4NzQ4Mzk2ZTY0MzkyMWM1YWUiLCJtZXNzYWdlIiwiYTAwMDAwMDIiLG51bGwsImIyYzA3YjMxY2M1ZDEyYzU1MjU1NmIxZDg0YzkxNjAxIl0.DLWLs3DcxS5wMMMo06C0ug",
+        "kind": "message",
+        "message_ref": "v2.g.1.WyJsc19jYjk2OWVlMTVjZGI0YWJhYWE4MTBiN2UiLCJtZl9kYTEwZDg4NzQ4Mzk2ZTY0MzkyMWM1YWUiLCJhMDAwMDAwMiIsImIyYzA3YjMxY2M1ZDEyYzU1MjU1NmIxZDg0YzkxNjAxIl0.YiV6BZAWooTRunOs2Ia0-g",
+        "phase": null,
+        "provenance": {
+          "origin": "verified_source"
+        },
+        "role": "assistant",
+        "timestamp": "2026-10-12T09:00:02Z",
+        "turn_ref": "a0000001"
+      }
+    ],
+    "navigation": {
+      "after_message_ref": null,
+      "before_message_ref": null
+    },
+    "page": {
+      "next_cursor": null,
+      "selection_exhausted": true,
+      "stop_reason": "selection_end"
+    },
+    "selection": {
+      "after": {
+        "requested": 0,
+        "resolved": 0
+      },
+      "anchor_message_refs": [
+        "v2.g.1.WyJsc19jYjk2OWVlMTVjZGI0YWJhYWE4MTBiN2UiLCJtZl9kYTEwZDg4NzQ4Mzk2ZTY0MzkyMWM1YWUiLCJhMDAwMDAwMSIsIjhiMzBmM2QyNGQ3YmQ5N2IzZjU0NzNlZWJhOTc5NmY0Il0.uQwERES1_i2YhsReXlScNQ",
+        "v2.g.1.WyJsc19jYjk2OWVlMTVjZGI0YWJhYWE4MTBiN2UiLCJtZl9kYTEwZDg4NzQ4Mzk2ZTY0MzkyMWM1YWUiLCJhMDAwMDAwMiIsImIyYzA3YjMxY2M1ZDEyYzU1MjU1NmIxZDg0YzkxNjAxIl0.YiV6BZAWooTRunOs2Ia0-g"
+      ],
+      "before": {
+        "requested": 0,
+        "resolved": 0
+      },
+      "branch_ref": "v2.b.1.WyJsc19jYjk2OWVlMTVjZGI0YWJhYWE4MTBiN2UiLCJtZl9kYTEwZDg4NzQ4Mzk2ZTY0MzkyMWM1YWUiLCJhMDAwMDAwMiJd.CBvKeCGUAOjlgnv6Gq2Rrg",
+      "excerpt": {
+        "clipped": false,
+        "target_bytes": 512
+      },
+      "from_message_ref": "v2.g.1.WyJsc19jYjk2OWVlMTVjZGI0YWJhYWE4MTBiN2UiLCJtZl9kYTEwZDg4NzQ4Mzk2ZTY0MzkyMWM1YWUiLCJhMDAwMDAwMSIsIjhiMzBmM2QyNGQ3YmQ5N2IzZjU0NzNlZWJhOTc5NmY0Il0.uQwERES1_i2YhsReXlScNQ",
+      "kind": "match",
+      "through_message_ref": "v2.g.1.WyJsc19jYjk2OWVlMTVjZGI0YWJhYWE4MTBiN2UiLCJtZl9kYTEwZDg4NzQ4Mzk2ZTY0MzkyMWM1YWUiLCJhMDAwMDAwMiIsImIyYzA3YjMxY2M1ZDEyYzU1MjU1NmIxZDg0YzkxNjAxIl0.YiV6BZAWooTRunOs2Ia0-g"
+    },
+    "session": {
+      "native_id": "codex_remote_secret",
+      "native_title": "codex_remote_secret",
+      "session_id": "ss_cf861e31d72225b3add0124e",
+      "source_id": "omp"
+    },
+    "snapshot": {
+      "kind": "indexed",
+      "lease_expires_at": "2026-11-20T11:19:46.285Z",
+      "observed_at": "2026-11-20T10:49:45.323Z",
+      "snapshot_id": "snap_d967eb3b0ff7d97ecd4093bf"
+    },
+    "source_policy": "require_source",
+    "view": "conversation",
+    "warnings": [
+      {
+        "code": "EXCERPT_ONLY",
+        "message": "This response contains selected passages, not the complete match or session."
+      }
+    ]
+  }
+}

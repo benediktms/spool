@@ -400,6 +400,8 @@ pub struct ItemSel {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ResolvedSel {
     pub kind: SelKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excerpt: Option<ExcerptSelection>,
     /// Branch leaf message record key (the persisted path is root -> leaf). `None`: no messages.
     pub leaf: Option<String>,
     pub first: Option<String>,
@@ -409,6 +411,14 @@ pub struct ResolvedSel {
     pub item: Option<ItemSel>,
     pub before: Option<(u32, u32)>,
     pub after: Option<(u32, u32)>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExcerptSelection {
+    pub target_bytes: u32,
+    pub clipped: bool,
+    pub ranges: Vec<super::refs::SpanRef>,
+    pub digests: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -484,6 +494,7 @@ pub fn resolve_session(snap: &Snap, branch_leaf: Option<&str>) -> Result<Resolve
     };
     Ok(ResolvedSel {
         kind: SelKind::Session,
+        excerpt: None,
         leaf,
         first,
         last,
@@ -552,6 +563,7 @@ pub fn resolve_window(
     let hi = (a_hi + w.after as usize).min(path.len() - 1);
     Ok(ResolvedSel {
         kind,
+        excerpt: None,
         leaf: Some(leaf_key),
         first: Some(snap.msgs[path[lo]].key.clone()),
         last: Some(snap.msgs[path[hi]].key.clone()),
@@ -595,6 +607,7 @@ pub fn resolve_range(
     }
     Ok(ResolvedSel {
         kind: SelKind::Range,
+        excerpt: None,
         leaf: Some(leaf_key),
         first: Some(from.to_string()),
         last: Some(through.to_string()),
@@ -617,6 +630,7 @@ pub fn resolve_item(
 ) -> Result<ResolvedSel, SelFail> {
     let mut sel = ResolvedSel {
         kind: SelKind::Item,
+        excerpt: None,
         leaf: None,
         first: None,
         last: None,
@@ -894,6 +908,14 @@ pub fn build_plan(
                 .ok_or_else(|| AppError::new("STORAGE_ERROR", "tool metadata was not loaded"))?;
             with_tools_plan(snap, tools, leaf, first, last, &window, &mut plan)?;
         }
+    }
+    if let Some(excerpt) = &sel.excerpt {
+        plan.items.retain(|item| {
+            excerpt
+                .ranges
+                .iter()
+                .any(|range| range.r == snap.recs[item.rec].key)
+        });
     }
     Ok(plan)
 }

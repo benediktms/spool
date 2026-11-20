@@ -354,6 +354,18 @@ fn read_flags_map_one_to_one() {
         json!({"session_id":"ss_1","selection":{"kind":"match","match_ref":"M","before":1,"after":0,"branch_ref":"B"},
                "view":"with_tools","source_policy":"require_source","max_bytes":8192,"max_items":7})
     );
+    let r = read_request(&read_args(&[
+        "ss_1",
+        "--match-ref",
+        "M",
+        "--excerpt-target-bytes",
+        "512",
+    ]))
+    .unwrap();
+    assert_eq!(
+        r,
+        json!({"session_id":"ss_1","selection":{"kind":"match","match_ref":"M","excerpt_target_bytes":512}})
+    );
     let r = read_request(&read_args(&["ss_1", "--message-ref", "X"])).unwrap();
     assert_eq!(
         r,
@@ -398,6 +410,27 @@ fn read_flags_map_one_to_one() {
 #[test]
 fn incompatible_read_flags_are_rejected_before_any_call() {
     let bad: &[&[&str]] = &[
+        &["ss_1", "--excerpt-target-bytes", "512"],
+        &[
+            "ss_1",
+            "--match-ref",
+            "M",
+            "--excerpt-target-bytes",
+            "512",
+            "--before",
+            "1",
+        ],
+        &[
+            "ss_1",
+            "--match-ref",
+            "M",
+            "--excerpt-target-bytes",
+            "512",
+            "--source-policy",
+            "indexed_only",
+        ],
+        &["ss_1", "--match-ref", "M", "--excerpt-target-bytes", "255"],
+        &["--cursor", "C", "--excerpt-target-bytes", "512"],
         &["ss_1", "--match-ref", "M", "--message-ref", "X"],
         &["ss_1", "--match-ref", "M", "--item-ref", "I"],
         &[
