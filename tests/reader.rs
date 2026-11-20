@@ -2052,7 +2052,7 @@ async fn excerpt_pages_preserve_verified_source_ranges() {
             }],
         )
         .await;
-    let req = json!({"session_id":sid,"max_bytes":4096,"selection":{"kind":"match","match_ref":reference,"excerpt_target_bytes":512}});
+    let req = json!({"session_id":sid,"max_bytes":4096,"verbose":false,"selection":{"kind":"match","match_ref":reference,"excerpt_target_bytes":512}});
     let pages = env.pages(req, 4096).await;
     assert!(pages.len() > 1);
     let cursor = pages[0]["page"]["next_cursor"]
@@ -2072,6 +2072,9 @@ async fn excerpt_pages_preserve_verified_source_ranges() {
     for page in &pages {
         assert_eq!(page["source_policy"], "require_source");
         assert_eq!(page["selection"]["excerpt"]["clipped"], true);
+        assert!(page["selection"]["anchor_message_refs"][0].is_string());
+        assert_eq!(page["selection"]["from_message_ref"], Value::Null);
+        assert_eq!(page["selection"]["through_message_ref"], Value::Null);
         for item in items(page) {
             for block in item["blocks"].as_array().unwrap() {
                 assert!(block["block_ref"].is_string());
@@ -2081,9 +2084,24 @@ async fn excerpt_pages_preserve_verified_source_ranges() {
     }
     assert_eq!(combined, text[start..end]);
     let expanded = env
-        .ok(json!({"session_id":sid,"selection":{"kind":"match","match_ref":reference}}))
+        .ok(json!({"session_id":sid,"verbose":false,"selection":{"kind":"match","match_ref":reference}}))
         .await;
     assert!(text_of(&items(&expanded)[0]).contains("before"));
+    assert!(expanded["selection"]["from_message_ref"].is_string());
+    assert!(expanded["selection"]["through_message_ref"].is_string());
+    let verbose = env
+        .ok(json!({"session_id":sid,"verbose":true,"selection":{"kind":"match","match_ref":reference,"excerpt_target_bytes":512}}))
+        .await;
+    let selection = &verbose["selection"];
+    assert!(selection["anchor_message_refs"][0].is_string());
+    assert_eq!(
+        selection["from_message_ref"],
+        selection["anchor_message_refs"][0]
+    );
+    assert_eq!(
+        selection["through_message_ref"],
+        selection["anchor_message_refs"][0]
+    );
     let invalid = env.err(json!({"session_id":sid,"selection":{"kind":"match","match_ref":reference,"excerpt_target_bytes":512},"source_policy":"indexed_only"})).await;
     assert_eq!(invalid.code, "SOURCE_POLICY_CONFLICT");
     sqlx::query("UPDATE sessions SET excluded=1 WHERE id = ?")

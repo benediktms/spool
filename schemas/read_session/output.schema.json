@@ -505,7 +505,7 @@
           ]
         },
         "from_message_ref": {
-          "description": "First inclusive conversational message of the selected window.",
+          "description": "First inclusive message. In a non-verbose excerpt, null can refer to the first anchor.",
           "type": [
             "string",
             "null"
@@ -522,7 +522,7 @@
           "$ref": "#/$defs/SelKind"
         },
         "through_message_ref": {
-          "description": "Last inclusive conversational message of the selected window.",
+          "description": "Last inclusive message. In a non-verbose excerpt, null can refer to the last anchor.",
           "type": [
             "string",
             "null"

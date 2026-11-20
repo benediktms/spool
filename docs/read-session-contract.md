@@ -68,6 +68,8 @@ Add `excerpt_target_bytes` to a match selection to request selected source passa
 
 The excerpt requires the `conversation` view and source verification. Omitted `before` and `after` are zero. Positive context counts are invalid. Omitted `source_policy` becomes `require_source`. Explicit `prefer_source` and `indexed_only` return `SOURCE_POLICY_CONFLICT`. The result includes `selection.excerpt` and the `EXCERPT_ONLY` notice. Each fragment includes its original block reference and byte range, even when `verbose` is false.
 
+In a non-verbose excerpt, a null `from_message_ref` or `through_message_ref` uses the first or last entry in `anchor_message_refs`, respectively. Verbose excerpts return both endpoint references.
+
 A continuation reads the same frozen excerpt selection. It does not widen that selection. Open a new match read without `excerpt_target_bytes` for complete messages. A message reference can open one complete message. Older version-2 match payloads support full reads but return `VIEW_NOT_SUPPORTED` for excerpts. A semantic region that cannot fit also returns `VIEW_NOT_SUPPORTED` with recovery `read_full_match`. Missing or changed sources return their normal errors. Excerpts never fall back to indexed text.
 
 Ordinary full-read cursors use format 3. Excerpt cursors use format 4, which older binaries reject. New searches issue version-3 match payloads. After rollback to an older binary, run a new search if it rejects a version-3 match reference.

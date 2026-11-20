@@ -733,6 +733,14 @@ pub async fn assemble(
 fn selection_out(env: &PageEnv<'_>, rm: &RefMaker<'_>) -> Result<SelectionOut, AppError> {
     let sel = env.sel;
     let msg = |k: &Option<String>| k.as_deref().and_then(|k| rm.message(k));
+    let compact = sel.excerpt.is_some() && !env.verbose;
+    let endpoint = |key: &Option<String>, anchor: Option<&String>| {
+        if compact && key.as_ref() == anchor {
+            None
+        } else {
+            msg(key)
+        }
+    };
     let item_ref = sel.item.as_ref().and_then(|i| rm.item(i.k, &i.r, i.b));
     let count = |c: Option<(u32, u32)>| {
         c.map(|(requested, resolved)| ContextCount {
@@ -747,8 +755,8 @@ fn selection_out(env: &PageEnv<'_>, rm: &RefMaker<'_>) -> Result<SelectionOut, A
             clipped: e.clipped,
         }),
         branch_ref: sel.leaf.as_deref().map(|l| rm.branch(l)),
-        from_message_ref: msg(&sel.first),
-        through_message_ref: msg(&sel.last),
+        from_message_ref: endpoint(&sel.first, sel.anchors.first()),
+        through_message_ref: endpoint(&sel.last, sel.anchors.last()),
         anchor_message_refs: sel.anchors.iter().filter_map(|a| rm.message(a)).collect(),
         item_ref,
         before: count(sel.before),

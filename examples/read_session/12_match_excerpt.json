@@ -93,9 +93,9 @@
         "clipped": false,
         "target_bytes": 512
       },
-      "from_message_ref": "v2.g.1.WyJsc19jYjk2OWVlMTVjZGI0YWJhYWE4MTBiN2UiLCJtZl9kYTEwZDg4NzQ4Mzk2ZTY0MzkyMWM1YWUiLCJhMDAwMDAwMSIsIjhiMzBmM2QyNGQ3YmQ5N2IzZjU0NzNlZWJhOTc5NmY0Il0.uQwERES1_i2YhsReXlScNQ",
+      "from_message_ref": null,
       "kind": "match",
-      "through_message_ref": "v2.g.1.WyJsc19jYjk2OWVlMTVjZGI0YWJhYWE4MTBiN2UiLCJtZl9kYTEwZDg4NzQ4Mzk2ZTY0MzkyMWM1YWUiLCJhMDAwMDAwMiIsImIyYzA3YjMxY2M1ZDEyYzU1MjU1NmIxZDg0YzkxNjAxIl0.YiV6BZAWooTRunOs2Ia0-g"
+      "through_message_ref": null
     },
     "session": {
       "native_id": "codex_remote_secret",

@@ -202,10 +202,10 @@ pub struct SelectionOut {
     /// Resolved persisted path. Null when the selection has no messages.
     #[schemars(required, schema_with = "nullable_string")]
     pub branch_ref: Option<String>,
-    /// First inclusive conversational message of the selected window.
+    /// First inclusive message. In a non-verbose excerpt, null can refer to the first anchor.
     #[schemars(required, schema_with = "nullable_string")]
     pub from_message_ref: Option<String>,
-    /// Last inclusive conversational message of the selected window.
+    /// Last inclusive message. In a non-verbose excerpt, null can refer to the last anchor.
     #[schemars(required, schema_with = "nullable_string")]
     pub through_message_ref: Option<String>,
     /// Messages the search match / message reference anchors to (range: both endpoints).
