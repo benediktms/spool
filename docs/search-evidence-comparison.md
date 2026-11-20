@@ -286,3 +286,24 @@ The paired MCP corpus covers lexical queries. Additional in-process paired tests
 | Excluded Codex instruction | 2 / 4,100 | 2 / 4,057 |
 
 Each case checks the required source text, full-match records, and canonical anchors. The excluded instruction case also checks that neither path exposes its sentinel. A separate paired negative query returns no result at either target. A separate test verifies a source hit after byte 2,000,000. It does not compare the cost of both paths. The single-case `compact_lookup_paired_gate` test demonstrates an expansion cost. These synthetic checks do not establish a general cost or quality result.
+
+## Hard preview cap trials
+
+Two isolated MCP trials applied a 512-byte cap only when the preview target was omitted. The figures predate the later reader envelope change. Explicit targets kept their soft behavior. The first trial clipped around the first query hit after it joined passages. It reduced search budget bytes from 21,836 to 15,284 and complete lookup bytes from 81,250 to 55,570. Calls fell from 18 to 16. It lost the later answer or qualification in seven of eight previews.
+
+The second trial allocated space to short selected passages first, then clipped longer passages around their query focus. It kept all eight frozen preview answers. Search budget bytes fell from 21,836 to 15,316. Complete lookup bytes fell from 81,250 to 55,606. Calls fell from 18 to 16. The existing PR used 62,126 bytes and 16 calls for the same lookups.
+
+A held-out UTF-8 case put the query hit and a later qualification in one paragraph. The existing preview included the qualification. The second trial clipped it. The paired analyzer rejected the candidate. The cap also needs a safe policy for semantic-only previews because an embedding score does not locate a precise text span. Neither trial changes the retained 1,200-byte soft default.
+
+Set `SPOOL_COMPACT_HELDOUT=1` on both capture commands to add the held-out case. Use a new temporary directory for the pair. The analyzer checks the omitted target as well as the explicit targets. These synthetic cases do not establish general evidence quality or token savings.
+
+## Compact excerpt endpoints
+
+Non-verbose excerpts reuse the first or last anchor when an endpoint is identical. This saves two copies of a signed message reference in a typical match read. The excerpt text and the references needed to expand it stay available.
+
+| Isolated MCP replay | Baseline calls | Candidate calls | Baseline budget bytes | Candidate budget bytes | Reduction |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Original eight cases | 18 | 16 | 81,250 | 59,358 | 26.9% |
+| Nine cases, including held-out UTF-8 | 20 | 18 | 87,815 | 64,961 | 26.0% |
+
+Both replays retained the ordered match records and all required evidence. Search responses used the same bytes in both builds. The complete lookup met the proposed byte gate in these samples. The search change still missed its separate gate.
