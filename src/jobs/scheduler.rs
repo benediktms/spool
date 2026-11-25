@@ -464,7 +464,8 @@ impl Reconciler {
               AND NOT EXISTS (SELECT 1 FROM embeddings e WHERE e.profile_id = ?4 AND e.input_hash = c.input_hash))) \
               OR (s.index_state = 'indexed' AND NOT EXISTS (SELECT 1 FROM snapshots sn WHERE sn.id = s.active_snapshot_id \
                AND ((src.kind = 'opencode' AND sn.source_revision = ('opencode_sqlite_v1:' || n.event_sequence)) \
-                 OR (src.kind != 'opencode' AND sn.source_revision LIKE (f.size || ':' || f.mtime_ms || ':' || f.dev || ':' || f.ino || ':%')))))"
+                 OR (src.kind != 'opencode' AND sn.source_revision LIKE (f.size || ':' || f.mtime_ms || ':' || f.dev || ':' || f.ino || ':%'))))) \
+              OR (s.index_state = 'empty' AND s.empty_source_revision NOT LIKE (f.size || ':' || f.mtime_ms || ':' || f.dev || ':' || f.ino || ':%'))"
         } else {
             ""
         };

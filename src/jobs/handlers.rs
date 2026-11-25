@@ -366,6 +366,7 @@ async fn settle(
                         settle_indexed(idx, &s.id).await;
                     }
                 }
+                IndexOutcome::Empty { .. } => {}
                 IndexOutcome::Superseded => set("pending", None, None, None).await,
                 IndexOutcome::Excluded => {}
                 IndexOutcome::Deferred(DeferReason::SourceChanged) => {

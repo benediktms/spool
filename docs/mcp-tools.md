@@ -182,6 +182,11 @@ overall state: `ready`, `lexical_only`, `ingesting`, `provider_blocked`, `ingest
 `unsupported_format` or `storage_error`. "Daemon healthy" does not mean every file has been
 embedded. It never returns API keys, the signing key, transcript text or full queries.
 
+For Factory Droid, a valid transcript with no searchable text is cataloged as `empty`, not
+`indexed`. It has no published index snapshot. `sessions_total` still includes catalog entries;
+`sessions_by_state.empty` and `queue.empty` report eligible empty sessions separately.
+Discovery rechecks a transcript when it changes.
+
 CLI equivalent: `spool status [--json]`; `spool doctor` adds local checks.
 
 ## Errors

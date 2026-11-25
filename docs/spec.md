@@ -284,6 +284,8 @@ Known synthetic summary/compaction markers and injected hook content remain outs
 
 Factory is an experimental local source, disabled by default, with the suggested root `~/.factory/sessions`. Require a complete `session_start` v2 header with a native session ID. Use saved record `id` and `parentId` links; do not guess cross-session lineage or the active branch. Classify headers with a calling session or tool-use ID as subagent sessions. A valid header without messages contains no searchable conversation.
 
+Settle a complete Factory parse with no searchable chunks as `empty`, without a published index snapshot. Keep the catalog identity and observed revision so discovery can requeue a changed transcript and an unchanged one does not repeatedly enter bulk indexing. Retire any preceding published snapshot under the usual reader lease rules. A partial parse must keep its diagnostics; it is not classified as empty.
+
 Retain only plain text blocks of ordinary user and assistant messages. Exclude explicitly scoped messages, system notices, tool use/results, reasoning, and control payloads. Mark retained user text with unproven authorship as `unknown`. Return only the `conversation` view, with source verification against the original JSONL. Do not fetch missing history or use Factory's settings sidecars, hooks, or cloud API.
 
 ### 5.6 Subagents

@@ -24,6 +24,7 @@ pub enum PublishOutcome {
         generation: i64,
         retired_snapshot: Option<String>,
     },
+    Empty,
     /// The session moved on (generation, fingerprint or the staging row is gone). Staging deleted.
     Superseded,
     /// The session is excluded/tombstoned. Staging deleted; nothing was published.
@@ -68,6 +69,7 @@ pub async fn publish(
             generation: expected_generation,
             fingerprint,
             native: None,
+            follow_up: false,
         },
         plan,
     )
@@ -87,6 +89,7 @@ pub(crate) struct PublishExpectation<'a> {
     pub generation: i64,
     pub fingerprint: &'a str,
     pub native: Option<NativePublishGuard<'a>>,
+    pub follow_up: bool,
 }
 
 pub(crate) async fn publish_guarded(
@@ -101,15 +104,16 @@ pub(crate) async fn publish_guarded(
         generation: expected_generation,
         fingerprint,
         native,
+        follow_up,
     } = expected;
     let now = clock.now_ms();
     let mut tx = index.writer.begin().await?;
 
     let sess = sqlx::query(
-        "SELECT s.generation, s.active_snapshot_id, s.tombstoned_at IS NOT NULL AS tomb, \
+        "SELECT s.generation, s.active_snapshot_id, s.last_activity_at, src.kind, src.enabled, s.tombstoned_at IS NOT NULL AS tomb, \
                 (s.excluded = 1 OR EXISTS (SELECT 1 FROM exclusions e WHERE (e.kind='session' AND e.target_id = s.id) \
                                            OR (e.kind='source' AND e.target_id = s.source_id))) AS excl \
-         FROM sessions s WHERE s.id = ?",
+         FROM sessions s JOIN sources src ON src.id = s.source_id WHERE s.id = ?",
     )
     .bind(session_id)
     .fetch_optional(&mut *tx)
@@ -121,8 +125,9 @@ pub(crate) async fn publish_guarded(
     let generation: i64 = sess.get("generation");
     let active: Option<&str> = sess.get("active_snapshot_id");
     let excluded = sess.get::<i64, _>("excl") != 0 || sess.get::<i64, _>("tomb") != 0;
+    let factory = sess.get::<&str, _>("kind") == "factory";
 
-    let snap = sqlx::query("SELECT state, fingerprint, counts_json, coverage, generation FROM snapshots WHERE id = ? AND session_id = ? AND kind = 'indexed'")
+    let snap = sqlx::query("SELECT state, fingerprint, counts_json, coverage, source_revision FROM snapshots WHERE id = ? AND session_id = ? AND kind = 'indexed'")
         .bind(snapshot_id)
         .bind(session_id)
         .fetch_optional(&mut *tx)
@@ -130,7 +135,7 @@ pub(crate) async fn publish_guarded(
 
     let reject = if excluded {
         Some(PublishOutcome::Excluded)
-    } else if generation != expected_generation {
+    } else if generation != expected_generation || (factory && !sess.get::<bool, _>("enabled")) {
         Some(PublishOutcome::Superseded)
     } else {
         match &snap {
@@ -176,6 +181,18 @@ pub(crate) async fn publish_guarded(
     let meta: StageMeta = serde_json::from_str(snap.get::<&str, _>("counts_json"))
         .map_err(|_| StageError::Storage("snapshot meta".into()))?;
     let coverage: &str = snap.get("coverage");
+    let empty = factory && plan.is_empty() && coverage == "complete";
+    let last_activity = if empty {
+        meta.last_activity_at
+            .or_else(|| sess.get("last_activity_at"))
+    } else {
+        meta.last_activity_at
+    };
+    let index_state = match (empty, follow_up) {
+        (true, true) => "pending",
+        (true, false) => "empty",
+        (false, _) => "indexed",
+    };
 
     for batch in plan.chunks(MAX_BINDS / CHUNK_COLS) {
         let ids: Vec<String> = batch
@@ -234,18 +251,23 @@ pub(crate) async fn publish_guarded(
     }
 
     let new_generation = generation + 1;
-    sqlx::query("UPDATE snapshots SET state='published', published_at=?, generation=? WHERE id=?")
+    if !empty {
+        sqlx::query(
+            "UPDATE snapshots SET state='published', published_at=?, generation=? WHERE id=?",
+        )
         .bind(now)
         .bind(new_generation)
         .bind(snapshot_id)
         .execute(&mut *tx)
         .await?;
+    }
     sqlx::query(
         "UPDATE sessions SET active_snapshot_id=?, generation=?, native_title=?, cwd=?, session_kind=?, lineage_native_id=?, lineage_verified=?, \
-         created_at=?, last_activity_at=?, coverage_status=?, index_state='indexed', index_error=NULL, observed_fingerprint=?, remote=COALESCE(?, remote), \
+         created_at=?, last_activity_at=?, coverage_status=?, index_state=?, index_error=NULL, observed_fingerprint=?, empty_source_revision=?, remote=COALESCE(?, remote), \
+         index_attempts=CASE WHEN ? THEN 0 ELSE index_attempts END, defer_until=CASE WHEN ? THEN NULL ELSE defer_until END, \
          project_id=CASE WHEN cwd IS NOT ? AND project_id IN (SELECT id FROM projects WHERE kind='path') THEN NULL ELSE project_id END WHERE id=?",
     )
-    .bind(snapshot_id)
+    .bind((!empty).then_some(snapshot_id))
     .bind(new_generation)
     .bind(&meta.title)
     .bind(&meta.cwd)
@@ -253,10 +275,14 @@ pub(crate) async fn publish_guarded(
     .bind(&meta.lineage)
     .bind(meta.lineage_verified as i64)
     .bind(meta.started_at)
-    .bind(meta.last_activity_at)
+    .bind(last_activity)
     .bind(coverage)
+    .bind(index_state)
     .bind(fingerprint)
+    .bind(empty.then(|| snap.get::<&str, _>("source_revision")))
     .bind(&meta.remote)
+    .bind(empty)
+    .bind(empty)
     .bind(&meta.cwd)
     .bind(session_id)
     .execute(&mut *tx)
@@ -270,14 +296,13 @@ pub(crate) async fn publish_guarded(
         _ => None,
     };
     // Obsolete concurrent stagings of this session can never publish now.
-    sqlx::query(
-        "DELETE FROM snapshots WHERE session_id=? AND kind='indexed' AND state='staging' AND id<>?",
-    )
-    .bind(session_id)
-    .bind(snapshot_id)
-    .execute(&mut *tx)
-    .await?;
-    bump_epoch(&mut tx).await?;
+    sqlx::query("DELETE FROM snapshots WHERE session_id=? AND kind='indexed' AND state='staging'")
+        .bind(session_id)
+        .execute(&mut *tx)
+        .await?;
+    if !empty || retired.is_some() {
+        bump_epoch(&mut tx).await?;
+    }
     if let Some(guard) = native {
         if guard.cancel.load(Ordering::Relaxed) {
             tx.rollback().await?;
@@ -301,6 +326,9 @@ pub(crate) async fn publish_guarded(
         }
     }
     tx.commit().await?;
+    if empty {
+        return Ok(PublishOutcome::Empty);
+    }
     Ok(PublishOutcome::Published {
         generation: new_generation,
         retired_snapshot: retired,

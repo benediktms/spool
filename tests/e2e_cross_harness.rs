@@ -62,7 +62,7 @@ fn sandbox() -> tempfile::TempDir {
         .unwrap()
 }
 
-fn setup(tmp: tempfile::TempDir, native_db: Option<&Path>, factory: bool) -> Env {
+fn setup(tmp: tempfile::TempDir, native_db: Option<&Path>, factory: Option<&str>) -> Env {
     let home = tmp.path().join("h");
     let (codex, claude) = (tmp.path().join("codex"), tmp.path().join("claude/proj-a"));
     std::fs::create_dir_all(&codex).unwrap();
@@ -80,19 +80,15 @@ fn setup(tmp: tempfile::TempDir, native_db: Option<&Path>, factory: bool) -> Env
     .unwrap();
     let mut args = vec![
         "init",
-        "--enable-source",
-        "codex",
-        "--enable-source",
-        "claude",
         "--disable-source",
         "omp",
         "--hosted-processing",
         "no",
     ];
-    if factory {
+    if let Some(transcript) = factory {
         let path = tmp.path().join(FACTORY_PATH);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, FACTORY_FIXTURE).unwrap();
+        std::fs::write(&path, transcript).unwrap();
         std::fs::write(
             path.with_file_name("5ffdaa21-fac0-4000-8000-000000000002.jsonl"),
             include_bytes!("../fixtures/factory/subagent-v2.jsonl"),
@@ -104,6 +100,8 @@ fn setup(tmp: tempfile::TempDir, native_db: Option<&Path>, factory: bool) -> Env
         )
         .unwrap();
         args.extend(["--enable-source", "factory"]);
+    } else {
+        args.extend(["--enable-source", "codex", "--enable-source", "claude"]);
     }
     let (ok, out) = cli(&home, &args);
     assert!(ok, "{out}");
@@ -114,13 +112,14 @@ fn setup(tmp: tempfile::TempDir, native_db: Option<&Path>, factory: bool) -> Env
             "~/.claude/projects",
             tmp.path().join("claude").to_str().unwrap(),
         );
-    if factory {
+    if factory.is_some() {
         cfg = cfg
             .replace(
                 "~/.factory/sessions",
                 tmp.path().join("factory").to_str().unwrap(),
             )
-            .replace("allow_raw_records = false", "allow_raw_records = true");
+            .replace("allow_raw_records = false", "allow_raw_records = true")
+            .replace("interval_seconds = 60", "interval_seconds = 1");
     }
     if let Some(db) = native_db {
         let path = toml::Value::String(db.to_str().unwrap().to_owned());
@@ -216,7 +215,7 @@ async fn drain(c: &Client, mut r: Value) -> Value {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn codex_and_claude_fixtures_flow_through_search_and_with_tools_reads() {
-    let env = setup(sandbox(), None, false);
+    let env = setup(sandbox(), None, None);
     let (ok, out) = cli(&env.home, &["index", "--since", "2026-10-12", "--wait"]);
     assert!(ok, "{out}");
     let c = mcp(&env.home).await;
@@ -494,7 +493,7 @@ async fn opencode_v2_and_jsonl_search_and_verify_source_changes() {
     let db = tmp.path().join("native.db");
     let mut writer = open_native_fixture(&db).await;
     assert!(db.with_file_name("native.db-wal").metadata().unwrap().len() > 0);
-    let env = setup(tmp, Some(&db), false);
+    let env = setup(tmp, Some(&db), None);
     index(&env.home);
     let c = mcp(&env.home).await;
 
@@ -596,12 +595,119 @@ fn opencode_command(bin: &Path, spool_home: &Path, project: &Path) -> tokio::pro
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn factory_empty_session_becomes_searchable_and_can_be_emptied_again() {
+    use std::io::Write;
+
+    let tmp = sandbox();
+    let path = tmp.path().join(FACTORY_PATH);
+    let (header, messages) = FACTORY_FIXTURE.split_once('\n').unwrap();
+    let env = setup(tmp, None, Some(&format!("{header}\n")));
+    let c = mcp(&env.home).await;
+    let status = |id: Option<Value>| async {
+        let (err, result) = call(
+            &c,
+            "index_status",
+            match id {
+                Some(id) => json!({"session_id": id}),
+                None => json!({"source": "factory"}),
+            },
+        )
+        .await;
+        assert!(!err, "{result}");
+        result
+    };
+    let index_factory = || {
+        let (ok, out) = cli(
+            &env.home,
+            &["index", "--all", "--source", "factory", "--wait"],
+        );
+        assert!(ok, "{out}");
+    };
+
+    index_factory();
+    let initial = status(None).await;
+    let session = initial["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["kind"] == "interactive")
+        .unwrap();
+    let id = session["session_id"].clone();
+    assert_eq!(session["index_state"], "empty", "{initial}");
+    assert_eq!(session["has_published_snapshot"], false);
+    assert_eq!(
+        initial["sources"][0]["sessions_by_state"],
+        json!({"empty": 1})
+    );
+    assert_eq!(initial["queue"]["empty"], 1);
+    assert_eq!(initial["queue"]["indexed"], 0);
+    let (err, empty_read) = call(&c, "read_session", json!({"session_id": id})).await;
+    assert!(!err, "{empty_read}");
+    assert_eq!(empty_read["items"], json!([]));
+    index_factory();
+    assert_eq!(
+        status(Some(id.clone())).await["session"]["index_state"],
+        "empty"
+    );
+
+    let mut transcript = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    writeln!(transcript, r#"{{"type":"todo_state","todos":[]}}"#).unwrap();
+    index_factory();
+    assert_eq!(
+        status(Some(id.clone())).await["session"]["index_state"],
+        "empty"
+    );
+    transcript.write_all(messages.as_bytes()).unwrap();
+    drop(transcript);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if status(Some(id.clone())).await["session"]["index_state"] == "indexed" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "discovery never indexed the changed file"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let hit = match_request(&lexical(&c, "beryllattice", "factory").await);
+    assert_eq!(hit["session_id"], id);
+    verified_match(
+        &c,
+        &hit,
+        "Please catalogue the beryllattice sample.",
+        Some("f1"),
+    )
+    .await;
+    assert_eq!(
+        status(Some(id.clone())).await["session"]["index_state"],
+        "indexed"
+    );
+
+    std::fs::write(&path, format!("{header}\n")).unwrap();
+    index_factory();
+    let settled = status(Some(id)).await;
+    assert_eq!(settled["session"]["index_state"], "empty", "{settled}");
+    assert_eq!(settled["session"]["has_published_snapshot"], false);
+    assert_eq!(
+        lexical(&c, "beryllattice", "factory").await["results"],
+        json!([])
+    );
+    let (err, stale) = call(&c, "read_session", hit).await;
+    assert!(err && stale["error"]["code"] == "SOURCE_CHANGED", "{stale}");
+    c.cancel().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn factory_droid_discovers_searches_and_verifies_append_and_rewrite() {
     use std::io::Write;
 
     let tmp = sandbox();
     let path = tmp.path().join(FACTORY_PATH);
-    let env = setup(tmp, None, true);
+    let env = setup(tmp, None, Some(FACTORY_FIXTURE));
     index(&env.home);
     let c = mcp(&env.home).await;
 
@@ -861,7 +967,7 @@ async fn opencode_v2_client_searches_and_reopens_match() {
 
     let db = tmp.path().join("native.db");
     open_native_fixture(&db).await.close().await.unwrap();
-    let env = setup(tmp, Some(&db), false);
+    let env = setup(tmp, Some(&db), None);
     index(&env.home);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

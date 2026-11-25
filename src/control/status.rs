@@ -309,7 +309,7 @@ impl ControlService {
             queue: json!({
                 "queued": q.pending, "running": q.running, "retrying": q.retryable_failed,
                 "deferred": deferred, "permanently_failed": failed + unsupported,
-                "covered": covered, "indexed": indexed, "pending_sessions": pending,
+                "covered": covered, "indexed": indexed, "empty": count("empty"), "pending_sessions": pending,
                 "backfill_known": backfill_known, "excluded": excluded, "missing": missing,
                 "max_queued_sessions": d.cfg.ingestion.max_queued_sessions,
             }),
