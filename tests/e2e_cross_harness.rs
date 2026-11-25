@@ -62,7 +62,7 @@ fn sandbox() -> tempfile::TempDir {
         .unwrap()
 }
 
-fn setup(tmp: tempfile::TempDir, native_db: Option<&Path>, factory: bool) -> Env {
+fn setup(tmp: tempfile::TempDir, native_db: Option<&Path>, factory: Option<&str>) -> Env {
     let home = tmp.path().join("h");
     let (codex, claude) = (tmp.path().join("codex"), tmp.path().join("claude/proj-a"));
     std::fs::create_dir_all(&codex).unwrap();
@@ -80,19 +80,15 @@ fn setup(tmp: tempfile::TempDir, native_db: Option<&Path>, factory: bool) -> Env
     .unwrap();
     let mut args = vec![
         "init",
-        "--enable-source",
-        "codex",
-        "--enable-source",
-        "claude",
         "--disable-source",
         "omp",
         "--hosted-processing",
         "no",
     ];
-    if factory {
+    if let Some(transcript) = factory {
         let path = tmp.path().join(FACTORY_PATH);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, FACTORY_FIXTURE).unwrap();
+        std::fs::write(&path, transcript).unwrap();
         std::fs::write(
             path.with_file_name("5ffdaa21-fac0-4000-8000-000000000002.jsonl"),
             include_bytes!("../fixtures/factory/subagent-v2.jsonl"),
@@ -104,6 +100,8 @@ fn setup(tmp: tempfile::TempDir, native_db: Option<&Path>, factory: bool) -> Env
         )
         .unwrap();
         args.extend(["--enable-source", "factory"]);
+    } else {
+        args.extend(["--enable-source", "codex", "--enable-source", "claude"]);
     }
     let (ok, out) = cli(&home, &args);
     assert!(ok, "{out}");
@@ -114,7 +112,7 @@ fn setup(tmp: tempfile::TempDir, native_db: Option<&Path>, factory: bool) -> Env
             "~/.claude/projects",
             tmp.path().join("claude").to_str().unwrap(),
         );
-    if factory {
+    if factory.is_some() {
         cfg = cfg
             .replace(
                 "~/.factory/sessions",
@@ -217,7 +215,7 @@ async fn drain(c: &Client, mut r: Value) -> Value {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn codex_and_claude_fixtures_flow_through_search_and_with_tools_reads() {
-    let env = setup(sandbox(), None, false);
+    let env = setup(sandbox(), None, None);
     let (ok, out) = cli(&env.home, &["index", "--since", "2026-10-12", "--wait"]);
     assert!(ok, "{out}");
     let c = mcp(&env.home).await;
@@ -495,7 +493,7 @@ async fn opencode_v2_and_jsonl_search_and_verify_source_changes() {
     let db = tmp.path().join("native.db");
     let mut writer = open_native_fixture(&db).await;
     assert!(db.with_file_name("native.db-wal").metadata().unwrap().len() > 0);
-    let env = setup(tmp, Some(&db), false);
+    let env = setup(tmp, Some(&db), None);
     index(&env.home);
     let c = mcp(&env.home).await;
 
@@ -602,9 +600,8 @@ async fn factory_empty_session_becomes_searchable_and_can_be_emptied_again() {
 
     let tmp = sandbox();
     let path = tmp.path().join(FACTORY_PATH);
-    let env = setup(tmp, None, true);
     let (header, messages) = FACTORY_FIXTURE.split_once('\n').unwrap();
-    std::fs::write(&path, format!("{header}\n")).unwrap();
+    let env = setup(tmp, None, Some(&format!("{header}\n")));
     let c = mcp(&env.home).await;
     let status = |id: Option<Value>| async {
         let (err, result) = call(
@@ -710,7 +707,7 @@ async fn factory_droid_discovers_searches_and_verifies_append_and_rewrite() {
 
     let tmp = sandbox();
     let path = tmp.path().join(FACTORY_PATH);
-    let env = setup(tmp, None, true);
+    let env = setup(tmp, None, Some(FACTORY_FIXTURE));
     index(&env.home);
     let c = mcp(&env.home).await;
 
@@ -970,7 +967,7 @@ async fn opencode_v2_client_searches_and_reopens_match() {
 
     let db = tmp.path().join("native.db");
     open_native_fixture(&db).await.close().await.unwrap();
-    let env = setup(tmp, Some(&db), false);
+    let env = setup(tmp, Some(&db), None);
     index(&env.home);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
