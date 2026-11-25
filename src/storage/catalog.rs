@@ -483,6 +483,7 @@ pub struct KnownFile {
     pub eligibility: String,
     pub index_state: String,
     pub has_snapshot: bool,
+    pub empty_source_revision: Option<String>,
     pub excluded: bool,
     pub session_kind: String,
     pub native_id: String,
@@ -500,6 +501,7 @@ fn known(r: &sqlx::sqlite::SqliteRow) -> KnownFile {
         eligibility: r.get("eligibility"),
         index_state: r.get("index_state"),
         has_snapshot: r.get::<Option<String>, _>("active_snapshot_id").is_some(),
+        empty_source_revision: r.get("empty_source_revision"),
         excluded: r.get::<i64, _>("excluded") != 0,
         session_kind: r.get("session_kind"),
         native_id: r.get("native_id"),
@@ -507,7 +509,7 @@ fn known(r: &sqlx::sqlite::SqliteRow) -> KnownFile {
 }
 
 const KNOWN_SELECT: &str = "SELECT f.session_id, f.path, f.dev, f.ino, f.size, f.mtime_ms, f.exists_status, s.eligibility, s.index_state, \
-    s.active_snapshot_id, s.excluded, s.session_kind, s.native_id FROM source_files f JOIN sessions s ON s.id = f.session_id";
+    s.active_snapshot_id, s.empty_source_revision, s.excluded, s.session_kind, s.native_id FROM source_files f JOIN sessions s ON s.id = f.session_id";
 
 /// Known files of `source_id` among `paths` (one query per scan page).
 pub async fn known_by_paths(

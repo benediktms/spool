@@ -3,10 +3,90 @@
 
 use crate::common::*;
 use spool::ingest::engine::{DeferReason, IndexOutcome, IndexRequest, IngestErrorKind};
+use spool::storage::index::MIGRATOR;
+use sqlx::{Connection, SqliteConnection};
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, SystemTime};
+
+#[tokio::test]
+async fn factory_empty_migration_requeues_only_legacy_complete_blank_snapshots() {
+    let mut db = SqliteConnection::connect("sqlite::memory:").await.unwrap();
+    sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&mut db)
+        .await
+        .unwrap();
+    for m in MIGRATOR.iter().filter(|m| m.version < 15) {
+        sqlx::raw_sql(m.sql.as_ref())
+            .execute(&mut db)
+            .await
+            .unwrap();
+    }
+    sqlx::raw_sql(
+        "INSERT INTO sources(id,kind,roots_json) VALUES ('factory','factory','[]'),('omp','omp','[]');
+         INSERT INTO projects(id,kind,name,key,created_at)
+         VALUES ('project','path','Fixture','/fixture',1);
+         INSERT INTO sessions(id,source_id,native_id,discovered_at,index_state,active_snapshot_id,
+                              remote,project_id,submit_seq,operation_id)
+         VALUES ('empty','factory','1',1,'indexed','snap1','host/o/r','project',9,'op'),
+                ('partial','factory','2',1,'indexed','snap2',NULL,NULL,0,NULL),
+                ('other','omp','3',1,'indexed','snap3',NULL,NULL,0,NULL),
+                ('text','factory','4',1,'indexed','snap4',NULL,NULL,0,NULL);
+         INSERT INTO source_files(session_id,path) VALUES ('empty','/fixture/s.jsonl');
+         INSERT INTO snapshots(id,session_id,kind,state,source_revision,fingerprint,generation,prefix_end,created_at,coverage)
+         VALUES ('snap1','empty','indexed','published','rev','fp',1,20,1,'complete'),
+                ('snap2','partial','indexed','published','rev','fp',1,20,1,'partial'),
+                ('snap3','other','indexed','published','rev','fp',1,20,1,'complete'),
+                ('snap4','text','indexed','published','rev','fp',1,20,1,'complete');
+         INSERT INTO chunks(logical_id,snapshot_id,session_id,run_key,ordinal,body,input_hash,rendered_tokens,is_tail)
+         VALUES ('c','snap4','text','run',0,'fixture',zeroblob(32),1,0);",
+    )
+    .execute(&mut db).await.unwrap();
+    let migration = MIGRATOR.iter().find(|m| m.version == 15).unwrap();
+    sqlx::raw_sql(migration.sql.as_ref())
+        .execute(&mut db)
+        .await
+        .unwrap();
+    assert!(
+        sqlx::query("PRAGMA foreign_key_check")
+            .fetch_all(&mut db)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("PRAGMA foreign_keys")
+            .fetch_one(&mut db)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT id FROM sessions WHERE index_state='pending'")
+            .fetch_all(&mut db)
+            .await
+            .unwrap(),
+        ["empty"]
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (String, String, i64, String, String, String)>(
+            "SELECT remote,project_id,submit_seq,operation_id,active_snapshot_id,path
+         FROM sessions s JOIN source_files f ON f.session_id=s.id WHERE s.id='empty'"
+        )
+        .fetch_one(&mut db)
+        .await
+        .unwrap(),
+        (
+            "host/o/r".into(),
+            "project".into(),
+            9,
+            "op".into(),
+            "snap1".into(),
+            "/fixture/s.jsonl".into()
+        )
+    );
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn incomplete_trailing_record_is_pending_data() {

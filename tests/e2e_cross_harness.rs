@@ -120,7 +120,8 @@ fn setup(tmp: tempfile::TempDir, native_db: Option<&Path>, factory: bool) -> Env
                 "~/.factory/sessions",
                 tmp.path().join("factory").to_str().unwrap(),
             )
-            .replace("allow_raw_records = false", "allow_raw_records = true");
+            .replace("allow_raw_records = false", "allow_raw_records = true")
+            .replace("interval_seconds = 60", "interval_seconds = 1");
     }
     if let Some(db) = native_db {
         let path = toml::Value::String(db.to_str().unwrap().to_owned());
@@ -593,6 +594,114 @@ fn opencode_command(bin: &Path, spool_home: &Path, project: &Path) -> tokio::pro
         .current_dir(project)
         .kill_on_drop(true);
     cmd
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn factory_empty_session_becomes_searchable_and_can_be_emptied_again() {
+    use std::io::Write;
+
+    let tmp = sandbox();
+    let path = tmp.path().join(FACTORY_PATH);
+    let env = setup(tmp, None, true);
+    let (header, messages) = FACTORY_FIXTURE.split_once('\n').unwrap();
+    std::fs::write(&path, format!("{header}\n")).unwrap();
+    let c = mcp(&env.home).await;
+    let status = |id: Option<Value>| async {
+        let (err, result) = call(
+            &c,
+            "index_status",
+            match id {
+                Some(id) => json!({"session_id": id}),
+                None => json!({"source": "factory"}),
+            },
+        )
+        .await;
+        assert!(!err, "{result}");
+        result
+    };
+    let index_factory = || {
+        let (ok, out) = cli(
+            &env.home,
+            &["index", "--all", "--source", "factory", "--wait"],
+        );
+        assert!(ok, "{out}");
+    };
+
+    index_factory();
+    let initial = status(None).await;
+    let session = initial["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["kind"] == "interactive")
+        .unwrap();
+    let id = session["session_id"].clone();
+    assert_eq!(session["index_state"], "empty", "{initial}");
+    assert_eq!(session["has_published_snapshot"], false);
+    assert_eq!(
+        initial["sources"][0]["sessions_by_state"],
+        json!({"empty": 1})
+    );
+    assert_eq!(initial["queue"]["empty"], 1);
+    assert_eq!(initial["queue"]["indexed"], 0);
+    let (err, empty_read) = call(&c, "read_session", json!({"session_id": id})).await;
+    assert!(!err, "{empty_read}");
+    assert_eq!(empty_read["items"], json!([]));
+    index_factory();
+    assert_eq!(
+        status(Some(id.clone())).await["session"]["index_state"],
+        "empty"
+    );
+
+    let mut transcript = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    writeln!(transcript, r#"{{"type":"todo_state","todos":[]}}"#).unwrap();
+    index_factory();
+    assert_eq!(
+        status(Some(id.clone())).await["session"]["index_state"],
+        "empty"
+    );
+    transcript.write_all(messages.as_bytes()).unwrap();
+    drop(transcript);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if status(Some(id.clone())).await["session"]["index_state"] == "indexed" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "discovery never indexed the changed file"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let hit = match_request(&lexical(&c, "beryllattice", "factory").await);
+    assert_eq!(hit["session_id"], id);
+    verified_match(
+        &c,
+        &hit,
+        "Please catalogue the beryllattice sample.",
+        Some("f1"),
+    )
+    .await;
+    assert_eq!(
+        status(Some(id.clone())).await["session"]["index_state"],
+        "indexed"
+    );
+
+    std::fs::write(&path, format!("{header}\n")).unwrap();
+    index_factory();
+    let settled = status(Some(id)).await;
+    assert_eq!(settled["session"]["index_state"], "empty", "{settled}");
+    assert_eq!(settled["session"]["has_published_snapshot"], false);
+    assert_eq!(
+        lexical(&c, "beryllattice", "factory").await["results"],
+        json!([])
+    );
+    let (err, stale) = call(&c, "read_session", hit).await;
+    assert!(err && stale["error"]["code"] == "SOURCE_CHANGED", "{stale}");
+    c.cancel().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

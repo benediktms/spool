@@ -50,6 +50,9 @@ pub enum DeferReason {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IndexOutcome {
     NoOp,
+    Empty {
+        follow_up_needed: bool,
+    },
     Published {
         snapshot_id: String,
         generation: i64,
@@ -84,6 +87,8 @@ impl IndexOutcome {
             } | Self::EmbeddingsPending {
                 follow_up_needed: true,
                 ..
+            } | Self::Empty {
+                follow_up_needed: true,
             }
         )
     }
@@ -436,8 +441,12 @@ impl IngestEngine {
             }
         }
         if let Some(active) = &row.active_snapshot_id {
-            let snap = sqlx::query("SELECT source_revision, fingerprint FROM snapshots WHERE id=?")
+            let snap = sqlx::query(
+                "SELECT source_revision, fingerprint FROM snapshots sn WHERE id=? \
+                 AND NOT (? AND coverage='complete' AND NOT EXISTS (SELECT 1 FROM chunks c WHERE c.snapshot_id=sn.id))",
+            )
                 .bind(active)
+                .bind(self.sources.kind(&row.source_id) == Some(HarnessKind::Factory))
                 .fetch_optional(&self.index.writer)
                 .await
                 .map_err(IngestError::storage)?;
@@ -547,6 +556,7 @@ impl IngestEngine {
                 generation,
                 fingerprint: &fp,
                 native: guard,
+                follow_up,
             },
             &plan,
         )
@@ -560,6 +570,11 @@ impl IngestEngine {
             Err(error) => return Err(error.into()),
         };
         let new_generation = match outcome {
+            PublishOutcome::Empty => {
+                return Ok(IndexOutcome::Empty {
+                    follow_up_needed: follow_up,
+                });
+            }
             PublishOutcome::Superseded => return Ok(IndexOutcome::Superseded),
             PublishOutcome::Excluded => return Ok(IndexOutcome::Excluded),
             PublishOutcome::Published { generation, .. } => generation,

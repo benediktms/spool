@@ -427,11 +427,12 @@ impl DiscoveryService {
             rep.skipped_subagent += 1;
             return Ok(());
         }
-        if unchanged
-            && k.index_state == "indexed"
-            && k.has_snapshot
-            && !matches!(ctx.mode, Mode::Auto)
-        {
+        let empty_current = k.index_state == "empty"
+            && k.empty_source_revision.as_deref().is_some_and(|r| {
+                r.strip_prefix(&crate::source::revision4(f))
+                    .is_some_and(|suffix| suffix.starts_with(':'))
+            });
+        if unchanged && ((k.index_state == "indexed" && k.has_snapshot) || empty_current) {
             rep.already_current += 1;
             return Ok(());
         }
