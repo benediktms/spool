@@ -897,18 +897,18 @@ fn init_rejects_unknown_and_contradictory_sources() {
 fn interactive_init_asks_and_defaults_consent_to_no() {
     let (_t, home) = temp_home();
     let paths = Paths::from_root(home.clone()).unwrap();
-    // Questions: omp, codex, claude, hosted. Answer: omp yes, codex yes, claude no, hosted no.
-    let mut s = Script(vec![true, true, false, false], vec![]);
+    let mut s = Script(vec![true, true, false, false, false], vec![]);
     run_init(&paths, &Default::default(), Some(&mut s)).unwrap();
-    assert_eq!(s.1.len(), 4);
-    assert!(s.1[3].contains("Allow hosted embedding"));
+    assert_eq!(s.1.len(), 5);
+    assert!(s.1[3].contains("Index source 'factory'"));
+    assert!(s.1[4].contains("Allow hosted embedding"));
     let cfg = load(&home);
     assert!(!cfg.embedding.hosted_processing_approved);
     assert_eq!(cfg.sources.iter().filter(|c| c.enabled).count(), 2);
     // Only an explicit yes turns consent on.
     let (_t2, home2) = temp_home();
     let paths2 = Paths::from_root(home2.clone()).unwrap();
-    let mut s = Script(vec![true, false, false, true], vec![]);
+    let mut s = Script(vec![true, false, false, false, true], vec![]);
     run_init(&paths2, &Default::default(), Some(&mut s)).unwrap();
     assert!(load(&home2).embedding.hosted_processing_approved);
     // A prompter that just accepts defaults keeps consent off.
@@ -932,6 +932,12 @@ fn init_binary_without_a_tty_keeps_safe_defaults_and_says_so() {
     assert!(t.contains("safe defaults"), "{t}");
     assert!(t.contains("not approved"), "{t}");
     assert!(t.contains("nothing has been read or indexed"), "{t}");
+    assert!(
+        load(&home)
+            .sources
+            .iter()
+            .any(|s| s.id == "factory" && !s.enabled)
+    );
     assert_eq!(mode(&home.join("secrets/handle-signing.key")), 0o600);
 }
 

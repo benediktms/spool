@@ -234,6 +234,7 @@ impl Default for Config {
                 src("omp", Omp, true, "~/.omp/agent/sessions"),
                 src("codex", Codex, false, "~/.codex/sessions"),
                 src("claude", Claude, false, "~/.claude/projects"),
+                src("factory", Factory, false, "~/.factory/sessions"),
             ],
         }
     }

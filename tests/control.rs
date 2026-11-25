@@ -1196,7 +1196,12 @@ async fn enabling_a_source_when_the_config_has_no_sources_section_keeps_the_othe
         .collect();
     assert_eq!(
         ids,
-        [("omp", false), ("codex", false), ("claude", false)],
+        [
+            ("omp", false),
+            ("codex", false),
+            ("claude", false),
+            ("factory", false),
+        ],
         "defaults were materialised, not dropped: {text}"
     );
     r.shutdown().await;

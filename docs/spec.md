@@ -176,7 +176,7 @@ src/
   lib.rs
   config.rs
   domain/
-  adapters/{mod,omp,codex,claude}.rs
+  adapters/{mod,omp,codex,claude,factory}.rs
   discovery/
   ingest/{extract,chunk,worker,publish}.rs
   embeddings/{provider,openai,budget,cache}.rs
@@ -279,6 +279,12 @@ Anthropic documents local JSONL transcripts under `~/.claude/projects/<encoded-c
 Extract conversational text blocks only. A `tool_result` inside a user message remains excluded. Preserve UUID/parent relationships where present. Handle accumulated assistant updates according to fixture-backed native identity: select the authoritative saved version, rather than appending every streamed representation as new text.
 
 Known synthetic summary/compaction markers and injected hook content remain outside the corpus. Detect subagent sessions and classify them separately. The session working directory is the first non-null `cwd` on any line, independent of which line first carries the session id: current transcripts open with `last-prompt`, `mode` and `permission-mode` lines that have a session id but no `cwd`.
+
+### 5.5a Factory Droid adapter
+
+Factory is an experimental local source, disabled by default, with the suggested root `~/.factory/sessions`. Require a complete `session_start` v2 header with a native session ID. Use saved record `id` and `parentId` links; do not guess cross-session lineage or the active branch. Classify headers with a calling session or tool-use ID as subagent sessions. A valid header without messages contains no searchable conversation.
+
+Retain only plain text blocks of ordinary user and assistant messages. Exclude explicitly scoped messages, system notices, tool use/results, reasoning, and control payloads. Mark retained user text with unproven authorship as `unknown`. Return only the `conversation` view, with source verification against the original JSONL. Do not fetch missing history or use Factory's settings sidecars, hooks, or cloud API.
 
 ### 5.6 Subagents
 

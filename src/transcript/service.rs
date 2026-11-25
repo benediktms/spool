@@ -123,10 +123,17 @@ struct SessionRow {
 
 impl SessionRow {
     fn check_view(&self, view: View) -> Result<(), AppError> {
-        if matches!(self.source, ReadSource::OpenCodeSqlite { .. }) && view != View::Conversation {
+        let description = match self.source {
+            ReadSource::OpenCodeSqlite { .. } => Some("OpenCode SQLite"),
+            ReadSource::Jsonl { adapter, .. } if adapter.kind() == HarnessKind::Factory => {
+                Some("Factory JSONL")
+            }
+            _ => None,
+        };
+        if let Some(description) = description.filter(|_| view != View::Conversation) {
             return Err(app_err(
                 "VIEW_NOT_SUPPORTED",
-                "OpenCode SQLite supports the conversation view only",
+                format!("{description} supports the conversation view only"),
                 false,
                 "change_request",
             ));
@@ -377,10 +384,12 @@ impl ReadService {
                     .ok_or_else(forbidden)?,
                 native_session: native_id.to_owned(),
             }),
-            HarnessKind::Omp | HarnessKind::Codex | HarnessKind::Claude => Ok(ReadSource::Jsonl {
-                path,
-                adapter: adapter_for(entry.kind),
-            }),
+            HarnessKind::Omp | HarnessKind::Codex | HarnessKind::Claude | HarnessKind::Factory => {
+                Ok(ReadSource::Jsonl {
+                    path,
+                    adapter: adapter_for(entry.kind),
+                })
+            }
         }
     }
 

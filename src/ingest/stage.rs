@@ -1098,6 +1098,11 @@ async fn run(pass: Pass<'_>, opened: crate::source::OpenedSource) -> Result<Stag
             "source schema version is not supported".into(),
         ));
     }
+    if harness == HarnessKind::Factory && manifest.native_session_id != row.native_id {
+        return Err(StageError::Unsupported(
+            "Factory transcript identity differs from the catalog".into(),
+        ));
+    }
 
     if let Some(h) = &after_parse {
         h();

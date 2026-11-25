@@ -260,7 +260,12 @@ impl IngestEngine {
     pub fn pipeline_fingerprint(&self) -> String {
         let mut h = blake3::Hasher::new();
         h.update(b"spool-pipeline-v1");
-        for k in [HarnessKind::Omp, HarnessKind::Codex, HarnessKind::Claude] {
+        for k in [
+            HarnessKind::Omp,
+            HarnessKind::Codex,
+            HarnessKind::Claude,
+            HarnessKind::Factory,
+        ] {
             h.update(k.as_str().as_bytes());
             h.update(adapter_for(k).parser_version().as_bytes());
             h.update(&[0]);
