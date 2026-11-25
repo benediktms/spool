@@ -9,6 +9,8 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 const BIN: &str = env!("CARGO_BIN_EXE_spool");
+const FACTORY_FIXTURE: &str = include_str!("../fixtures/factory/session-v2.jsonl");
+const FACTORY_PATH: &str = "factory/project/5ffdaa21-fac0-4000-8000-000000000001.jsonl";
 
 struct Env {
     _tmp: tempfile::TempDir,
@@ -60,7 +62,7 @@ fn sandbox() -> tempfile::TempDir {
         .unwrap()
 }
 
-fn setup(tmp: tempfile::TempDir, native_db: Option<&Path>) -> Env {
+fn setup(tmp: tempfile::TempDir, native_db: Option<&Path>, factory: bool) -> Env {
     let home = tmp.path().join("h");
     let (codex, claude) = (tmp.path().join("codex"), tmp.path().join("claude/proj-a"));
     std::fs::create_dir_all(&codex).unwrap();
@@ -76,20 +78,34 @@ fn setup(tmp: tempfile::TempDir, native_db: Option<&Path>) -> Env {
         claude.join("claude-fixture-1.jsonl"),
     )
     .unwrap();
-    let (ok, out) = cli(
-        &home,
-        &[
-            "init",
-            "--enable-source",
-            "codex",
-            "--enable-source",
-            "claude",
-            "--disable-source",
-            "omp",
-            "--hosted-processing",
-            "no",
-        ],
-    );
+    let mut args = vec![
+        "init",
+        "--enable-source",
+        "codex",
+        "--enable-source",
+        "claude",
+        "--disable-source",
+        "omp",
+        "--hosted-processing",
+        "no",
+    ];
+    if factory {
+        let path = tmp.path().join(FACTORY_PATH);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, FACTORY_FIXTURE).unwrap();
+        std::fs::write(
+            path.with_file_name("5ffdaa21-fac0-4000-8000-000000000002.jsonl"),
+            include_bytes!("../fixtures/factory/subagent-v2.jsonl"),
+        )
+        .unwrap();
+        std::fs::write(
+            path.with_extension("settings.json"),
+            r#"{"text":"sidecarlapis"}"#,
+        )
+        .unwrap();
+        args.extend(["--enable-source", "factory"]);
+    }
+    let (ok, out) = cli(&home, &args);
     assert!(ok, "{out}");
     let cfg = std::fs::read_to_string(home.join("config.toml")).unwrap();
     let mut cfg = cfg
@@ -98,6 +114,14 @@ fn setup(tmp: tempfile::TempDir, native_db: Option<&Path>) -> Env {
             "~/.claude/projects",
             tmp.path().join("claude").to_str().unwrap(),
         );
+    if factory {
+        cfg = cfg
+            .replace(
+                "~/.factory/sessions",
+                tmp.path().join("factory").to_str().unwrap(),
+            )
+            .replace("allow_raw_records = false", "allow_raw_records = true");
+    }
     if let Some(db) = native_db {
         let path = toml::Value::String(db.to_str().unwrap().to_owned());
         cfg.push_str(&format!(
@@ -192,7 +216,7 @@ async fn drain(c: &Client, mut r: Value) -> Value {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn codex_and_claude_fixtures_flow_through_search_and_with_tools_reads() {
-    let env = setup(sandbox(), None);
+    let env = setup(sandbox(), None, false);
     let (ok, out) = cli(&env.home, &["index", "--since", "2026-10-12", "--wait"]);
     assert!(ok, "{out}");
     let c = mcp(&env.home).await;
@@ -470,7 +494,7 @@ async fn opencode_v2_and_jsonl_search_and_verify_source_changes() {
     let db = tmp.path().join("native.db");
     let mut writer = open_native_fixture(&db).await;
     assert!(db.with_file_name("native.db-wal").metadata().unwrap().len() > 0);
-    let env = setup(tmp, Some(&db));
+    let env = setup(tmp, Some(&db), false);
     index(&env.home);
     let c = mcp(&env.home).await;
 
@@ -569,6 +593,122 @@ fn opencode_command(bin: &Path, spool_home: &Path, project: &Path) -> tokio::pro
         .current_dir(project)
         .kill_on_drop(true);
     cmd
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn factory_droid_discovers_searches_and_verifies_append_and_rewrite() {
+    use std::io::Write;
+
+    let tmp = sandbox();
+    let path = tmp.path().join(FACTORY_PATH);
+    let env = setup(tmp, None, true);
+    index(&env.home);
+    let c = mcp(&env.home).await;
+
+    let original = match_request(&lexical(&c, "beryllattice", "factory").await);
+    verified_match(
+        &c,
+        &original,
+        "Please catalogue the beryllattice sample.",
+        Some("f1"),
+    )
+    .await;
+    for term in [
+        "hookzircon",
+        "argumenttopaz",
+        "reasoningcitrine",
+        "resultspinel",
+        "todoquartz",
+        "noticeperidot",
+        "childamethyst",
+        "sidecarlapis",
+    ] {
+        assert_eq!(
+            lexical(&c, term, "factory").await["results"],
+            json!([]),
+            "{term}"
+        );
+    }
+    for view in ["with_tools", "raw_records"] {
+        let mut request = original.clone();
+        request["view"] = json!(view);
+        let (err, result) = call(&c, "read_session", request).await;
+        assert!(err, "{result}");
+        assert_eq!(result["error"]["code"], "VIEW_NOT_SUPPORTED");
+    }
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), FACTORY_FIXTURE);
+
+    let mut session = json!({
+        "session_id": original["session_id"],
+        "source_policy": "require_source",
+        "max_items": 1,
+    });
+    let (err, first_page) = call(&c, "read_session", session.clone()).await;
+    assert!(
+        !err && first_page["page"]["next_cursor"].is_string(),
+        "{first_page}"
+    );
+    let append = r#"{"type":"message","id":"f7","parentId":"f6","seq":7,"timestamp":"2026-11-25T09:00:07.000Z","message":{"role":"user","content":[{"type":"text","text":"Save the new celestitebridge sample too."}]}}"#;
+    writeln!(
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap(),
+        "{append}"
+    )
+    .unwrap();
+
+    let frozen = drain(&c, first_page).await;
+    assert_eq!(kinds(&frozen).len(), 4);
+    assert!(!frozen["items"].to_string().contains("celestitebridge"));
+    verified_match(
+        &c,
+        &original,
+        "Please catalogue the beryllattice sample.",
+        Some("f1"),
+    )
+    .await;
+    index(&env.home);
+    let appended = match_request(&lexical(&c, "celestitebridge", "factory").await);
+    assert_eq!(appended["session_id"], original["session_id"]);
+    verified_match(
+        &c,
+        &appended,
+        "Save the new celestitebridge sample too.",
+        Some("f7"),
+    )
+    .await;
+
+    let rewritten = format!(
+        "{}{append}\n",
+        FACTORY_FIXTURE.replace("beryllattice", "tourmalinespire")
+    );
+    std::fs::write(&path, &rewritten).unwrap();
+    let mut stale = original;
+    stale["source_policy"] = json!("prefer_source");
+    let (err, result) = call(&c, "read_session", stale).await;
+    assert!(err, "{result}");
+    assert_eq!(result["error"]["code"], "SOURCE_CHANGED", "{result}");
+    index(&env.home);
+    assert_eq!(
+        lexical(&c, "beryllattice", "factory").await["results"],
+        json!([])
+    );
+    let changed = match_request(&lexical(&c, "tourmalinespire", "factory").await);
+    assert_eq!(changed["session_id"], session["session_id"]);
+    verified_match(
+        &c,
+        &changed,
+        "Please catalogue the tourmalinespire sample.",
+        Some("f1"),
+    )
+    .await;
+    session["max_items"] = json!(50);
+    let (err, fresh) = call(&c, "read_session", session).await;
+    assert!(!err, "{fresh}");
+    assert_eq!(kinds(&drain(&c, fresh).await).len(), 5);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), rewritten);
+    c.cancel().await.unwrap();
 }
 
 async fn model_request(socket: &mut tokio::net::TcpStream) -> Option<Value> {
@@ -721,7 +861,7 @@ async fn opencode_v2_client_searches_and_reopens_match() {
 
     let db = tmp.path().join("native.db");
     open_native_fixture(&db).await.close().await.unwrap();
-    let env = setup(tmp, Some(&db));
+    let env = setup(tmp, Some(&db), false);
     index(&env.home);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

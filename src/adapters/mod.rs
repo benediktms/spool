@@ -7,6 +7,7 @@ use std::sync::atomic::AtomicBool;
 
 pub mod claude;
 pub mod codex;
+pub mod factory;
 pub mod omp;
 
 mod jsonl;
@@ -121,6 +122,7 @@ pub fn adapter_for(kind: HarnessKind) -> &'static dyn HarnessAdapter {
         HarnessKind::Omp => &omp::OmpAdapter,
         HarnessKind::Codex => &codex::CodexAdapter,
         HarnessKind::Claude => &claude::ClaudeAdapter,
+        HarnessKind::Factory => &factory::FactoryAdapter,
         HarnessKind::OpenCode => &UnsupportedOpenCode,
     }
 }

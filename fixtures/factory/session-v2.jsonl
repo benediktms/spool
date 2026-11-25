@@ -1,0 +1,9 @@
+{"type":"session_start","id":"5ffdaa21-fac0-4000-8000-000000000001","version":2,"cwd":"/tmp/fixture-project","title":"Factory mineral notes"}
+{"type":"message","id":"f1","seq":1,"timestamp":"2026-11-25T09:00:01.123Z","message":{"role":"user","content":[{"type":"text","text":"Please catalogue the beryllattice sample."}],"userMessageSource":"desktop"}}
+{"type":"message","id":"f2","parentId":"f1","seq":2,"timestamp":"2026-11-25T09:00:02.000Z","message":{"role":"user","visibility":"llm_only","content":[{"type":"text","text":"hookzircon"}]}}
+{"type":"message","id":"f3","parentId":"f2","seq":3,"timestamp":"2026-11-25T09:00:03.000Z","message":{"role":"assistant","openaiPhase":"commentary","content":[{"type":"thinking","thinking":"reasoningcitrine"},{"type":"text","text":"I will check the samples."},{"type":"tool_use","id":"call-1","name":"read","input":{"path":"argumenttopaz"}}]}}
+{"type":"message","id":"f4","parentId":"f3","seq":4,"timestamp":"2026-11-25T09:00:04.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call-1","content":[{"type":"text","text":"resultspinel"}]},{"type":"text","text":"ok"}]}}
+{"type":"todo_state","todos":[{"content":"todoquartz"}]}
+{"type":"agent_turn_outcome","id":"outcome1","timestamp":"2026-11-25T09:00:04.500Z"}
+{"type":"message","id":"f5","parentId":"f4","seq":5,"timestamp":"2026-11-25T09:00:05.000Z","message":{"role":"user","visibility":"user_only","systemNotice":{"kind":"fixture"},"content":[{"type":"text","text":"noticeperidot"}]}}
+{"type":"message","id":"f6","parentId":"f5","seq":6,"timestamp":"2026-11-25T09:00:06.000Z","message":{"role":"assistant","openaiPhase":"final_answer","content":[{"type":"text","text":"The beryllattice sample is catalogued."},{"type":"text","text":"```rust\n\tfn done() {}\n```\n漢字"}]}}

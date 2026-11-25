@@ -1,7 +1,7 @@
 # Spool
 
 A local search engine for agent-session conversation history. Spool indexes transcripts written by
-OhMyPi, Codex, Claude Code, and OpenCode V2, and serves three read-only MCP tools — `search_sessions`,
+OhMyPi, Codex, Claude Code, Factory Droid, and OpenCode V2, and serves three read-only MCP tools — `search_sessions`,
 `read_session`, `index_status` — over a stdio bridge to a per-user daemon. Administration is
 CLI-only. Transcript sources are read-only.
 
@@ -41,6 +41,23 @@ without a TTY the safe defaults are kept and reported: no source is enabled (not
 you choose, e.g. `--enable-source omp` or `spool sources enable omp`) and hosted processing is off.
 
 No service manager? Run `spool daemon run` in a terminal instead.
+
+For **Factory Droid**, enable the experimental local source on a new installation with
+`spool init --enable-source factory --hosted-processing no`. For an existing configuration, add
+this entry (or enable it if already present), then restart the Spool daemon:
+
+```toml
+[[sources]]
+id = "factory"
+kind = "factory"
+enabled = true
+roots = ["~/.factory/sessions"]
+include_subagents = false
+```
+
+This reads local v2 JSONL conversations, including through `read_session`. It does not fetch remote
+history or expose `with_tools` or `raw_records`. No Factory API key or cloud sync change is needed.
+See the [adapter support matrix](docs/adapter-support.md) for limits.
 
 For OpenCode V2, use `spool init --opencode-db /absolute/path/to/opencode.db --enable-source opencode`
 on a new installation. On an existing installation, add a `[[sources]]` entry with

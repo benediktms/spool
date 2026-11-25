@@ -20,6 +20,8 @@ pub(crate) trait JsonlHarness: Send + Sync {
     const PARSER_VERSION: &'static str;
     /// `ParseWarning::detail` for a complete line that does not decode as `Parser::Line`.
     const MALFORMED_DETAIL: &'static str;
+    /// Require a positively identified first complete record before projecting any content.
+    const REQUIRE_HEADER: bool = false;
     type Parser: LineParser;
 
     fn probe_header(&self, header: &[u8]) -> ProbeResult;
@@ -129,6 +131,10 @@ impl<'a> ParseCx<'a> {
     pub(crate) fn count_message(&mut self, blocks: usize) {
         self.counts.messages += 1;
         self.counts.blocks_retained += blocks as u64;
+    }
+
+    pub(crate) fn warn(&mut self, warning: ParseWarning) -> Result<(), AdapterError> {
+        Ok(self.sink.warning(warning)?)
     }
 
     /// Sink order is part of the contract: record, message, calls, results.
@@ -282,6 +288,7 @@ fn read_bounded_line(
 }
 
 fn parse_snapshot<H: JsonlHarness>(
+    harness: &H,
     source: &mut dyn Read,
     options: &ParseOptions,
     sink: &mut dyn RecordSink,
@@ -299,6 +306,19 @@ fn parse_snapshot<H: JsonlHarness>(
         let Some(n) = read_bounded_line(&mut reader, &mut line, offset, options)? else {
             break;
         };
+        if H::REQUIRE_HEADER && offset == 0 {
+            match harness.probe_header(&line) {
+                ProbeResult::Match { .. } => {}
+                ProbeResult::Unsupported { reason } => {
+                    return Err(AdapterError::Unsupported(reason));
+                }
+                ProbeResult::NoMatch => {
+                    return Err(AdapterError::Unsupported(
+                        "unrecognized transcript header".into(),
+                    ));
+                }
+            }
+        }
 
         let raw = RawRecord {
             bytes: &line,
@@ -312,11 +332,21 @@ fn parse_snapshot<H: JsonlHarness>(
         cx.counts.records += 1;
         match serde_json::from_slice::<<H::Parser as LineParser>::Line>(&line) {
             Ok(decoded) => parser.record(&mut cx, decoded, raw)?,
+            Err(_) if H::REQUIRE_HEADER && offset == 0 => {
+                return Err(AdapterError::Unsupported(
+                    "invalid transcript header".into(),
+                ));
+            }
             Err(_) => malformed::<H>(&mut cx, &mut parser, raw)?,
         }
         offset += n as u64;
     }
 
+    if H::REQUIRE_HEADER && offset == 0 {
+        return Err(AdapterError::Unsupported(
+            "missing complete transcript header".into(),
+        ));
+    }
     Ok(cx.finish(offset))
 }
 
@@ -369,7 +399,7 @@ impl<H: JsonlHarness> HarnessAdapter for H {
         options: &ParseOptions,
         sink: &mut dyn RecordSink,
     ) -> Result<ParsedSessionManifest, AdapterError> {
-        parse_snapshot::<H>(source, options, sink)
+        parse_snapshot(self, source, options, sink)
     }
 
     fn resolve_locator(

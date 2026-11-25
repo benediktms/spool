@@ -118,3 +118,10 @@ kind = "claude"
 enabled = false
 roots = ["~/.claude/projects"]
 include_subagents = false
+
+[[sources]]
+id = "factory"
+kind = "factory"
+enabled = false
+roots = ["~/.factory/sessions"]
+include_subagents = false

@@ -137,7 +137,7 @@ impl SourceRegistry {
     pub(crate) fn session_source(&self, source_id: &str) -> Option<Box<dyn SessionSource>> {
         let entry = self.entry(source_id).filter(|entry| entry.enabled)?;
         match entry.kind {
-            HarnessKind::Omp | HarnessKind::Codex | HarnessKind::Claude => {
+            HarnessKind::Omp | HarnessKind::Codex | HarnessKind::Claude | HarnessKind::Factory => {
                 Some(Box::new(JsonlSessionSource::new(entry.roots)))
             }
             HarnessKind::OpenCode => None,

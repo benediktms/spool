@@ -1,0 +1,2 @@
+{"type":"session_start","id":"5ffdaa21-fac0-4000-8000-000000000002","version":2,"cwd":"/tmp/fixture-project","title":"Child fixture","callingSessionId":"5ffdaa21-fac0-4000-8000-000000000001","callingToolUseId":"call-child"}
+{"type":"message","id":"child1","seq":1,"timestamp":"2026-11-25T09:00:01.000Z","message":{"role":"assistant","content":[{"type":"text","text":"childamethyst"}]}}
