@@ -8,7 +8,7 @@ use crate::adapters::{AdapterError, HarnessAdapter};
 use crate::domain::{Digest, ResolvedRecord, SourceLocator};
 use crate::ipc::AppError;
 use crate::source::SourceError;
-use crate::source::opencode::{OpenCodeError, ProjectedMessage, ScanControl, lookup_message};
+use crate::source::opencode::{OpenCodeError, ScanControl, lookup_message};
 pub use crate::source::session::Observation;
 use crate::source::session::{ObservationProbe, SourceHandle};
 use crate::sources::SourceRegistry;
@@ -284,8 +284,9 @@ impl SourceCtx {
                 result.map_err(|e| native_error(e, remaining < self.max_record_bytes))
             })?;
         let bytes = message.as_ref().map_or(0, |message| message.source_bytes);
-        let record =
-            ProjectedMessage::verify(message, &digest).map_err(|e| native_error(e, false))?;
+        let record = message
+            .and_then(|message| message.verify(&digest))
+            .ok_or_else(|| ResolveFail::Fatal(source_changed()))?;
         Ok((record, bytes as u64))
     }
 

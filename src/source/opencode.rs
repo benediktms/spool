@@ -1,5 +1,6 @@
-//! OpenCode V2 SQLite discovery primitives.
+//! OpenCode V2 SQLite discovery and bounded record reads.
 
+use crate::adapters::opencode::{MessageProjection, ProjectedMessage, ProjectionError};
 use crate::storage::catalog::SourceRow;
 use crate::storage::index::Index;
 use rustix::fs::{AtFlags, FileType, statat};
@@ -28,6 +29,15 @@ pub(crate) enum OpenCodeError {
     Cancelled,
 }
 
+impl From<ProjectionError> for OpenCodeError {
+    fn from(error: ProjectionError) -> Self {
+        match error {
+            ProjectionError::Unsupported => Self::Unsupported,
+            ProjectionError::Limit => Self::Limit,
+        }
+    }
+}
+
 pub(crate) struct ScanControl<'a> {
     pub(crate) cancel: &'a AtomicBool,
     pub(crate) deadline: Option<Instant>,
@@ -54,44 +64,6 @@ pub(crate) struct Session {
     pub(crate) title: Option<String>,
     pub(crate) updated_at: i64,
     pub(crate) event_sequence: Option<i64>,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) struct ProjectedMessage {
-    pub(crate) id: String,
-    pub(crate) seq: i64,
-    pub(crate) role: String,
-    pub(crate) blocks: Vec<crate::domain::TextBlock>,
-    pub(crate) digest: [u8; 32],
-    pub(crate) source_bytes: usize,
-}
-
-impl ProjectedMessage {
-    pub(crate) fn verify(
-        message: Option<Self>,
-        expected: &crate::domain::Digest,
-    ) -> Result<crate::domain::ResolvedRecord, OpenCodeError> {
-        use crate::domain::{BlockKind, Fidelity, ResolvedBlock, ResolvedRecord};
-
-        let message = message
-            .filter(|message| &message.digest == expected)
-            .ok_or(OpenCodeError::Changed)?;
-        Ok(ResolvedRecord {
-            raw: Vec::new(),
-            digest: message.digest,
-            native_id: Some(message.id),
-            blocks: message
-                .blocks
-                .into_iter()
-                .map(|block| ResolvedBlock {
-                    index: block.index,
-                    kind: BlockKind::Text,
-                    fidelity: Fidelity::Verbatim,
-                    bytes: block.text.into_bytes(),
-                })
-                .collect(),
-        })
-    }
 }
 
 pub(crate) struct GuardedDb {
@@ -656,9 +628,7 @@ async fn project_filtered(
         let seq: i64 = row.try_get("seq")?;
         after = Some(seq);
         used += id.len() + role.len() + raw.len();
-        let value: serde_json::Value =
-            serde_json::from_str(&raw).map_err(|_| OpenCodeError::Unsupported)?;
-        let mut parts = Vec::<(i64, String, serde_json::Value)>::new();
+        let mut message = MessageProjection::new(id, seq, role, &raw)?;
         let mut ordinal: Option<i64> = None;
         loop {
             control.check()?;
@@ -667,7 +637,7 @@ async fn project_filtered(
                 "SELECT ordinal,CASE WHEN length(CAST(type AS BLOB))+length(CAST(data AS BLOB))<=?4 THEN type END AS type, \
                  CASE WHEN length(CAST(type AS BLOB))+length(CAST(data AS BLOB))<=?4 THEN data END AS data \
                  FROM session_part WHERE session_id=?1 AND message_id=?2 AND (?3 IS NULL OR ordinal>?3) ORDER BY ordinal LIMIT 1",
-            ).bind(session_id).bind(&id).bind(ordinal).bind(remaining).fetch_optional(&mut *tx).await?;
+            ).bind(session_id).bind(message.id()).bind(ordinal).bind(remaining).fetch_optional(&mut *tx).await?;
             let Some(part) = part else { break };
             let kind: Option<String> = part.try_get("type")?;
             let data: Option<String> = part.try_get("data")?;
@@ -678,71 +648,14 @@ async fn project_filtered(
             used += kind.len() + data.len();
             let n: i64 = part.try_get("ordinal")?;
             ordinal = Some(n);
-            let value = serde_json::from_str(&data).map_err(|_| OpenCodeError::Unsupported)?;
-            parts.push((n, kind, value));
+            message.push_part(n, kind, &data)?;
         }
-        let blocks = match role.as_str() {
-            "user" => text_block(0, &value)?.into_iter().collect(),
-            "assistant" => {
-                let inline = value
-                    .get("content")
-                    .and_then(serde_json::Value::as_array)
-                    .ok_or(OpenCodeError::Unsupported)?;
-                if !inline.is_empty() && !parts.is_empty() {
-                    return Err(OpenCodeError::Unsupported);
-                }
-                let mut blocks = Vec::new();
-                if parts.is_empty() {
-                    for (index, block) in inline.iter().enumerate() {
-                        if block.get("type").and_then(serde_json::Value::as_str) == Some("text") {
-                            let index = u32::try_from(index).map_err(|_| OpenCodeError::Limit)?;
-                            blocks.extend(text_block(index, block)?);
-                        }
-                    }
-                } else {
-                    for (ordinal, kind, block) in &parts {
-                        if kind == "text" {
-                            let index =
-                                u32::try_from(*ordinal).map_err(|_| OpenCodeError::Unsupported)?;
-                            blocks.extend(text_block(index, block)?);
-                        }
-                    }
-                }
-                blocks
-            }
-            _ => continue,
-        };
-        let canonical = serde_json::to_vec(&(1, session_id, &id, seq, &role, &value, &parts))
-            .map_err(|_| OpenCodeError::Unsupported)?;
-        output.push(ProjectedMessage {
-            id,
-            seq,
-            role,
-            blocks,
-            digest: crate::domain::digest(&canonical),
-            source_bytes: used - message_start,
-        });
+        output.extend(message.finish(session_id, used - message_start)?);
     }
     control.check()?;
     tx.commit().await?;
     db.checkpoint()?;
     Ok(output)
-}
-
-fn text_block(
-    index: u32,
-    value: &serde_json::Value,
-) -> Result<Option<crate::domain::TextBlock>, OpenCodeError> {
-    use crate::domain::{BlockOrigin, TextBlock};
-    let text = value
-        .get("text")
-        .and_then(serde_json::Value::as_str)
-        .ok_or(OpenCodeError::Unsupported)?;
-    Ok((!text.is_empty()).then(|| TextBlock {
-        index,
-        origin: BlockOrigin::Authored,
-        text: text.to_owned(),
-    }))
 }
 
 pub(crate) async fn open_session(
@@ -886,52 +799,6 @@ fn checked_lookup_error(db: &mut GuardedDb, error: OpenCodeError) -> OpenCodeErr
     }
 }
 
-pub(crate) fn emit_projection(
-    session_id: &str,
-    projection: Vec<ProjectedMessage>,
-    sink: &mut dyn crate::adapters::RecordSink,
-) -> Result<(), crate::adapters::SinkError> {
-    use crate::domain::{MessageEntry, RecordKind, RecordMeta, Role, SourceLocator};
-    let mut parent = None;
-    for item in projection {
-        if sink.cancelled().load(Ordering::Relaxed) {
-            return Err(crate::adapters::SinkError);
-        }
-        let role = match item.role.as_str() {
-            "user" => Role::User,
-            "assistant" => Role::Assistant,
-            _ => return Err(crate::adapters::SinkError),
-        };
-        let key = item.id;
-        sink.opencode_record(
-            RecordMeta {
-                key: key.clone(),
-                native_id: Some(key.clone()),
-                parent_key: parent,
-                kind: RecordKind::Message,
-                timestamp: None,
-                turn_id: None,
-                locator: SourceLocator { offset: 0, len: 0 },
-                digest: item.digest,
-            },
-            session_id,
-            &key,
-        )?;
-        if !item.blocks.is_empty() {
-            sink.message(MessageEntry {
-                record_key: key.clone(),
-                role,
-                phase: None,
-                blocks: item.blocks,
-                attachments: Vec::new(),
-                supersedes: Vec::new(),
-            })?;
-        }
-        parent = Some(key);
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1012,14 +879,11 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(found.digest, changed[2].digest);
-        assert!(matches!(
-            ProjectedMessage::verify(Some(found), &before),
-            Err(OpenCodeError::Changed)
-        ));
+        assert!(found.verify(&before).is_none());
         let found = lookup_message(&index, "oc", &path, "s", "split", 4096, &control)
             .await
             .unwrap();
-        let resolved = ProjectedMessage::verify(found, &changed[2].digest).unwrap();
+        let resolved = found.unwrap().verify(&changed[2].digest).unwrap();
         assert_eq!(
             resolved
                 .blocks
@@ -1031,10 +895,7 @@ mod tests {
         let absent = lookup_message(&index, "oc", &path, "s", "absent", 4096, &control)
             .await
             .unwrap();
-        assert!(matches!(
-            ProjectedMessage::verify(absent, &before),
-            Err(OpenCodeError::Changed)
-        ));
+        assert!(absent.is_none());
         assert!(matches!(
             lookup_message(&index, "oc", &path, "wrong", "split", 4096, &control).await,
             Err(OpenCodeError::UnsafeSource)

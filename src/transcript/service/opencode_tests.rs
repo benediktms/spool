@@ -1,8 +1,9 @@
 use super::*;
+use crate::adapters::opencode::ProjectedMessage;
 use crate::clock::ManualClock;
 use crate::config::SourceConfig;
 use crate::domain::HarnessKind;
-use crate::source::opencode::{self, ProjectedMessage, ScanControl};
+use crate::source::opencode::{self, ScanControl};
 use serde_json::json;
 use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{Connection, Executor, SqliteConnection};

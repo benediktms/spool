@@ -9,6 +9,7 @@ pub mod claude;
 pub mod codex;
 pub mod factory;
 pub mod omp;
+pub(crate) mod opencode;
 
 mod jsonl;
 mod lineage;
