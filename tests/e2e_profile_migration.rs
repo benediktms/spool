@@ -311,6 +311,99 @@ fn wait_for(what: &str, secs: u64, mut f: impl FnMut() -> bool) {
     }
 }
 
+fn prepare_three_session_migration(port: u16, log: &Log) -> (Env, String) {
+    let mut env = setup(port);
+    for n in 1..=3 {
+        let id = format!("s{n}");
+        std::fs::write(
+            env.src.join(format!("{id}.jsonl")),
+            session_jsonl(&id, &[&format!("Distinct vector backfill session {n}.")]),
+        )
+        .unwrap();
+    }
+    env.start();
+    let (ok, out) = cli(&env.home, &["index", "--since", "2026-10-12", "--wait"]);
+    assert!(ok, "{out}");
+    wait_for("three original vectors", 45, || {
+        json_cli(&env.home, &["status", "--json"])["queue"]["covered"] == 3
+    });
+    assert_eq!(log.lock().len(), 3);
+    let (_, original) = embedding_ids(&env.home);
+    env.stop();
+
+    env.set_model(MODEL_B, DIMS_B, (MODEL_A, DIMS_A));
+    let config = env.home.join("config.toml");
+    let mut cfg: toml::Table = std::fs::read_to_string(&config).unwrap().parse().unwrap();
+    cfg["ingestion"]["max_queued_sessions"] = toml::Value::Integer(2);
+    std::fs::write(config, toml::to_string(&cfg).unwrap()).unwrap();
+    (env, original)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn profile_backfill_continues_when_a_full_queue_drains() {
+    let (port, log) = fake_provider().await;
+    let (mut env, original) = prepare_three_session_migration(port, &log);
+    let batches_for = |model: &str| log.lock().iter().filter(|(m, _, _)| m == model).count();
+    env.start();
+    wait_for("first window of two backfill requests", 45, || {
+        batches_for(MODEL_B) >= 2
+    });
+    let first_window = Instant::now();
+    while batches_for(MODEL_B) == 2 {
+        assert!(
+            first_window.elapsed() < Duration::from_secs(15),
+            "profile backfill stalled at 2 of 3 requests for {:?}",
+            first_window.elapsed()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    eprintln!(
+        "next backfill window started within {:?}",
+        first_window.elapsed()
+    );
+    wait_for("automatic profile switch", 15, || {
+        let (target, active) = embedding_ids(&env.home);
+        target != original && target == active
+    });
+    assert_eq!(batches_for(MODEL_B), 3);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn profile_backfill_continuation_respects_the_hosted_ingestion_budget() {
+    let (port, log) = fake_provider().await;
+    let (mut env, original) = prepare_three_session_migration(port, &log);
+    let tokenizer = spool::embeddings::tokenizer::tokenizer();
+    let costs: Vec<usize> = log
+        .lock()
+        .iter()
+        .map(|(_, _, inputs)| {
+            assert_eq!(inputs.len(), 1);
+            tokenizer.count(&inputs[0])
+        })
+        .collect();
+    let cost = costs[0];
+    assert!(cost > 0 && costs.iter().all(|&n| n == cost), "{costs:?}");
+    let original_tokens = i64::try_from(log.lock().len()).unwrap() * 10;
+    let budget = i64::try_from(cost).unwrap() + original_tokens + 10;
+    env.set_ingestion_budget(budget);
+    env.start();
+    wait_for(
+        "last session deferred by its budget reservation",
+        30,
+        || json_cli(&env.home, &["status", "--json"])["queue"]["deferred"] == 1,
+    );
+    assert_eq!(
+        log.lock().iter().filter(|(m, _, _)| m == MODEL_B).count(),
+        2
+    );
+    let (target, active) = embedding_ids(&env.home);
+    assert_ne!(target, original);
+    assert_eq!(
+        active, original,
+        "the budget-deferred profile is incomplete"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn profile_change_keeps_old_queries_until_the_published_corpus_is_covered() {
     let (port, log) = fake_provider().await;

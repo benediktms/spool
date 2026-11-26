@@ -213,3 +213,14 @@ are retained in `/tmp/spool-search-v2-eval-worker/`.
 The controlled current-main versus complete-passage comparison includes three paired 15k-chunk release runs and one paired 100k stress run, with per-mode query counts, output volume, stage-timing limits and tail caveats in [search-evidence-comparison.md](search-evidence-comparison.md#paired-synthetic-performance). The 15k median lexical p95 was 8.1 ms on main and 10.4 ms on the candidate; the single 100k pair was 46.2 ms and 53.7 ms. These synthetic timings are not a general latency claim.
 
 On 2026-11-10, three read-only queries against a private index copy compared status coverage probes with and without the existing `embeddings_key` index hint using system SQLite 3.51.0. The embedded-chunk count was 10,783 in both cases: unhinted timings were 664, 126 and 132 ms; hinted timings were 12, 6 and 6 ms. The covered-session count was 676 in both cases: unhinted timings were 130, 111 and 124 ms; hinted timings were 8, 7 and 7 ms. Connections had cold SQLite page caches but uncontrolled OS caches and host contention. These samples do not establish live daemon latency or explain all observed status delays.
+
+## Vector backfill scheduling smoke (2026-11-26)
+
+The real debug daemon migrated three synthetic sessions with `max_queued_sessions = 2` and a
+loopback fake provider. The old scheduler was still at two requests when the 15-second
+observation ended. With the fix, the third request was observed about 5.1 seconds after the
+first window was observed, and the new profile activated without a manual rebuild.
+These are single smoke observations with test polling and unmeasured host contention, not
+provider throughput measurements.
+
+Reproduce with `cargo test --locked --test e2e_profile_migration profile_backfill_continues -- --nocapture`.
