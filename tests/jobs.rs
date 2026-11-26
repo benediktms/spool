@@ -6,10 +6,11 @@ mod jobs_common;
 use jobs_common::*;
 use serde_json::json;
 use spool::embeddings::fake::Fault;
+use spool::ingest::engine::IndexRequest;
 use spool::jobs::WorkerState;
 use spool::jobs::payload::*;
 use spool::jobs::scheduler::{
-    RETRY_CAP, Reconciler, backoff_delay, interleave, jitter_from, retry_delay,
+    RETRY_CAP, Reconciler, SLOW_SCAN_EVERY_MS, backoff_delay, interleave, jitter_from, retry_delay,
 };
 use spool::storage::catalog;
 use std::sync::Arc;
@@ -1124,6 +1125,158 @@ async fn reconciliation_finds_incomplete_embedding_coverage_only_when_the_provid
     let r2 = reconciler(&env);
     let rep = r2.pass().await.unwrap();
     assert_eq!(rep.submitted, 1, "{rep:?}");
+}
+
+async fn seed_missing_vectors(env: &Env, sessions: i64) {
+    for i in 0..sessions {
+        env.omp(
+            &format!("vector-{i}.jsonl"),
+            &format!("vector-{i}"),
+            &[&format!("distinct text for vector backfill session {i}")],
+            T0 - DAY,
+        );
+    }
+    let sys = env.start().await;
+    wait_until(45, "original vectors", || async {
+        env.count("SELECT count(*) FROM embeddings").await == sessions
+    })
+    .await;
+    sys.shutdown(Duration::from_secs(15)).await;
+    sqlx::query("DELETE FROM embeddings")
+        .execute(&env.index.writer)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn vector_backfill_continues_past_the_submit_window_without_advancing_the_clock() {
+    const SESSIONS: i64 = 65;
+    let env = Env::new().await;
+    seed_missing_vectors(&env, SESSIONS).await;
+
+    let sys = env.start().await;
+    wait_until(45, "first backfill window", || async {
+        env.count("SELECT count(*) FROM embeddings").await >= 64
+    })
+    .await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let covered = env.count("SELECT count(*) FROM embeddings").await;
+        if covered == SESSIONS {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "vector backfill stalled at {covered}/{SESSIONS} with the clock held fixed"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    sys.shutdown(Duration::from_secs(15)).await;
+}
+
+async fn finish_next_ingest_task(env: &Env) {
+    let (session_id, task_id): (String, String) = sqlx::query_as(
+        "SELECT id, task_id FROM sessions WHERE task_id IS NOT NULL ORDER BY id LIMIT 1",
+    )
+    .fetch_one(&env.index.reader)
+    .await
+    .unwrap();
+    env.engine
+        .index_session(
+            IndexRequest {
+                session_id: session_id.clone(),
+                observed_source_revision: None,
+                fingerprint: None,
+            },
+            Arc::new(Default::default()),
+        )
+        .await
+        .unwrap();
+    sqlx::query("UPDATE Jobs SET status = 'Done' WHERE id = ?")
+        .bind(task_id)
+        .execute(&env.jobs_pool)
+        .await
+        .unwrap();
+    catalog::set_task(&env.index, &session_id, None)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn vector_backfill_waits_for_drain_and_restores_the_normal_scan_cadence() {
+    let env = Env::with(|c| c.ingestion.max_queued_sessions = 2).await;
+    seed_missing_vectors(&env, 3).await;
+    let r = reconciler(&env);
+
+    assert_eq!(r.pass().await.unwrap().submitted, 2);
+    finish_next_ingest_task(&env).await;
+    let partial = r.pass().await.unwrap();
+    assert_eq!(partial.live, 1);
+    assert_eq!(partial.room, 1);
+    assert_eq!(partial.submitted, 0, "one slot free is not a drained queue");
+    finish_next_ingest_task(&env).await;
+    assert_eq!(r.pass().await.unwrap().submitted, 1);
+    finish_next_ingest_task(&env).await;
+    assert_eq!(env.count("SELECT count(*) FROM embeddings").await, 3);
+
+    sqlx::query(
+        "DELETE FROM embeddings WHERE input_hash IN (SELECT input_hash FROM embeddings LIMIT 2)",
+    )
+    .execute(&env.index.writer)
+    .await
+    .unwrap();
+    env.clock.advance_ms(SLOW_SCAN_EVERY_MS - 1);
+    assert_eq!(r.pass().await.unwrap().submitted, 0);
+    env.clock.advance_ms(1);
+    assert_eq!(r.pass().await.unwrap().submitted, 2);
+    finish_next_ingest_task(&env).await;
+    finish_next_ingest_task(&env).await;
+    env.clock.advance_ms(1);
+    assert_eq!(r.pass().await.unwrap().submitted, 0);
+
+    sqlx::query(
+        "DELETE FROM embeddings WHERE input_hash = (SELECT input_hash FROM embeddings LIMIT 1)",
+    )
+    .execute(&env.index.writer)
+    .await
+    .unwrap();
+    env.clock.advance_ms(SLOW_SCAN_EVERY_MS - 1);
+    assert_eq!(r.pass().await.unwrap().submitted, 0);
+    env.clock.advance_ms(1);
+    assert_eq!(r.pass().await.unwrap().submitted, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_full_window_of_ordinary_indexing_does_not_accelerate_slow_scans() {
+    let env = Env::with(|c| c.ingestion.max_queued_sessions = 2).await;
+    for i in 0..2 {
+        env.omp(
+            &format!("normal-{i}.jsonl"),
+            &format!("normal-{i}"),
+            &[&format!("ordinary session {i}")],
+            T0 - DAY,
+        );
+    }
+    spool::discovery::DiscoveryService::new(
+        env.index.clone(),
+        env.sources.clone(),
+        env.cfg.clone(),
+        env.shared.clone(),
+    )
+    .run_auto("omp", Arc::new(Default::default()))
+    .await
+    .unwrap();
+    let r = reconciler(&env);
+    assert_eq!(r.pass().await.unwrap().submitted, 2);
+    finish_next_ingest_task(&env).await;
+    finish_next_ingest_task(&env).await;
+    assert_eq!(env.count("SELECT count(*) FROM embeddings").await, 2);
+
+    sqlx::query("DELETE FROM embeddings")
+        .execute(&env.index.writer)
+        .await
+        .unwrap();
+    assert_eq!(r.pass().await.unwrap().submitted, 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

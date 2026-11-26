@@ -26,7 +26,7 @@ use std::time::Duration;
 /// Unstarted index tasks kept in the queue at once. Start order is FIFO, so keeping the backlog
 /// short is what makes the 4:1 interleave (`interleave`) effective for newly active sessions.
 pub const SUBMIT_WINDOW: i64 = 64;
-/// Slow scans (stale revision, vector gaps) run at most this often.
+/// Normal cadence of slow scans (stale revision, vector gaps).
 pub const SLOW_SCAN_EVERY_MS: i64 = 15 * 60 * 1000;
 /// An operation that never reached its Apalis task is failed after this long.
 pub const UNACCEPTED_OP_MS: i64 = 5 * 60 * 1000;
@@ -319,7 +319,7 @@ pub struct Reconciler {
     last_slow: AtomicU64,
     last_usable: std::sync::atomic::AtomicBool,
     repair_cursor: Mutex<String>,
-    run: tokio::sync::Mutex<()>,
+    continue_after_drain: tokio::sync::Mutex<bool>,
     pub notify: tokio::sync::Notify,
 }
 
@@ -351,7 +351,7 @@ impl Reconciler {
             last_slow: AtomicU64::new(0),
             last_usable: std::sync::atomic::AtomicBool::new(false),
             repair_cursor: Mutex::new(String::new()),
-            run: tokio::sync::Mutex::new(()),
+            continue_after_drain: tokio::sync::Mutex::new(false),
             notify: tokio::sync::Notify::new(),
         }
     }
@@ -367,7 +367,7 @@ impl Reconciler {
     }
 
     pub async fn pass(&self) -> Result<PassReport, AppError> {
-        let _g = self.run.lock().await;
+        let mut continue_after_drain = self.continue_after_drain.lock().await;
         let now = self.clock.now_ms();
         let mut rep = PassReport {
             finished_operations: self.settle_operations(now).await?,
@@ -386,12 +386,14 @@ impl Reconciler {
             return Ok(rep);
         }
         let slow_due = now - self.last_slow.load(Ordering::Relaxed) as i64 >= SLOW_SCAN_EVERY_MS
-            || (usable && !self.last_usable.load(Ordering::Relaxed));
+            || (usable
+                && (!self.last_usable.load(Ordering::Relaxed)
+                    || (*continue_after_drain && rep.live == 0)));
         if slow_due {
             self.last_slow.store(now as u64, Ordering::Relaxed);
         }
         self.last_usable.store(usable, Ordering::Relaxed);
-        let (active, backfill) = (
+        let ((active, active_gaps), (backfill, backfill_gaps)) = (
             self.candidates(now, usable, slow_due, &status.profile_id, true, rep.room)
                 .await?,
             self.candidates(now, usable, slow_due, &status.profile_id, false, rep.room)
@@ -402,7 +404,8 @@ impl Reconciler {
             interleave(active, backfill, &mut c)
         };
         let fingerprint = self.engine.pipeline_fingerprint();
-        for cand in order.into_iter().take(rep.room as usize) {
+        let room = rep.room as usize;
+        for cand in order.into_iter().take(room) {
             match self
                 .submit_candidate(&cand, &fingerprint, &status.profile_id)
                 .await
@@ -413,6 +416,9 @@ impl Reconciler {
                     break;
                 }
             }
+        }
+        if slow_due {
+            *continue_after_drain = (active_gaps || backfill_gaps) && rep.submitted == room;
         }
         Ok(rep)
     }
@@ -444,7 +450,7 @@ impl Reconciler {
         Ok(())
     }
 
-    /// Candidate sessions of one start class, newest activity first.
+    /// Candidate sessions of one start class, newest activity first, and whether any have a vector gap.
     async fn candidates(
         &self,
         now: i64,
@@ -453,24 +459,29 @@ impl Reconciler {
         profile: &str,
         priority: bool,
         limit: i64,
-    ) -> Result<Vec<Candidate>, AppError> {
+    ) -> Result<(Vec<Candidate>, bool), AppError> {
+        const VECTOR_GAP: &str = "(?3 = 1 AND s.index_state = 'indexed' AND s.active_snapshot_id IS NOT NULL \
+            AND EXISTS (SELECT 1 FROM chunks c WHERE c.snapshot_id = s.active_snapshot_id \
+            AND NOT EXISTS (SELECT 1 FROM embeddings e WHERE e.profile_id = ?4 AND e.input_hash = c.input_hash)))";
         let class = if priority {
             "s.eligibility IN ('bootstrap','active')"
         } else {
             "s.eligibility = 'manual'"
         };
+        let vector_gap = if slow && usable { VECTOR_GAP } else { "0" };
         let slow_clause = if slow {
-            " OR (?3 = 1 AND s.index_state = 'indexed' AND s.active_snapshot_id IS NOT NULL AND EXISTS (SELECT 1 FROM chunks c WHERE c.snapshot_id = s.active_snapshot_id \
-              AND NOT EXISTS (SELECT 1 FROM embeddings e WHERE e.profile_id = ?4 AND e.input_hash = c.input_hash))) \
+            format!(
+                " OR {vector_gap} \
               OR (s.index_state = 'indexed' AND NOT EXISTS (SELECT 1 FROM snapshots sn WHERE sn.id = s.active_snapshot_id \
                AND ((src.kind = 'opencode' AND sn.source_revision = ('opencode_sqlite_v1:' || n.event_sequence)) \
                  OR (src.kind != 'opencode' AND sn.source_revision LIKE (f.size || ':' || f.mtime_ms || ':' || f.dev || ':' || f.ino || ':%'))))) \
               OR (s.index_state = 'empty' AND s.empty_source_revision NOT LIKE (f.size || ':' || f.mtime_ms || ':' || f.dev || ':' || f.ino || ':%'))"
+            )
         } else {
-            ""
+            String::new()
         };
         let sql = format!(
-            "SELECT s.id, s.operation_id, f.size, f.mtime_ms, f.dev, f.ino, src.kind, n.event_sequence \
+            "SELECT s.id, s.operation_id, f.size, f.mtime_ms, f.dev, f.ino, src.kind, n.event_sequence, {vector_gap} AS vector_gap \
              FROM sessions s JOIN sources src ON src.id = s.source_id \
              LEFT JOIN source_files f ON f.session_id = s.id \
              LEFT JOIN native_session_observations n ON n.session_id = s.id \
@@ -490,7 +501,8 @@ impl Reconciler {
             .fetch_all(&self.index.reader)
             .await
             .map_err(backend_err)?;
-        Ok(rows
+        let has_vector_gap = rows.iter().any(|r| r.get::<bool, _>("vector_gap"));
+        let candidates = rows
             .iter()
             .map(|r| Candidate {
                 id: r.get("id"),
@@ -506,7 +518,8 @@ impl Reconciler {
                     )
                 },
             })
-            .collect())
+            .collect();
+        Ok((candidates, has_vector_gap))
     }
 
     /// Sessions whose recorded task no longer exists or finished without settling the session

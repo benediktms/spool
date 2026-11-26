@@ -592,6 +592,8 @@ There is no transaction spanning `jobs.sqlite` and `index.sqlite`. Handle both w
 
 Reconciliation scans known sessions for unpublished source changes, incomplete embedding coverage, and interrupted staging work. It respects permanent errors, exclusions, and provider-blocked state rather than retrying every broken session on every timer tick.
 
+When a slow scan finds vector gaps and fills the submission window, reconciliation scans again after the ingestion queue drains. Short or empty scans return to the normal cadence. This does not change worker-side provider limits or token reservations.
+
 ### 11.5 IndexSession execution
 
 The handler performs the following logical steps:
