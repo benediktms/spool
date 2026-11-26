@@ -2,13 +2,14 @@
 //! bounded async batched inserts (spec 5.7, 8, 10.4). Nothing here is visible to readers until
 //! `publish` switches `sessions.active_snapshot_id`.
 
+use crate::adapters::opencode::{ProjectedMessage, emit_projection};
 use crate::adapters::{AdapterError, ParseOptions, RecordSink, SinkError, adapter_for};
 use crate::clock::SharedClock;
 use crate::config::{Config, IngestionConfig};
 use crate::domain::*;
 use crate::graph::SessionGraph;
 use crate::ids::new_id;
-use crate::source::opencode::{self, GuardedDb, OpenCodeError, ProjectedMessage, ScanControl};
+use crate::source::opencode::{self, GuardedDb, OpenCodeError, ScanControl};
 pub use crate::source::revision4;
 use crate::source::{ObservationChange, SourceError};
 use crate::sources::SourceRegistry;
@@ -658,7 +659,7 @@ mod opencode_tests {
                 handle,
                 cancel,
             };
-            opencode::emit_projection("native", projection, &mut sink)
+            emit_projection("native", projection, &mut sink)
         });
         let mut ins = Inserter::new(&index, "snap");
         consume(&mut ins, rx).await.unwrap();
@@ -1000,7 +1001,7 @@ pub(crate) fn emit_native(
     projection: Vec<ProjectedMessage>,
     sink: &mut dyn RecordSink,
 ) -> Result<(), StageError> {
-    opencode::emit_projection(native_id, projection, sink).map_err(|_| {
+    emit_projection(native_id, projection, sink).map_err(|_| {
         if sink.cancelled().load(Ordering::Relaxed) {
             StageError::Cancelled
         } else {
